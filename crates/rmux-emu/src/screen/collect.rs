@@ -101,6 +101,13 @@ impl ScreenWriteCtx<'_> {
         item.x = x;
         let used = item.used;
         let gc = item.gc;
+        #[cfg(feature = "sixel")]
+        {
+            let changed = self
+                .images
+                .check_area(self.screen.image_owner(), x, y, used, 1);
+            self.image_redraw(changed);
+        }
         self.insert_item(y, item);
         let mut bx = x;
         if x != 0 {

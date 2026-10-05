@@ -42,6 +42,7 @@ ids!(
     PaneId,
     ClientId,
     LayoutCellId,
+    ModeTreeItemId,
     SessionGroupId,
     OptionsId,
     QueueItemId,
@@ -55,6 +56,8 @@ ids!(
     EditorId,
     MonitorSetId,
     HooksMonitorId,
+    TimerId,
+    EventToken,
     PasteBufferId
 );
 
@@ -184,6 +187,10 @@ impl<T, I: ArenaId> Arena<T, I> {
             .checked_add(1)
             .ok_or(ArenaError::LeaseOverflow)?;
         Ok(())
+    }
+    /// Live lease count (`c->references` for logging), `None` for a stale id.
+    pub fn leases(&self, id: I) -> Option<u32> {
+        self.slot(id).map(|slot| slot.leases)
     }
     pub fn release(&mut self, id: I) -> Result<Option<T>, ArenaError> {
         let slot = self.slot_mut(id)?;

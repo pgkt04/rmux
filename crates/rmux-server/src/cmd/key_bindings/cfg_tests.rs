@@ -16,6 +16,7 @@
  */
 
 use super::*;
+use crate::cmd::cfg::CfgViewError;
 use crate::cmd::key_bindings::test_support::Context;
 use crate::ids::ArenaId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -48,6 +49,9 @@ struct Runtime {
     effects: Vec<&'static str>,
     view: bool,
     entered: usize,
+    view_unavailable: bool,
+    view_append_failure: bool,
+    fallback: Vec<(Option<ClientId>, ByteString)>,
     viewed: Vec<ByteString>,
     notifications: Vec<(ClientId, ByteString)>,
     printed: Vec<(QueueItemId, ByteString)>,
@@ -118,15 +122,26 @@ impl CfgRuntime for Runtime {
     fn pane_top_is_view(&self, _p: PaneId) -> bool {
         self.view
     }
-    fn enter_view_mode(&mut self, p: PaneId) {
+    fn enter_view_mode(&mut self, p: PaneId) -> Result<(), CfgViewError> {
         assert_eq!(p, pane());
+        if self.view_unavailable {
+            return Err(CfgViewError::Unavailable);
+        }
         self.view = true;
         self.entered += 1;
+        Ok(())
     }
-    fn append_view_line(&mut self, p: PaneId, line: &[u8]) {
+    fn append_view_line(&mut self, p: PaneId, line: &[u8]) -> Result<(), CfgViewError> {
         assert_eq!(p, pane());
+        if self.view_append_failure {
+            return Err(CfgViewError::Model(crate::model::ModelError::StaleId));
+        }
         self.effects.push("cause");
         self.viewed.push(line.into());
+        Ok(())
+    }
+    fn print_cfg_fallback(&mut self, client: Option<ClientId>, cause: &[u8]) {
+        self.fallback.push((client, cause.into()));
     }
     fn notify_config_error(&mut self, c: ClientId, cause: &[u8]) {
         self.notifications.push((c, cause.into()));
@@ -540,4 +555,49 @@ fn spec_section_2_11_finish_shows_causes_before_unblocking_and_prompt_history() 
     assert!(empty.item.is_none());
     assert_eq!(runtime.callbacks.len(), count + 1);
     assert_eq!(runtime.callbacks.last().unwrap().1, CfgCallback::Done);
+}
+
+#[test]
+fn unavailable_view_prints_every_cause_instead_of_losing_them() {
+    let mut cfg = CfgState::default();
+    cfg.add_cause("first".into());
+    cfg.add_cause("second".into());
+    let mut runtime = Runtime {
+        clients: vec![client(1)],
+        sessions: vec![session(1)],
+        attached: BTreeSet::from([session(1)]),
+        view_unavailable: true,
+        ..Runtime::default()
+    };
+    cfg.show_causes(&mut runtime, None);
+    assert!(cfg.causes.is_empty());
+    assert!(runtime.viewed.is_empty());
+    assert_eq!(
+        runtime.fallback,
+        vec![
+            (Some(client(1)), ByteString::from("first")),
+            (Some(client(1)), ByteString::from("second")),
+        ]
+    );
+    assert_eq!(
+        CfgViewError::Unavailable.to_string(),
+        "view mode unavailable"
+    );
+    runtime.clients.clear();
+    cfg.add_cause("without-client".into());
+    cfg.show_causes(&mut runtime, Some(session(1)));
+    assert_eq!(
+        runtime.fallback.last(),
+        Some(&(None, ByteString::from("without-client")))
+    );
+    assert!(cfg.causes.is_empty());
+    runtime.view = true;
+    runtime.view_append_failure = true;
+    cfg.add_cause("append-failed".into());
+    cfg.show_causes(&mut runtime, Some(session(1)));
+    assert_eq!(
+        runtime.fallback.last(),
+        Some(&(None, ByteString::from("append-failed")))
+    );
+    assert!(cfg.causes.is_empty());
 }

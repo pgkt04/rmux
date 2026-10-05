@@ -894,7 +894,11 @@ impl Oracle {
 
 impl Drop for Oracle {
     fn drop(&mut self) {
-        let _ = self.run(&[b"kill-server"]);
+        let _ = ProcessCommand::new(&self.binary)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
         let _ = std::fs::remove_dir_all(&self.directory);
     }
 }

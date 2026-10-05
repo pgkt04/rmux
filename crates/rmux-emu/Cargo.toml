@@ -10,3 +10,7 @@ workspace = true
 
 [dependencies]
 rmux-util.workspace = true
+
+[features]
+# tmux --enable-sixel; off by default like the stock build.
+sixel = []

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 pub mod client;
 pub mod cmd;
+pub mod control;
 pub mod format;
 pub mod ids;
 pub mod layout;

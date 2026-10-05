@@ -463,17 +463,20 @@ impl Oracle {
             std::process::id(),
             std::thread::current().id()
         ));
+        let oracle = Oracle { socket };
         let status = Command::new(ORACLE)
             .env_remove("VISUAL")
             .env_remove("EDITOR")
             .env_remove("TMUX")
             .env("SHELL", "/bin/sh")
-            .args(["-S", socket.to_str().unwrap(), "-f", "/dev/null"])
+            .arg("-S")
+            .arg(&oracle.socket)
+            .args(["-f", "/dev/null"])
             .args(["new-session", "-d", "-x", "80", "-y", "24"])
             .status()
             .expect("start oracle");
         assert!(status.success());
-        Some(Oracle { socket })
+        Some(oracle)
     }
 
     fn run(&self, args: &[&str]) -> Vec<String> {
@@ -492,7 +495,9 @@ impl Oracle {
 impl Drop for Oracle {
     fn drop(&mut self) {
         let _ = Command::new(ORACLE)
-            .args(["-S", self.socket.to_str().unwrap(), "kill-server"])
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
             .status();
     }
 }

@@ -107,6 +107,7 @@ impl std::ops::Not for CommandListPrintFlags {
 
 pub mod arguments;
 pub mod cfg;
+pub mod commands;
 pub mod find;
 pub mod hooks;
 pub mod key_bindings;
@@ -460,18 +461,32 @@ mod tests {
         let root = std::env::temp_dir().join(format!("rmux-g11-commands-{}", std::process::id()));
         std::fs::create_dir_all(&root).expect("oracle private directory");
         let socket = root.join("socket");
-        let output = std::process::Command::new(&oracle)
+        struct Cleanup {
+            oracle: std::path::PathBuf,
+            socket: std::path::PathBuf,
+            root: std::path::PathBuf,
+        }
+        impl Drop for Cleanup {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new(&self.oracle)
+                    .arg("-S")
+                    .arg(&self.socket)
+                    .arg("kill-server")
+                    .output();
+                let _ = std::fs::remove_dir_all(&self.root);
+            }
+        }
+        let cleanup = Cleanup {
+            oracle,
+            socket,
+            root,
+        };
+        let output = std::process::Command::new(&cleanup.oracle)
             .arg("-S")
-            .arg(&socket)
+            .arg(&cleanup.socket)
             .args(["-f/dev/null", "list-commands"])
             .output()
             .expect("oracle list-commands");
-        let _ = std::process::Command::new(&oracle)
-            .arg("-S")
-            .arg(&socket)
-            .arg("kill-server")
-            .output();
-        let _ = std::fs::remove_dir_all(root);
         assert!(
             output.status.success(),
             "{}",

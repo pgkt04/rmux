@@ -138,6 +138,53 @@ pub struct ResultEntry {
     pub mapped: bool,
 }
 
+struct SocketCleanup<'a> {
+    binary: &'a Path,
+    sockets: &'a Path,
+    test_name: &'a str,
+    finished: bool,
+}
+
+impl SocketCleanup<'_> {
+    fn finish(&mut self) -> io::Result<()> {
+        if let Ok(recorded) = fs::read_to_string(self.sockets) {
+            for socket in recorded.lines().collect::<BTreeSet<_>>() {
+                let mut cleanup = Command::new(self.binary)
+                    .args(["-S", socket, "kill-server"])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()?;
+                let start = Instant::now();
+                while cleanup.try_wait()?.is_none() {
+                    if start.elapsed() >= Duration::from_secs(5) {
+                        cleanup.kill()?;
+                        cleanup.wait()?;
+                        return Err(io::Error::new(
+                            io::ErrorKind::TimedOut,
+                            format!("socket cleanup timed out: {socket}"),
+                        ));
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
+                if self.test_name == "socket-path.sh" && socket.contains("/testSP") {
+                    let _ = fs::remove_file(socket);
+                    let _ = fs::remove_file(format!("{socket}.lock"));
+                }
+            }
+        }
+        self.finished = true;
+        Ok(())
+    }
+}
+
+impl Drop for SocketCleanup<'_> {
+    fn drop(&mut self) {
+        if !self.finished {
+            let _ = self.finish();
+        }
+    }
+}
+
 pub fn run_test(
     binary: &Path,
     script: &Path,
@@ -146,18 +193,26 @@ pub fn run_test(
     rmux: bool,
     test: &Test,
 ) -> io::Result<ResultEntry> {
-    if rmux && test.category == Category::Adapted {
-        return Ok(ResultEntry {
-            name: test.name.clone(),
-            category: test.category,
-            status: "needs-fixture".into(),
-            exit_code: None,
-            elapsed_ms: 0,
-            stdout: String::new(),
-            stderr: "raw tmux imsg test requires a P7 rmux protocol fixture".into(),
-            mapped: false,
-        });
-    }
+    let adapted_script = if rmux && test.category == Category::Adapted {
+        let source = match test.name.as_str() {
+            "cfg-client-lost-before-wait.sh" => {
+                include_str!("../fixtures/cfg-client-lost-before-wait.sh")
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "unknown adapted regression",
+                ));
+            }
+        };
+        fs::create_dir_all(work)?;
+        let path = work.join("adapted-test.sh");
+        fs::write(&path, source)?;
+        Some(path)
+    } else {
+        None
+    };
+    let script = adapted_script.as_deref().unwrap_or(script);
     fs::create_dir_all(work)?;
     let out_path = work.join("stdout");
     let err_path = work.join("stderr");
@@ -182,6 +237,12 @@ pub fn run_test(
     )?;
     use std::os::unix::{fs::PermissionsExt, process::CommandExt};
     fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700))?;
+    let mut cleanup = SocketCleanup {
+        binary,
+        sockets: &sockets,
+        test_name: &test.name,
+        finished: false,
+    };
     let start = Instant::now();
     let mut child = Command::new("sh")
         .arg(script)
@@ -216,31 +277,7 @@ pub fn run_test(
         }
         thread::sleep(Duration::from_millis(20));
     };
-    if let Ok(recorded) = fs::read_to_string(&sockets) {
-        for socket in recorded.lines().collect::<BTreeSet<_>>() {
-            let mut cleanup = Command::new(binary)
-                .args(["-S", socket, "kill-server"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-            let cleanup_start = Instant::now();
-            while cleanup.try_wait()?.is_none() {
-                if cleanup_start.elapsed() >= Duration::from_secs(5) {
-                    cleanup.kill()?;
-                    cleanup.wait()?;
-                    return Err(io::Error::new(
-                        io::ErrorKind::TimedOut,
-                        format!("socket cleanup timed out: {socket}"),
-                    ));
-                }
-                thread::sleep(Duration::from_millis(10));
-            }
-            if test.name == "socket-path.sh" && socket.contains("/testSP") {
-                let _ = fs::remove_file(socket);
-                let _ = fs::remove_file(format!("{socket}.lock"));
-            }
-        }
-    }
+    cleanup.finish()?;
     Ok(ResultEntry {
         name: test.name.clone(),
         category: test.category,
@@ -289,7 +326,7 @@ mod tests {
         );
     }
     #[test]
-    fn timeout_is_reported_and_fixture_is_not_run() {
+    fn timeout_is_reported_and_unknown_fixture_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
         let script = tmp.path().join("test.sh");
         fs::write(&script, "sleep 1\n").unwrap();
@@ -315,9 +352,8 @@ mod tests {
             Duration::from_millis(50),
             true,
             &test,
-        )
-        .unwrap();
-        assert_eq!(result.status, "needs-fixture");
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidInput);
         assert!(!tmp.path().join("fixture").exists());
     }
 }

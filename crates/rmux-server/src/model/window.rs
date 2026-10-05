@@ -17,7 +17,6 @@ pub enum WindowEffect {
     Status(WindowId),
     UpdateOffset(WindowId),
     CancelTimers(WindowId),
-    DestroyMenu(WindowId),
     Renamed {
         window: WindowId,
         old: Vec<u8>,
@@ -110,6 +109,13 @@ pub fn window_create(
         name_timer_pending: false,
         focused: false,
         menu_active: false,
+        menu: None,
+        menu_last_px: 0,
+        menu_last_py: 0,
+        inside_cell: rmux_emu::cell::DEFAULT_CELL,
+        outside_cell: rmux_emu::cell::DEFAULT_CELL,
+        redraw_scene_generation: 0,
+        damage: crate::ui::redraw::RedrawDamages::new(),
     };
     let id = server.windows.insert(w)?;
     server.windows.retain(id)?;
@@ -186,7 +192,7 @@ pub fn window_destroy(server: &mut Server, id: WindowId) -> Result<(), ModelErro
     };
     layout::free_cell(server, root, false);
     layout::free_cell(server, saved, false);
-    effect(server, WindowEffect::DestroyMenu(id));
+    crate::ui::menu::menu_destroy(server, id);
     window_destroy_panes(server, id)?;
     effect(server, WindowEffect::CancelTimers(id));
     let options = server.windows.get(id).ok_or(ModelError::StaleId)?.options;
@@ -246,7 +252,8 @@ pub fn window_resize(
         PixelUpdate::Default => w.ypixel = 32,
         PixelUpdate::Set(v) => w.ypixel = v,
     }
-    if w.menu_active {
+    if let Some(md) = w.menu.as_mut() {
+        crate::ui::menu::menu_resize(md, sx, sy);
         effect(server, WindowEffect::Redraw(id));
     }
     effect(server, WindowEffect::InvalidateScene(id));
@@ -436,9 +443,9 @@ pub fn window_set_active_pane(
     if unzoomed {
         window_unzoom(server, window, true)?;
     }
+    window_pane_stack_remove(server, pane);
     let w = server.windows.get_mut(window).ok_or(ModelError::StaleId)?;
     let old = w.active;
-    w.last.retain(|p| *p != pane);
     if let Some(old) = old {
         w.last.retain(|p| *p != old);
         w.last.insert(0, old);
@@ -976,6 +983,86 @@ pub fn window_fire_pane_moved(
         },
     );
     server.emit(b"pane-moved", None, Some(new_window), Some(pane));
+}
+
+/// `window_pane_stack_remove` (`window.c:2472-2478`). `TAILQ_REMOVE` unlinks the
+/// pane from whichever window's `last_panes` list holds it (swap-pane moves a
+/// visited pane between windows before removing it), so every list is checked.
+pub fn window_pane_stack_remove(server: &mut Server, wp: PaneId) {
+    let Some(pane) = server.panes.get_mut(wp) else {
+        return;
+    };
+    if !pane.flags.contains(PaneFlags::VISITED) {
+        return;
+    }
+    pane.flags.remove(PaneFlags::VISITED);
+    let ids: Vec<WindowId> = server.window_ids.values().copied().collect();
+    for id in ids {
+        if let Some(w) = server.windows.get_mut(id) {
+            w.last.retain(|&p| p != wp);
+        }
+    }
+}
+
+/// `window_damage_floating_pane` (`window.c:2990-3016`): border and scrollbar included.
+fn window_damage_floating_pane(
+    server: &mut Server,
+    wp: PaneId,
+    xoff: i32,
+    yoff: i32,
+    sx: i32,
+    sy: i32,
+) {
+    let Some(pane) = server.panes.get(wp) else {
+        return;
+    };
+    let window = pane.window;
+    let style = pane.scrollbar_style;
+    let Some(w) = server.windows.get(window) else {
+        return;
+    };
+    let (mut sb_left, mut sb_right) = (0, 0);
+    if pane_scrollbar_reserve(server, wp) {
+        if w.sb_pos == PaneScrollbarPosition::Left {
+            sb_left = style.width + style.pad;
+        } else {
+            sb_right = style.width + style.pad;
+        }
+    }
+    let x0 = (xoff - 1 - sb_left).max(0);
+    let x1 = xoff + sx + sb_right;
+    let y0 = (yoff - 1).max(0);
+    let y1 = yoff + sy;
+    if x1 >= x0
+        && y1 >= y0
+        && let Some(w) = server.windows.get_mut(window)
+    {
+        crate::ui::redraw::redraw_damage_window(
+            w,
+            x0 as u32,
+            y0 as u32,
+            (x1 - x0) as u32 + 1,
+            (y1 - y0) as u32 + 1,
+        );
+    }
+}
+
+/// `window_redraw_floating_pane` (`window.c:3018-3026`): damage old and new areas, then status.
+pub fn window_redraw_floating_pane(
+    server: &mut Server,
+    wp: PaneId,
+    oxoff: i32,
+    oyoff: i32,
+    osx: u32,
+    osy: u32,
+) {
+    window_damage_floating_pane(server, wp, oxoff, oyoff, osx as i32, osy as i32);
+    let Some(pane) = server.panes.get(wp) else {
+        return;
+    };
+    let (window, xoff, yoff, sx, sy) = (pane.window, pane.xoff, pane.yoff, pane.sx, pane.sy);
+    window_damage_floating_pane(server, wp, xoff, yoff, sx as i32, sy as i32);
+    effect(server, WindowEffect::Status(window));
 }
 
 #[cfg(test)]

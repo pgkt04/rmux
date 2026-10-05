@@ -78,3 +78,6 @@ impl TryFrom<i32> for PaneModeKind {
         }
     }
 }
+
+pub mod command;
+pub use command::{CommandModeRequest, run_mode_command};

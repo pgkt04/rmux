@@ -15,7 +15,12 @@
  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+pub mod border;
+pub mod fanout;
 pub mod menu;
 pub mod prompt;
+pub mod redraw;
 pub mod scrollbar;
 pub mod status;
+pub mod styles;
+pub mod visible;

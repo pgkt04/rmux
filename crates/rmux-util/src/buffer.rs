@@ -18,6 +18,19 @@ impl ByteBuffer {
         }
     }
 
+    /// Adopt an input allocation without copying its bytes.
+    pub fn from_vec(data: Vec<u8>) -> Self {
+        Self { data, start: 0 }
+    }
+
+    /// Return the allocation, compacting only the consumed prefix.
+    pub fn into_vec(mut self) -> Vec<u8> {
+        if self.start != 0 {
+            self.data.drain(..self.start);
+        }
+        self.data
+    }
+
     /// `evbuffer_add`.
     pub fn add(&mut self, bytes: &[u8]) {
         self.compact();
@@ -75,6 +88,19 @@ impl ByteBuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn owned_conversion_reuses_storage_and_keeps_unread_bytes() {
+        let mut input = Vec::with_capacity(64);
+        input.extend_from_slice(b"prefix:remaining");
+        let allocation = input.as_ptr();
+        let mut buffer = ByteBuffer::from_vec(input);
+        assert_eq!(buffer.data().as_ptr(), allocation);
+        buffer.drain(7);
+        let output = buffer.into_vec();
+        assert_eq!(output.as_ptr(), allocation);
+        assert_eq!(output, b"remaining");
+    }
 
     #[test]
     fn add_len_data_drain() {

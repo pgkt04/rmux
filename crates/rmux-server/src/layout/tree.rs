@@ -1839,10 +1839,12 @@ pub fn get_floating_cell<H: LayoutHost + ArgumentFormatRuntime>(
     wp: PaneId,
     flags: SpawnFlags,
 ) -> Result<LayoutCellId, LayoutError> {
-    let lc = host
-        .pane_layout_cell(wp)
-        .expect("pane without a layout cell");
+    // layout.c:1704-1710: `wp->layout_cell` is only read on the split path; a
+    // hidden pane under zoom has no cell and new-pane -t still works.
     let fg = if flags.contains(SpawnFlags::SPLIT) {
+        let lc = host
+            .pane_layout_cell(wp)
+            .expect("split pane without a layout cell");
         split_floating_cell(host, lc, w, lines, flags)?
     } else {
         let mut fg = LayoutGeometry::UNSET;

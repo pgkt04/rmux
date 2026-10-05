@@ -75,6 +75,129 @@ pub trait PaneModeDriver {
         id: ModeId,
         bytes: &[u8],
     ) -> Result<(), ModelError>;
+    /// window_copy_get_current_offset: (offset, size) for the scrollbar.
+    /// Modes without a scrollable history report nothing and no slider is
+    /// drawn (screen-redraw.c:1437-1440).
+    fn current_offset(&self, _server: &Server, _id: ModeId) -> Option<(u32, u32)> {
+        None
+    }
+    /// `wme->mode->key_table` (`tmux.h:1319`); `None` when the mode has no table.
+    fn key_table(&self, _server: &Server, _id: ModeId) -> Option<Vec<u8>> {
+        None
+    }
+    /// `wme->mode->command != NULL` (`cmd-send-keys.c:192,201`).
+    fn has_command(&self) -> bool {
+        false
+    }
+    /// `wme->mode->command(wme, c, s, wl, args, m)` (`tmux.h:1310-1312`).
+    #[allow(clippy::too_many_arguments)]
+    fn command(
+        &self,
+        _server: &mut Server,
+        _id: ModeId,
+        _client: Option<ClientId>,
+        _session: Option<crate::ids::SessionId>,
+        _winlink: Option<crate::ids::WinlinkId>,
+        _args: &crate::cmd::arguments::Args,
+        _mouse: Option<&MouseEvent>,
+    ) {
+    }
+    /// `wme->mode->update` (`tmux.h:1314`).
+    fn update(&self, _server: &mut Server, _id: ModeId) {}
+    /// `wme->mode->style_changed` (`tmux.h:1315`).
+    fn style_changed(&self, _server: &mut Server, _id: ModeId) {}
+    /// `c->tty.mouse_drag_update` installed by a mode (`tmux.h:1852-1855`).
+    fn drag_update(
+        &self,
+        _server: &mut Server,
+        _id: ModeId,
+        _client: ClientId,
+        _event: &crate::client::ResolvedMouseEvent,
+    ) {
+    }
+    /// `c->tty.mouse_drag_release` installed by a mode.
+    fn drag_release(
+        &self,
+        _server: &mut Server,
+        _id: ModeId,
+        _client: ClientId,
+        _event: &crate::client::ResolvedMouseEvent,
+    ) {
+    }
+}
+
+fn mode_driver(server: &Server, mode: ModeId) -> Option<Rc<dyn PaneModeDriver>> {
+    server
+        .panes
+        .get(mode.owner)?
+        .modes
+        .iter()
+        .find(|m| m.id == mode)
+        .map(|m| m.driver.clone())
+}
+pub fn pane_mode_drag_update(
+    server: &mut Server,
+    mode: ModeId,
+    client: ClientId,
+    event: &crate::client::ResolvedMouseEvent,
+) {
+    if let Some(driver) = mode_driver(server, mode) {
+        driver.drag_update(server, mode, client, event);
+    }
+}
+pub fn pane_mode_drag_release(
+    server: &mut Server,
+    mode: ModeId,
+    client: ClientId,
+    event: &crate::client::ResolvedMouseEvent,
+) {
+    if let Some(driver) = mode_driver(server, mode) {
+        driver.drag_release(server, mode, client, event);
+    }
+}
+
+fn first_mode(server: &Server, wp: PaneId) -> Option<(Rc<dyn PaneModeDriver>, ModeId)> {
+    server
+        .panes
+        .get(wp)?
+        .modes
+        .first()
+        .map(|m| (m.driver.clone(), m.id))
+}
+/// `wme->mode->key_table(wme)` for the first mode (`cmd-send-keys.c:95-100`).
+pub fn pane_mode_key_table(server: &Server, wp: PaneId) -> Option<Vec<u8>> {
+    let (driver, id) = first_mode(server, wp)?;
+    driver.key_table(server, id)
+}
+/// `wme != NULL && wme->mode->command != NULL`.
+pub fn pane_mode_has_command(server: &Server, wp: PaneId) -> bool {
+    first_mode(server, wp).is_some_and(|(driver, _)| driver.has_command())
+}
+/// `wme->mode->command(wme, tc, s, wl, args, m)` (`cmd-send-keys.c:207`).
+pub fn pane_mode_command(
+    server: &mut Server,
+    wp: PaneId,
+    client: Option<ClientId>,
+    session: Option<crate::ids::SessionId>,
+    winlink: Option<crate::ids::WinlinkId>,
+    args: &crate::cmd::arguments::Args,
+    mouse: Option<&MouseEvent>,
+) {
+    if let Some((driver, id)) = first_mode(server, wp) {
+        driver.command(server, id, client, session, winlink, args, mouse);
+    }
+}
+/// `wme->mode->update(wme)` for the first mode (`server-client.c`).
+pub fn pane_mode_update(server: &mut Server, wp: PaneId) {
+    if let Some((driver, id)) = first_mode(server, wp) {
+        driver.update(server, id);
+    }
+}
+/// `wme->mode->style_changed(wme)` for the first mode.
+pub fn pane_mode_style_changed(server: &mut Server, wp: PaneId) {
+    if let Some((driver, id)) = first_mode(server, wp) {
+        driver.style_changed(server, id);
+    }
 }
 pub struct PaneMode {
     pub id: ModeId,
@@ -99,7 +222,14 @@ pub trait PanePromptEngine {
         mouse: Option<(u32, u32)>,
     ) -> PromptKeyResult;
     fn is_open(&self) -> bool;
-    fn update(&mut self, message: &[u8], input: &[u8]);
+    fn update(&mut self, server: &mut Server, message: &[u8], input: &[u8]);
+    fn draw(
+        &mut self,
+        server: &mut Server,
+        pane: PaneId,
+        ctx: &mut rmux_emu::screen::write::ScreenWriteCtx<'_>,
+        pdd: &mut crate::ui::prompt::PromptDrawData<'_>,
+    );
     fn free(self: Box<Self>, server: &mut Server);
 }
 pub struct PanePrompt {
@@ -313,12 +443,26 @@ pub fn pane_create(
         prompt: None,
         prompt_generation: 0,
         input_state: super::pane_input::PaneInputState::default(),
+        pipe: None,
+        control_fg: -1,
+        control_bg: -1,
         scrollbar_visible: false,
         scrollbar_hover: false,
         cached_gc: rmux_emu::cell::DEFAULT_CELL,
         cached_active_gc: rmux_emu::cell::DEFAULT_CELL,
         cached_dim: 0,
         cached_active_dim: 0,
+        sync: crate::ui::fanout::SyncOutputState::default(),
+        status_generation: 0,
+        border_status_line: rmux_emu::style::StyleLineEntry::default(),
+        border_gc: rmux_emu::cell::DEFAULT_CELL,
+        border_gc_set: false,
+        active_border_gc: rmux_emu::cell::DEFAULT_CELL,
+        active_border_gc_set: false,
+        sb_slider_y: 0,
+        sb_slider_h: 0,
+        prompt_cx: 0,
+        visible_ranges: crate::ui::visible::VisibleRanges::default(),
     };
     let id = server.panes.insert(pane)?;
     server.panes.retain(id)?;
@@ -421,6 +565,7 @@ pub fn pane_destroy(server: &mut Server, id: PaneId) -> Result<(), ModelError> {
     {
         return Ok(());
     }
+    crate::server::run::close_pane_io(server, id);
     pane_wait_finish(server, id);
     super::spawn::spawn_editor_finish(server, id);
     let Some(p) = server.panes.get_mut(id) else {
@@ -1027,12 +1172,42 @@ pub fn pane_update_prompt(
     message: &[u8],
     input: &[u8],
 ) -> Result<(), ModelError> {
-    let p = server.panes.get_mut(id).ok_or(ModelError::StaleId)?;
-    if let Some(prompt) = &mut p.prompt {
-        prompt.engine.update(message, input);
-        p.flags.insert(PaneFlags::REDRAW);
+    pane_with_prompt(server, id, |server, prompt| {
+        prompt.engine.update(server, message, input);
+    });
+    if let Some(p) = server.panes.get_mut(id) {
+        if p.prompt.is_some() {
+            p.flags.insert(PaneFlags::REDRAW);
+        }
     }
     Ok(())
+}
+/// Run `f` with the pane prompt taken out of the pane so the engine may use
+/// the server. The prompt is restored only if the pane and its prompt
+/// generation survived; otherwise it is freed once.
+pub fn pane_with_prompt(
+    server: &mut Server,
+    id: PaneId,
+    f: impl FnOnce(&mut Server, &mut PanePrompt),
+) {
+    let Some(p) = server.panes.get_mut(id) else {
+        return;
+    };
+    let Some(mut prompt) = p.prompt.take() else {
+        return;
+    };
+    let generation = p.prompt_generation;
+    f(server, &mut prompt);
+    let valid = server.panes.get(id).is_some_and(|p| {
+        p.prompt_generation == generation && !p.flags.contains(PaneFlags::DESTROYED)
+    });
+    if valid {
+        if let Some(p) = server.panes.get_mut(id) {
+            p.prompt = Some(prompt);
+            return;
+        }
+    }
+    prompt.engine.free(server);
 }
 pub fn pane_prompt_key(
     server: &mut Server,
@@ -1565,7 +1740,15 @@ mod tests {
         fn is_open(&self) -> bool {
             self.open
         }
-        fn update(&mut self, _: &[u8], _: &[u8]) {}
+        fn update(&mut self, _: &mut Server, _: &[u8], _: &[u8]) {}
+        fn draw(
+            &mut self,
+            _: &mut Server,
+            _: PaneId,
+            _: &mut rmux_emu::screen::write::ScreenWriteCtx<'_>,
+            _: &mut crate::ui::prompt::PromptDrawData<'_>,
+        ) {
+        }
         fn free(self: Box<Self>, _: &mut Server) {
             self.freed.set(self.freed.get() + 1);
         }

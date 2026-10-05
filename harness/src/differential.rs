@@ -18,6 +18,12 @@ pub struct Difference {
     pub left: CommandOutput,
     pub right: CommandOutput,
 }
+
+#[derive(Debug)]
+pub enum Step {
+    Command(Vec<String>),
+    WaitForPaneOutput { target: String, expected: Vec<u8> },
+}
 struct Server {
     binary: PathBuf,
     socket: PathBuf,
@@ -95,6 +101,40 @@ impl Server {
             stderr: read(stderr)?,
         })
     }
+
+    fn wait_for_pane_output(
+        &self,
+        target: &str,
+        expected: &[u8],
+        timeout: Duration,
+    ) -> io::Result<()> {
+        let start = Instant::now();
+        loop {
+            let output = self.command(&["capture-pane", "-p", "-t", target])?;
+            if output.status != Some(0) {
+                return Err(io::Error::other(format!(
+                    "{}: capture of pane {target} failed: {}",
+                    self.binary.display(),
+                    String::from_utf8_lossy(&output.stderr),
+                )));
+            }
+            if expected.is_empty() || output.stdout.windows(expected.len()).any(|s| s == expected) {
+                return Ok(());
+            }
+            if start.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "{}: pane {target} did not output {:?}; last capture: {:?}",
+                        self.binary.display(),
+                        String::from_utf8_lossy(expected),
+                        String::from_utf8_lossy(&output.stdout),
+                    ),
+                ));
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
 }
 impl Drop for Server {
     fn drop(&mut self) {
@@ -102,11 +142,20 @@ impl Drop for Server {
     }
 }
 
-pub fn compare(left: &Path, right: &Path, commands: &[Vec<String>]) -> io::Result<Vec<Difference>> {
+pub fn compare(left: &Path, right: &Path, steps: &[Step]) -> io::Result<Vec<Difference>> {
     let left = Server::new(left)?;
     let right = Server::new(right)?;
     let mut differences = Vec::new();
-    for (command_index, command) in commands.iter().enumerate() {
+    let mut command_index = 0;
+    for step in steps {
+        let command = match step {
+            Step::Command(command) => command,
+            Step::WaitForPaneOutput { target, expected } => {
+                left.wait_for_pane_output(target, expected, Duration::from_secs(5))?;
+                right.wait_for_pane_output(target, expected, Duration::from_secs(5))?;
+                continue;
+            }
+        };
         let args: Vec<_> = command.iter().map(String::as_str).collect();
         let left = left.command(&args)?;
         let right = right.command(&args)?;
@@ -117,6 +166,7 @@ pub fn compare(left: &Path, right: &Path, commands: &[Vec<String>]) -> io::Resul
                 right,
             });
         }
+        command_index += 1;
     }
     Ok(differences)
 }
@@ -150,11 +200,125 @@ mod tests {
             ],
         ]
         .into_iter()
-        .map(|args| args.into_iter().map(String::from).collect())
+        .map(|args| Step::Command(args.into_iter().map(String::from).collect()))
         .collect::<Vec<_>>();
         let differences = compare(&oracle, &oracle, &commands).unwrap();
         println!("oracle-vs-oracle: {} differences", differences.len());
         assert!(differences.is_empty());
+    }
+    #[test]
+    fn pane_output_wait_is_bounded() {
+        let Some(oracle) = oracle() else {
+            return;
+        };
+        let server = Server::new(&oracle).unwrap();
+        server
+            .command(&[
+                "new-window",
+                "-d",
+                "-n",
+                "ready",
+                "printf READY; exec sleep 60",
+            ])
+            .unwrap();
+        server
+            .wait_for_pane_output("ready", b"READY", Duration::from_secs(5))
+            .unwrap();
+        let start = Instant::now();
+        let error = server
+            .wait_for_pane_output("ready", b"NEVER", Duration::from_millis(50))
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    fn rmux() -> Option<PathBuf> {
+        let path = std::env::var_os("RMUX_BINARY")
+            .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("CARGO_TARGET_DIR")
+                    .map(|dir| PathBuf::from(dir).join("debug/rmux"))
+            })
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/debug/rmux"));
+        if path.is_file() {
+            Some(path)
+        } else {
+            eprintln!("server teardown comparison skipped: rmux binary missing (set RMUX_BINARY)");
+            None
+        }
+    }
+
+    fn process_ids(server: &Server) -> Vec<rmux_sys::ProcessId> {
+        let output = server
+            .command(&["display", "-p", "#{pid} #{pane_pid}"])
+            .unwrap();
+        assert_eq!(output.status, Some(0));
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .split_whitespace()
+            .map(|pid| rmux_sys::ProcessId(pid.parse().unwrap()))
+            .collect()
+    }
+
+    fn assert_processes_exit(pids: &[rmux_sys::ProcessId]) {
+        let start = Instant::now();
+        while pids
+            .iter()
+            .any(|pid| rmux_sys::client::kill(*pid, 0).is_ok())
+        {
+            assert!(
+                start.elapsed() < Duration::from_secs(5),
+                "server or pane leaked: {pids:?}"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn servers_exit_and_release_panes() {
+        let (Some(oracle), Some(rmux)) = (oracle(), rmux()) else {
+            return;
+        };
+        for binary in [&oracle, &rmux] {
+            let live = Server::new(binary).unwrap();
+            let old = process_ids(&live);
+            let output = live
+                .command(&["respawn-pane", "-k", "exec sleep 300"])
+                .unwrap();
+            assert_eq!(output.status, Some(0), "{binary:?}: {output:?}");
+            assert_processes_exit(&old[1..]);
+            assert_eq!(live.command(&["has-session"]).unwrap().status, Some(0));
+            let current = process_ids(&live);
+            assert_eq!(current[0], old[0]);
+            assert_ne!(current[1], old[1]);
+            drop(live);
+            assert_processes_exit(&current);
+            for command in ["kill-server", "kill-session"] {
+                let server = Server::new(binary).unwrap();
+                let pids = process_ids(&server);
+                assert_eq!(pids.len(), 2);
+                let output = server.command(&[command]).unwrap();
+                assert_eq!(output.status, Some(0), "{binary:?}: {output:?}");
+                assert_processes_exit(&pids);
+            }
+            let server = Server::new(binary).unwrap();
+            let pids = process_ids(&server);
+            let output = server
+                .command(&["kill-server", ";", "display", "-p", "bye"])
+                .unwrap();
+            assert_eq!(output.status, Some(0), "{binary:?}: {output:?}");
+            assert_eq!(output.stdout, b"bye\n");
+            assert_processes_exit(&pids);
+
+            let mut child_pids = Vec::new();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let server = Server::new(binary).unwrap();
+                child_pids = process_ids(&server);
+                panic!("exercise panic-safe socket cleanup");
+            }));
+            assert!(result.is_err());
+            assert_processes_exit(&child_pids);
+        }
     }
     #[test]
     fn deliberate_mismatch() {

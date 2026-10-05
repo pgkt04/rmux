@@ -11,3 +11,4 @@ workspace = true
 [dependencies]
 libc.workspace = true
 mio.workspace = true
+signal-hook = "0.3"

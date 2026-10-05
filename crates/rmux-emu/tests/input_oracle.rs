@@ -675,7 +675,9 @@ impl Oracle {
 
 impl Drop for Oracle {
     fn drop(&mut self) {
-        let _ = self.run(&["kill-server"]);
+        let _ = Command::new(&self.tmux)
+            .args(["-f", "/dev/null", "-S", &self.socket, "kill-server"])
+            .output();
     }
 }
 

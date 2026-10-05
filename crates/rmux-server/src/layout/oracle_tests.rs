@@ -127,7 +127,7 @@ impl Oracle {
 
 impl Drop for Oracle {
     fn drop(&mut self) {
-        let _ = self.run(&["kill-server"]);
+        let _ = self.command(false).arg("kill-server").output();
     }
 }
 

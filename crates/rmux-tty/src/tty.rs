@@ -677,6 +677,11 @@ impl Tty {
     pub fn out_len(&self) -> usize {
         self.out.len()
     }
+    /// `tty->sync_offset` (`server-client.c:2393`): queued bytes before the
+    /// current synchronized frame started.
+    pub fn sync_offset(&self) -> usize {
+        self.sync_offset
+    }
     pub fn fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()
     }

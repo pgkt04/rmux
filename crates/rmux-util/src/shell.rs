@@ -1,4 +1,4 @@
-// Ported from tmux tmux.c @ 8f25579c (checkshell, areshell)
+// Ported from tmux tmux.c @ 8f25579c (getshell, checkshell, areshell, shell_argv0)
 //! Shell path validation shared by the `default-shell` option and startup.
 
 /// `areshell`: the last path component equals the program name, after a
@@ -47,6 +47,47 @@ pub fn clean_name(name: &[u8], untrusted: bool) -> Option<Vec<u8>> {
             | crate::vis::VisFlags::NL,
     );
     Some(out)
+}
+
+/// `getshell` (`tmux.c:80-95`): `$SHELL` if `check_shell` accepts it, then
+/// the passwd shell, then `/bin/sh`. `program` is `getprogname()`.
+pub fn get_shell(program: &[u8]) -> Vec<u8> {
+    get_shell_from(
+        rmux_sys::client::getenv("SHELL").as_deref(),
+        rmux_sys::client::passwd_shell().as_deref(),
+        program,
+    )
+}
+
+/// Pure core of [`get_shell`] with the environment and passwd values supplied.
+pub fn get_shell_from(
+    env_shell: Option<&[u8]>,
+    pw_shell: Option<&[u8]>,
+    program: &[u8],
+) -> Vec<u8> {
+    if let Some(shell) = env_shell.filter(|s| check_shell(s, program)) {
+        return crate::bytes::cstr(shell).to_vec();
+    }
+    if let Some(shell) = pw_shell.filter(|s| check_shell(s, program)) {
+        return crate::bytes::cstr(shell).to_vec();
+    }
+    b"/bin/sh".to_vec()
+}
+
+/// `shell_argv0` (`tmux.c:298-314`): the basename unless the path ends with
+/// `/`, prefixed with `-` for a login shell.
+pub fn shell_argv0(shell: &[u8], is_login: bool) -> Vec<u8> {
+    let shell = crate::bytes::cstr(shell);
+    let name = match shell.iter().rposition(|&c| c == b'/') {
+        Some(i) if i + 1 < shell.len() => &shell[i + 1..],
+        _ => shell,
+    };
+    let mut argv0 = Vec::with_capacity(name.len() + 1);
+    if is_login {
+        argv0.push(b'-');
+    }
+    argv0.extend_from_slice(name);
+    argv0
 }
 
 #[cfg(test)]
@@ -104,5 +145,33 @@ mod tests {
         let path = file.as_os_str().as_encoded_bytes();
         assert!(!check_shell(path, b"tmux"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn getshell_prefers_env_then_passwd_then_sh() {
+        assert_eq!(get_shell_from(Some(b"/bin/sh"), None, b"rmux"), b"/bin/sh");
+        assert_eq!(
+            get_shell_from(Some(b"sh"), Some(b"/bin/sh"), b"rmux"),
+            b"/bin/sh"
+        );
+        assert_eq!(
+            get_shell_from(Some(b"/bin/sh"), None, b"sh"),
+            b"/bin/sh".to_vec()
+        );
+        assert_eq!(
+            get_shell_from(None, Some(b"/nonexistent/x"), b"rmux"),
+            b"/bin/sh"
+        );
+        assert_eq!(get_shell_from(None, None, b"rmux"), b"/bin/sh");
+        assert!(get_shell(b"rmux").starts_with(b"/"));
+    }
+
+    #[test]
+    fn argv0_login_and_non_login() {
+        assert_eq!(shell_argv0(b"/bin/sh", false), b"sh");
+        assert_eq!(shell_argv0(b"/bin/sh", true), b"-sh");
+        assert_eq!(shell_argv0(b"sh", true), b"-sh");
+        assert_eq!(shell_argv0(b"/bin/", false), b"/bin/");
+        assert_eq!(shell_argv0(b"/usr/bin/zsh\0junk", true), b"-zsh");
     }
 }

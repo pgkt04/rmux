@@ -585,6 +585,26 @@ fn key_names_match_oracle_list_keys() {
     let dir = std::env::temp_dir().join(format!("rmux-g08-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("sock");
+    struct OracleGuard<'a> {
+        tmux: &'a std::path::Path,
+        socket: &'a std::path::Path,
+        dir: &'a std::path::Path,
+    }
+    impl Drop for OracleGuard<'_> {
+        fn drop(&mut self) {
+            let _ = Command::new(self.tmux)
+                .arg("-S")
+                .arg(self.socket)
+                .args(["-f", "/dev/null", "kill-server"])
+                .output();
+            let _ = std::fs::remove_dir_all(self.dir);
+        }
+    }
+    let _oracle = OracleGuard {
+        tmux: &tmux,
+        socket: &socket,
+        dir: &dir,
+    };
     let run = |args: &[&str]| -> Option<String> {
         let out = Command::new(&tmux)
             .arg("-S")
@@ -677,8 +697,6 @@ fn key_names_match_oracle_list_keys() {
         }
     }
     let listed = run(&["list-keys", "-T", "g08", "-F", "#{key_string}"]).unwrap();
-    run(&["kill-server"]);
-    let _ = std::fs::remove_dir_all(&dir);
     let mut listed: Vec<&str> = listed.lines().collect();
     listed.sort_unstable();
     listed.dedup();

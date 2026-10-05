@@ -1,4 +1,19 @@
 // Ported from tmux format.c @ 8f25579c
+/*
+ * Copyright (c) 2011 Nicholas Marriott <nicholas.marriott@gmail.com>
+ *
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION
+ * OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF OR IN
+ * CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+ */
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 use std::time::Instant;
@@ -10,7 +25,7 @@ use crate::cmd::arguments::ArgumentFormatRuntime;
 use crate::cmd::find::CmdFindState;
 use crate::cmd::parse::CmdParseInput;
 use crate::ids::{ClientId, OptionsId, QueueItemId, SessionId};
-use crate::model::{ModelEffect, Server};
+use crate::model::Server;
 use crate::options::OptionsArrayKey;
 use crate::options::environment::{Environment, EnvironmentFlags};
 use rmux_util::bytes::{ByteString, cstr};
@@ -34,8 +49,7 @@ pub struct FormatLoopEntry {
     pub fields: BTreeMap<ByteString, ByteString>,
 }
 
-/// The model queues these operations for the owning event loop. A job request
-/// is not a successful process launch; only the live transport reserves JobId.
+/// Explicit actions retained for generic runtime adapters and event dispatch.
 #[derive(Clone, Debug)]
 pub enum FormatAction {
     RetainClient(ClientId),
@@ -117,6 +131,9 @@ pub trait FormatRuntime {
     fn queue_formats(&self, _: QueueItemId) -> BTreeMap<ByteString, ByteString> {
         BTreeMap::new()
     }
+    fn mouse(&self, _: QueueItemId) -> Option<crate::cmd::find::MouseInput> {
+        None
+    }
     fn target(&self, _: QueueItemId) -> FormatContext {
         FormatContext::default()
     }
@@ -148,6 +165,11 @@ fn option_id(server: &Server, context: &FormatContext, scope: OptionScope) -> Op
 
 impl FormatRuntime for Server {
     fn defaults(&mut self, mut context: FormatContext) -> FormatContext {
+        if context.session.is_none() {
+            context.session = context
+                .evaluated_client
+                .and_then(|id| self.clients.get(id)?.session);
+        }
         if context.winlink.is_none() {
             context.winlink = context
                 .session
@@ -184,6 +206,7 @@ impl FormatRuntime for Server {
     }
     fn builtin(&mut self, context: &FormatContext, key: &[u8]) -> Option<FormatValue> {
         super::variables::model_value(self, context, key)
+            .or_else(|| crate::server::format_live::builtin(self, context, key))
     }
     fn builtin_owned(
         &mut self,
@@ -191,18 +214,14 @@ impl FormatRuntime for Server {
         owner: Option<ClientId>,
         key: &[u8],
     ) -> Option<FormatValue> {
-        self.builtin(context, key).or_else(|| {
-            if owner.is_none() {
-                super::variables::model_layout_value(
-                    self,
-                    context,
-                    crate::client::ClientFlags::default(),
-                    key,
-                )
-            } else {
-                None
-            }
-        })
+        if key == b"window_layout" || key == b"window_visible_layout" {
+            let flags = match owner {
+                Some(id) => self.clients.get(id)?.flags,
+                None => crate::client::ClientFlags::default(),
+            };
+            return super::variables::model_layout_value(self, context, flags, key);
+        }
+        self.builtin(context, key)
     }
     fn environment(
         &mut self,
@@ -220,11 +239,46 @@ impl FormatRuntime for Server {
     fn loop_entries(
         &mut self,
         context: &FormatContext,
-        _: Option<ClientId>,
+        owner: Option<ClientId>,
         kind: u8,
         flags: &[u8],
     ) -> Option<Vec<FormatLoopEntry>> {
-        model_loop(self, context, kind, cstr(flags))
+        let flags = cstr(flags);
+        if kind == b'L' {
+            let mut ids = Vec::new();
+            sort::get_clients(self, &criteria(kind, flags), &mut ids);
+            return Some(
+                ids.into_iter()
+                    .map(|id| FormatLoopEntry {
+                        context: FormatContext {
+                            evaluated_client: Some(id),
+                            buffer: None,
+                            ..*context
+                        },
+                        ..FormatLoopEntry::default()
+                    })
+                    .collect(),
+            );
+        }
+        if kind == b'V' && flags == b"c" {
+            return Some(
+                owner
+                    .and_then(|id| self.clients.get(id))
+                    .map_or_else(Vec::new, |client| {
+                        environment_loop(context, &client.environ)
+                    }),
+            );
+        }
+        let mut entries = model_loop(self, context, kind, flags)?;
+        if kind == b'S' {
+            let active = context
+                .evaluated_client
+                .and_then(|id| self.clients.get(id)?.session);
+            for entry in &mut entries {
+                entry.active = active.is_some() && entry.context.session == active;
+            }
+        }
+        Some(entries)
     }
     fn search(&mut self, context: &FormatContext, text: &[u8], flags: &[u8]) -> u32 {
         let Some(pane) = context.pane else {
@@ -256,6 +310,40 @@ impl FormatRuntime for Server {
                 })
         }
     }
+    fn client_query(
+        &mut self,
+        context: &FormatContext,
+        kind: u8,
+        key: &[u8],
+    ) -> Option<ByteString> {
+        crate::server::format_live::client_query(self, context, kind, key)
+    }
+    fn queue_formats(&self, item: QueueItemId) -> BTreeMap<ByteString, ByteString> {
+        let mut formats = BTreeMap::new();
+        self.queue
+            .merge_formats(item, &mut formats)
+            .expect("live format queue item");
+        formats
+    }
+    fn mouse(&self, item: QueueItemId) -> Option<crate::cmd::find::MouseInput> {
+        let item = self.queue.items.get(item)?;
+        Some(self.queue.states.get(item.state)?.event.mouse)
+    }
+    fn target(&self, item: QueueItemId) -> FormatContext {
+        let target = self.queue.items.get(item).expect("live format queue item");
+        FormatContext {
+            evaluated_client: target.target_client,
+            session: target.target.s,
+            winlink: target.target.wl,
+            window: target.target.w,
+            pane: target.target.wp,
+            mouse: self.mouse(item),
+            ..FormatContext::default()
+        }
+    }
+    fn owner_client(&self, item: QueueItemId) -> Option<ClientId> {
+        self.queue.items.get(item)?.client
+    }
     fn job(
         &mut self,
         owner: Option<ClientId>,
@@ -265,48 +353,22 @@ impl FormatRuntime for Server {
         expanded: &[u8],
         now: i64,
     ) -> ByteString {
-        if flags.contains(FormatFlags::NOJOBS) {
-            return ByteString::default();
-        }
-        let output = self
-            .format_jobs
-            .record(owner, tag, raw)
-            .and_then(|r| r.out.clone())
-            .unwrap_or_default();
-        self.effects
-            .push_back(ModelEffect::Format(FormatAction::Job {
-                owner,
-                tag,
-                flags,
-                raw: cstr(raw).into(),
-                expanded: cstr(expanded).into(),
-                now,
-            }));
-        output
+        crate::server::format_live::job(self, owner, tag, flags, raw, expanded, now)
     }
     fn cycle(&mut self, owner: ClientId) {
-        self.effects
-            .push_back(ModelEffect::Format(FormatAction::Cycle(owner)));
+        crate::server::format_live::cycle(self, owner);
     }
     fn retain_client(&mut self, client: ClientId) {
-        self.effects
-            .push_back(ModelEffect::Format(FormatAction::RetainClient(client)));
+        crate::client::lifecycle::retain(self, client).expect("live format owner");
     }
     fn release_client(&mut self, client: ClientId) {
-        self.effects
-            .push_back(ModelEffect::Format(FormatAction::ReleaseClient(client)));
+        crate::client::lifecycle::release(self, client).expect("retained format owner");
     }
     fn now(&self) -> Timestamp {
         Timestamp::new(self.current_time.0, self.current_time.1 as i32)
     }
     fn log(&mut self, item: Option<QueueItemId>, depth: u32, message: &[u8], verbose: bool) {
-        self.effects
-            .push_back(ModelEffect::Format(FormatAction::Log {
-                item,
-                depth,
-                message: cstr(message).into(),
-                verbose,
-            }));
+        crate::server::format_live::log(self, item, depth, message, verbose);
     }
 }
 
@@ -327,6 +389,9 @@ pub trait FormatExternal: FormatJobRuntime + SortClients {
     fn client_query(&mut self, context: &FormatContext, kind: u8, key: &[u8])
     -> Option<ByteString>;
     fn queue_formats(&self, item: QueueItemId) -> BTreeMap<ByteString, ByteString>;
+    fn mouse(&self, _: QueueItemId) -> Option<crate::cmd::find::MouseInput> {
+        None
+    }
     fn target(&self, item: QueueItemId) -> FormatContext;
     fn owner_client(&self, item: QueueItemId) -> Option<ClientId>;
     fn retain_client(&mut self, client: ClientId);
@@ -406,8 +471,7 @@ impl<E: FormatExternal> FormatRuntime for ServerFormatRuntime<'_, E> {
         self.server.option(c, s, k)
     }
     fn builtin(&mut self, c: &FormatContext, k: &[u8]) -> Option<FormatValue> {
-        self.server
-            .builtin(c, k)
+        super::variables::model_value(self.server, c, k)
             .or_else(|| {
                 c.evaluated_client
                     .and_then(|id| self.external.client_facts(id))
@@ -521,6 +585,9 @@ impl<E: FormatExternal> FormatRuntime for ServerFormatRuntime<'_, E> {
     fn queue_formats(&self, item: QueueItemId) -> BTreeMap<ByteString, ByteString> {
         self.external.queue_formats(item)
     }
+    fn mouse(&self, item: QueueItemId) -> Option<crate::cmd::find::MouseInput> {
+        self.external.mouse(item)
+    }
     fn target(&self, item: QueueItemId) -> FormatContext {
         self.external.target(item)
     }
@@ -541,57 +608,12 @@ impl<E: FormatExternal> FormatRuntime for ServerFormatRuntime<'_, E> {
     }
 }
 
-impl ArgumentFormatRuntime for Server {
-    fn expand_from_target(&mut self, item: QueueItemId, value: &[u8]) -> ByteString {
-        super::single_from_target(self, item, value)
-    }
-}
 impl<E: FormatExternal> ArgumentFormatRuntime for ServerFormatRuntime<'_, E> {
     fn expand_from_target(&mut self, item: QueueItemId, value: &[u8]) -> ByteString {
         super::single_from_target(self, item, value)
     }
 }
 
-impl crate::cmd::parse::ParseContext for Server {
-    fn environment(&self, name: &[u8]) -> Option<&[u8]> {
-        self.global_environment
-            .find(cstr(name))?
-            .value
-            .as_ref()
-            .map(ByteString::as_bytes)
-    }
-    fn put_environment(&mut self, assignment: &[u8], hidden: bool) {
-        self.global_environment.put(
-            cstr(assignment),
-            if hidden {
-                EnvironmentFlags::HIDDEN
-            } else {
-                EnvironmentFlags::default()
-            },
-        );
-    }
-    fn alias(&self, name: &[u8]) -> Option<ByteString> {
-        crate::cmd::get_alias(&self.options, cstr(name))
-    }
-    fn condition(&mut self, value: &[u8], input: &CmdParseInput) -> bool {
-        condition(self, value, input)
-    }
-    fn home(&mut self, user: Option<&[u8]>) -> Option<ByteString> {
-        rmux_sys::proc::home_directory(user).map(ByteString::from)
-    }
-    fn next_group(&mut self) -> u32 {
-        let group = self.next_command_group;
-        self.next_command_group = group.wrapping_add(1);
-        group
-    }
-    fn print(&mut self, message: &[u8], input: &CmdParseInput) {
-        self.effects
-            .push_back(ModelEffect::Format(FormatAction::ParsePrint {
-                message: cstr(message).into(),
-                input: input.clone(),
-            }));
-    }
-}
 impl crate::options::CommandParser for Server {
     fn parse_from_string(&mut self, value: &[u8]) -> crate::cmd::parse::CmdParseResult {
         crate::cmd::parse::from_string(self, value, &mut CmdParseInput::default())
@@ -1456,19 +1478,15 @@ mod tests {
     }
 
     #[test]
-    fn native_job_request_does_not_fabricate_a_process_handle() {
+    fn native_nojobs_does_not_launch_or_enqueue_effects() {
         let mut server = Server::new();
         assert!(
             server
-                .job(None, 1, FormatFlags::NONE, b"raw", b"expanded", 1)
+                .job(None, 2, FormatFlags::NOJOBS, b"raw", b"expanded", 1)
                 .is_empty()
         );
         assert!(server.format_jobs.is_empty());
-        assert!(matches!(
-            server.effects.pop_front(),
-            Some(ModelEffect::Format(FormatAction::Job { tag: 1, .. }))
-        ));
-        server.job(None, 2, FormatFlags::NOJOBS, b"raw", b"expanded", 1);
+        assert!(server.jobs.is_empty());
         assert!(server.effects.is_empty());
     }
 
@@ -1483,22 +1501,41 @@ mod tests {
             Some(b"value".as_slice())
         );
         let id = session(&mut server, b"parser");
+        let window = crate::model::window::window_create(&mut server, 20, 5, 0, 0).unwrap();
+        let pane = crate::model::window::window_add_pane(
+            &mut server,
+            window,
+            None,
+            10,
+            crate::model::spawn::SpawnFlags::default(),
+        )
+        .unwrap();
+        crate::model::window::window_set_active_pane(&mut server, window, pane, false).unwrap();
+        let link = crate::model::session::session_attach(&mut server, id, window, 0).unwrap();
         let input = CmdParseInput {
             target: CmdFindState {
                 s: Some(id),
+                wl: Some(link),
+                w: Some(window),
+                wp: Some(pane),
                 ..CmdFindState::default()
             },
             ..CmdParseInput::default()
         };
         assert!(ParseContext::condition(
             &mut server,
-            b"#{session_format}",
+            b"#{pane_format}",
             &input
         ));
         let first = ParseContext::next_group(&mut server);
         assert_eq!(ParseContext::next_group(&mut server), first.wrapping_add(1));
         assert!(server.parse_from_string(b"display-message hello").is_ok());
         ParseContext::print(&mut server, b"output", &input);
-        assert!(server.effects.iter().any(|effect| matches!(effect,ModelEffect::Format(FormatAction::ParsePrint { message, .. }) if &**message == b"output")));
+        assert!(
+            !server
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, crate::model::ModelEffect::Format(_)))
+        );
     }
 }

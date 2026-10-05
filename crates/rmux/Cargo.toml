@@ -14,3 +14,7 @@ rmux-util.workspace = true
 rmux-emu.workspace = true
 rmux-tty.workspace = true
 rmux-server.workspace = true
+
+[features]
+systemd = ["rmux-server/systemd"]
+sixel = ["rmux-server/sixel"]

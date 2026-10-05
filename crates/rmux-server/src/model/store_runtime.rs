@@ -13,7 +13,7 @@ pub type HookMonitorDispatch =
 pub trait HooksModelRuntime {
     fn create_hook_monitor_set(
         &mut self,
-        session: SessionId,
+        session: Option<SessionId>,
         hook: crate::ids::HooksMonitorId,
     ) -> Result<MonitorSetId, ModelError>;
     fn destroy_hook_monitor_set(&mut self, set: MonitorSetId) -> Result<(), ModelError>;
@@ -56,7 +56,7 @@ fn hook_monitor_callback(
 impl HooksModelRuntime for Server {
     fn create_hook_monitor_set(
         &mut self,
-        session: SessionId,
+        session: Option<SessionId>,
         hook: crate::ids::HooksMonitorId,
     ) -> Result<MonitorSetId, ModelError> {
         if self.hook_monitor_dispatch.is_none() {
@@ -64,7 +64,7 @@ impl HooksModelRuntime for Server {
                 b"hook monitor dispatcher is not installed",
             ));
         }
-        let set = monitor::monitor_create_session(self, Some(session), hook_monitor_callback)?;
+        let set = monitor::monitor_create_session(self, session, hook_monitor_callback)?;
         self.hook_monitor_targets.insert(set, hook);
         Ok(set)
     }
@@ -482,9 +482,9 @@ mod tests {
             },
         );
         let hook = crate::ids::HooksMonitorId::from_parts(0, 0);
-        assert!(server.create_hook_monitor_set(session, hook).is_err());
+        assert!(server.create_hook_monitor_set(Some(session), hook).is_err());
         server.hook_monitor_dispatch = Some(hook_dispatch);
-        let set = server.create_hook_monitor_set(session, hook).unwrap();
+        let set = server.create_hook_monitor_set(Some(session), hook).unwrap();
         let mut spec = monitor::monitor_parse(b"item::value").unwrap();
         spec.flags = monitor::MonitorFlags::INITIAL;
         server.add_hook_model_monitor(set, spec).unwrap();

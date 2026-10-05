@@ -181,11 +181,8 @@ impl LayoutHost for Server {
         pane_mut(self, wp).flags.insert(PaneFlags::VISITED);
     }
     // window_pane_stack_remove (window.c:2472-2479).
-    fn window_last_panes_remove(&mut self, w: WindowId, wp: PaneId) {
-        if pane_ref(self, wp).flags.contains(PaneFlags::VISITED) {
-            win_mut(self, w).last.retain(|&p| p != wp);
-            pane_mut(self, wp).flags.remove(PaneFlags::VISITED);
-        }
+    fn window_last_panes_remove(&mut self, _w: WindowId, wp: PaneId) {
+        window::window_pane_stack_remove(self, wp);
     }
     fn window_push_zoom(&mut self, w: WindowId, always: bool, flag: bool) -> bool {
         window::window_push_zoom(self, w, always, flag).expect("stale window id in layout")

@@ -173,7 +173,7 @@ impl HooksRuntime for Fixture {
     fn remove_hook_sink(&mut self, _: EventSinkId) {
         self.actions.push("sink:remove".into());
     }
-    fn create_monitor_set(&mut self, _: SessionId, _: HooksMonitorId) -> MonitorSetId {
+    fn create_monitor_set(&mut self, _: Option<SessionId>, _: HooksMonitorId) -> MonitorSetId {
         self.actions.push("set:create".into());
         id(1)
     }
@@ -292,7 +292,7 @@ fn monitor_publication_replacement_and_cleanup_order() {
         format: b"format",
         flags: MonitorFlags::INITIAL,
         target: &target,
-        session: id(1),
+        session: Some(id(1)),
     };
     let first = monitor_add(&mut f, spec()).unwrap();
     assert!(f.initial);
@@ -480,7 +480,7 @@ fn option_value_monitor_unlink_order() {
             format: b"x",
             flags: MonitorFlags::default(),
             target: &target,
-            session: id(1),
+            session: Some(id(1)),
         },
     )
     .unwrap();

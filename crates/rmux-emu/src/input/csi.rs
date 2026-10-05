@@ -266,7 +266,7 @@ impl InputCtx {
             }
             Csi::Da => {
                 if self.params.get(0, 0, 0) == 0 {
-                    return if env.policy.sixel {
+                    return if cfg!(feature = "sixel") {
                         self.reply(format_args!("\x1b[?1;2;4c"))
                     } else {
                         self.reply(format_args!("\x1b[?1;2c"))
@@ -433,7 +433,7 @@ impl InputCtx {
             Csi::Sm => self.csi_modes(true, env),
             Csi::SmPrivate => return self.csi_modes_private(true, 0, env),
             Csi::SmGraphics => {
-                if env.policy.sixel && self.params.len() <= 3 {
+                if cfg!(feature = "sixel") && self.params.len() <= 3 {
                     let n = self.params.get(0, 0, 0);
                     let m = self.params.get(1, 0, 0);
                     let o = self.params.get(2, 0, 0);

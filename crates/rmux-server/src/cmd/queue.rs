@@ -623,6 +623,16 @@ pub fn next(runtime: &mut dyn QueueRuntime, client: Option<ClientId>) -> u32 {
         runtime.store_mut().queue_mut(client).running = head;
         let Some(id) = head else { break };
         let item = runtime.store().items.get(id).expect("queue head");
+        if rmux_util::log::level().0 != 0 {
+            let owner = client
+                .and_then(|id| runtime.client_view(id))
+                .map_or(b"global".as_slice(), |view| view.name);
+            rmux_util::log_debug!(
+                "cmdq_next <{}>: {}",
+                String::from_utf8_lossy(owner),
+                String::from_utf8_lossy(item.name.as_bytes())
+            );
+        }
         if item.flags.contains(QueueItemFlags::WAITING) {
             break;
         }

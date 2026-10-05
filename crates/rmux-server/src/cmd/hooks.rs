@@ -111,7 +111,11 @@ pub trait HooksRuntime: CommandParser {
     fn hook_parse_error(&mut self, item: Option<QueueItemId>, message: &[u8], debug_only: bool);
     fn add_hook_sink(&mut self, name: &[u8], monitor: Option<HooksMonitorId>) -> EventSinkId;
     fn remove_hook_sink(&mut self, sink: EventSinkId);
-    fn create_monitor_set(&mut self, session: SessionId, monitor: HooksMonitorId) -> MonitorSetId;
+    fn create_monitor_set(
+        &mut self,
+        session: Option<SessionId>,
+        monitor: HooksMonitorId,
+    ) -> MonitorSetId;
     fn destroy_monitor_set(&mut self, set: MonitorSetId);
     fn add_model_monitor(
         &mut self,
@@ -395,7 +399,7 @@ pub struct MonitorSpec<'a> {
     pub format: &'a [u8],
     pub flags: MonitorFlags,
     pub target: &'a CmdFindState,
-    pub session: SessionId,
+    pub session: Option<SessionId>,
 }
 pub fn monitor_add(
     runtime: &mut dyn HooksRuntime,

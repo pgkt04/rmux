@@ -92,6 +92,7 @@ pub struct SpawnContext {
     pub client_environment: Option<Environment>,
     pub client_attached: bool,
     pub clients: Vec<super::resize::ResizeClient>,
+    pub initial_size: Option<super::resize::WindowSize>,
     pub argv: Vec<Vec<u8>>,
     pub environment: Environment,
     pub name: Option<Vec<u8>>,
@@ -114,6 +115,7 @@ impl SpawnContext {
             client_environment: None,
             client_attached: false,
             clients: Vec::new(),
+            initial_size: None,
             argv: Vec::new(),
             environment: Environment::new(),
             name: None,
@@ -519,14 +521,16 @@ pub fn spawn_window(server: &mut Server, sc: &mut SpawnContext) -> Result<Winlin
                 .get_number(server.options.global_w, b"window-size") as i32,
         )
         .map_err(|_| ModelError::message(b"invalid window size policy"))?;
-        let size = super::resize::default_window_size(
-            &sc.clients,
-            sc.client,
-            sc.session,
-            None,
-            policy,
-            server.options.get_string(s.options, b"default-size"),
-        );
+        let size = sc.initial_size.unwrap_or_else(|| {
+            super::resize::default_window_size(
+                &sc.clients,
+                sc.client,
+                sc.session,
+                None,
+                policy,
+                server.options.get_string(s.options, b"default-size"),
+            )
+        });
         let index = if sc.index == -1 {
             -1 - server.options.get_number(s.options, b"base-index") as i32
         } else {
@@ -569,6 +573,7 @@ pub fn spawn_window(server: &mut Server, sc: &mut SpawnContext) -> Result<Winlin
                 .options
                 .set_number_value(w.options, b"automatic-rename", 0);
         }
+        crate::ui::border::window_set_fill_cells(server, window);
     }
     if !sc.flags.contains(SpawnFlags::DETACHED) {
         super::session::session_set_current(server, sc.session, Some(link));

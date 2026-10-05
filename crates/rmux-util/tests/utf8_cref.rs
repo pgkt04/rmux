@@ -843,8 +843,16 @@ impl OracleServer {
 
 impl Drop for OracleServer {
     fn drop(&mut self) {
-        let _ = self.run(&["kill-server"]);
-        let _ = std::fs::remove_dir_all(self.socket.parent().unwrap());
+        let _ = Command::new(&self.tmux)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .env_remove("TMUX")
+            .env("LC_ALL", "en_US.UTF-8")
+            .output();
+        if let Some(dir) = self.socket.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 

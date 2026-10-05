@@ -15,9 +15,7 @@
  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! DCS dispatch: DECRQSS and passthrough (`input.c:2540-2682`). The sixel
-//! decode (`input.c:2644-2656`) routes through G06 when it exists; its
-//! parameter split still runs because a split failure ends the dispatch.
+//! DCS dispatch: DECRQSS, SIXEL, and passthrough (`input.c:2540-2682`).
 
 use super::{Env, FLAG_DISCARD, Flow, InputCtx, Passthrough};
 use crate::screen::{ScreenCursorStyle, ScreenMode};
@@ -66,13 +64,23 @@ impl InputCtx {
         if self.flags & FLAG_DISCARD != 0 {
             return Flow::Done;
         }
-        if env.policy.sixel
-            && env.policy.has_pane
+        #[cfg(feature = "sixel")]
+        if env.policy.has_pane
             && self.string.first() == Some(&b'q')
             && self.interm.as_slice().is_empty()
-            && self.params.split(self.param_buf.as_slice()).is_err()
         {
-            return Flow::Done;
+            if self.params.split(self.param_buf.as_slice()).is_err() {
+                return Flow::Done;
+            }
+            let p2 = self.params.get(1, 0, 0).max(0) as u32;
+            let (xpixel, ypixel) = env.policy.pixels.unwrap_or((16, 32));
+            let xpixel =
+                std::num::NonZeroU32::new(xpixel).unwrap_or(std::num::NonZeroU32::new(16).unwrap());
+            let ypixel =
+                std::num::NonZeroU32::new(ypixel).unwrap_or(std::num::NonZeroU32::new(32).unwrap());
+            if let Ok(image) = crate::image::SixelImage::parse(&self.string, p2, xpixel, ypixel) {
+                env.sw.sixelimage(image, self.cell.cell.bg);
+            }
         }
         if self.interm.as_slice() == b"$" && self.string.first() == Some(&b'q') {
             return self.decrqss(env);

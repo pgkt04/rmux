@@ -3,6 +3,8 @@ use super::{Screen, ScreenMode};
 use crate::cell::{DEFAULT_CELL, GridCell, GridCellFlags};
 use crate::colour::Colour;
 use crate::hyperlinks::HyperlinkRegistry;
+#[cfg(feature = "sixel")]
+use crate::image::{ImageRegistry, SixelImage};
 use std::ops::Range;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -144,6 +146,10 @@ pub enum DrawCommand<'a> {
         data: &'a [u8],
         allow_invisible: bool,
     },
+    #[cfg(feature = "sixel")]
+    SixelImage {
+        image: &'a crate::image::Image,
+    },
 }
 pub struct DrawOp<'a> {
     pub command: DrawCommand<'a>,
@@ -255,6 +261,8 @@ pub struct ScreenWriteCtx<'a> {
     pub(crate) sink: &'a mut dyn TtySink,
     pub policy: ScreenWritePolicy,
     pub registry: &'a mut HyperlinkRegistry,
+    #[cfg(feature = "sixel")]
+    pub images: &'a mut ImageRegistry,
     pub flags: ScreenWriteFlags,
     pub(crate) spans: Vec<Range<u32>>,
     pub(crate) scrolled: u32,
@@ -267,6 +275,7 @@ impl<'a> ScreenWriteCtx<'a> {
         sink: &'a mut dyn TtySink,
         policy: ScreenWritePolicy,
         registry: &'a mut HyperlinkRegistry,
+        #[cfg(feature = "sixel")] images: &'a mut ImageRegistry,
     ) -> Self {
         sink.begin_write();
         screen
@@ -277,6 +286,8 @@ impl<'a> ScreenWriteCtx<'a> {
             sink,
             policy,
             registry,
+            #[cfg(feature = "sixel")]
+            images,
             flags: ScreenWriteFlags::default(),
             spans: Vec::new(),
             scrolled: 0,
@@ -299,12 +310,15 @@ impl<'a> ScreenWriteCtx<'a> {
         policy: ScreenWritePolicy,
         registry: &'a mut HyperlinkRegistry,
         state: ScreenWriteState,
+        #[cfg(feature = "sixel")] images: &'a mut ImageRegistry,
     ) -> Self {
         Self {
             screen,
             sink,
             policy,
             registry,
+            #[cfg(feature = "sixel")]
+            images,
             flags: state.flags,
             spans: state.spans,
             scrolled: state.scrolled,
@@ -480,12 +494,85 @@ impl<'a> ScreenWriteCtx<'a> {
             snap,
         );
     }
+    #[cfg(feature = "sixel")]
+    pub(crate) fn image_redraw(&mut self, changed: bool) {
+        if changed && self.policy.pane_backed {
+            self.sink
+                .effect(ScreenRenderEffects::RequirePaneRedraw, self.screen);
+        }
+    }
+    #[cfg(feature = "sixel")]
+    pub(crate) fn image_check_line(&mut self, y: u32, height: u32) {
+        let changed = self.images.check_line(self.screen.image_owner(), y, height);
+        self.image_redraw(changed);
+    }
+    #[cfg(feature = "sixel")]
+    pub(crate) fn image_free_all(&mut self) {
+        let changed = self.images.free_all(self.screen.image_owner());
+        self.image_redraw(changed);
+    }
+    #[cfg(feature = "sixel")]
+    pub(crate) fn image_scroll_up(&mut self, lines: u32) {
+        let changed = self.images.scroll_up(self.screen.image_owner(), lines);
+        self.image_redraw(changed);
+    }
+    #[cfg(feature = "sixel")]
+    pub fn sixelimage(&mut self, mut data: SixelImage, bg: Colour) {
+        let width = self.screen.grid.sx();
+        let height = self.screen.grid.sy();
+        if height == 1 {
+            return;
+        }
+        let (cx, cy) = (self.screen.cx, self.screen.cy);
+        let (mut x, mut y) = data.size_in_cells();
+        if x > width || y > height - 1 {
+            let sx = x.min(width - cx);
+            let sy = y.min(height - 1);
+            let Some(cropped) = data.scale(None, None, 0, y - sy, sx, sy, true) else {
+                return;
+            };
+            data = cropped;
+            (x, y) = data.size_in_cells();
+        }
+        let remaining = height - cy;
+        if remaining <= y {
+            let lines = y - remaining + 1;
+            self.image_scroll_up(lines);
+            for _ in 0..lines {
+                self.screen.grid.view_scroll_region_up(0, height - 1, bg);
+                self.scroll_collection(bg);
+            }
+            self.scrolled = self.scrolled.wrapping_add(lines);
+            self.cursormove(-1, cy.saturating_sub(lines) as i32, false);
+        }
+        self.flush(false);
+        let snapshot = self.snapshot(false);
+        let owner = self.screen.image_owner();
+        let id = self
+            .images
+            .store(owner, data, self.screen.cx, self.screen.cy);
+        let image = self.images.get(owner, id).expect("stored image is live");
+        self.sink.draw(
+            DrawOp {
+                command: DrawCommand::SixelImage { image },
+                screen: self.screen,
+                hyperlinks: self.registry,
+            },
+            &snapshot,
+        );
+        self.cursormove(0, cy.wrapping_add(y) as i32, false);
+    }
     pub fn alternateon(&mut self, cell: &GridCell, save_cursor: bool) -> bool {
         if !self.policy.alternate_screen {
             return false;
         }
         self.flush(false);
-        let changed = self.screen.alternate_on(cell, save_cursor);
+        let changed = self.screen.alternate_on(
+            cell,
+            save_cursor,
+            #[cfg(feature = "sixel")]
+            self.images,
+        );
         if changed {
             let _ = self.snapshot(true);
             self.sink.effect(
@@ -503,7 +590,12 @@ impl<'a> ScreenWriteCtx<'a> {
             return false;
         }
         self.flush(false);
-        let changed = self.screen.alternate_off(cell, restore_cursor);
+        let changed = self.screen.alternate_off(
+            cell,
+            restore_cursor,
+            #[cfg(feature = "sixel")]
+            self.images,
+        );
         if changed {
             let _ = self.snapshot(true);
             self.sink.effect(

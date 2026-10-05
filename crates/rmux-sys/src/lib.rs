@@ -1,3 +1,4 @@
+pub mod client;
 pub mod errno;
 pub mod fd;
 pub mod ids;
@@ -5,6 +6,7 @@ pub mod locale;
 pub mod osdep;
 pub mod proc;
 pub mod pty;
+pub mod server;
 pub mod termios;
 
 pub use errno::{access_executable, errno, strerror};

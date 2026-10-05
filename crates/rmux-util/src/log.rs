@@ -80,6 +80,13 @@ pub fn write(prefix: &str, args: fmt::Arguments<'_>) {
         return;
     }
     let message = fmt::format(args);
+    write_bytes(prefix, message.as_bytes());
+}
+
+pub fn write_bytes(prefix: &str, message: &[u8]) {
+    if !enabled() {
+        return;
+    }
     let mut line = Vec::with_capacity(message.len() * 2 + prefix.len() + 32);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -90,7 +97,7 @@ pub fn write(prefix: &str, args: fmt::Arguments<'_>) {
     );
     strvis(
         &mut line,
-        message.as_bytes(),
+        message,
         VisFlags::OCTAL | VisFlags::CSTYLE | VisFlags::TAB | VisFlags::NL,
     );
     line.push(b'\n');

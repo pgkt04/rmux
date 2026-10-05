@@ -123,6 +123,64 @@ impl TermiosState {
     pub fn read_timeout(&self) -> u8 {
         self.0.c_cc[libc::VTIME]
     }
+
+    /// Mutable `c_cc` for `VMIN`/`VTIME` (`client.c:356-357`).
+    pub fn cc_mut(&mut self) -> &mut [libc::cc_t] {
+        &mut self.0.c_cc
+    }
+
+    /// `cfsetispeed`/`cfsetospeed` from `from` (`client.c:358-359`).
+    pub fn copy_speeds(&mut self, from: &Self) {
+        // SAFETY: both termios values are valid plain data owned by the callers.
+        unsafe {
+            libc::cfsetispeed(&mut self.0, libc::cfgetispeed(&from.0));
+            libc::cfsetospeed(&mut self.0, libc::cfgetospeed(&from.0));
+        }
+    }
+
+    /// `tcsetattr(fd, TCSAFLUSH, ...)` (`client.c:405,428`).
+    pub fn set_flush(&self, fd: BorrowedFd<'_>) -> io::Result<()> {
+        // SAFETY: fd is open for the borrow; self.0 is a valid termios.
+        if unsafe { libc::tcsetattr(fd.as_raw_fd(), libc::TCSAFLUSH, &self.0) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    /// `-CC` raw mode (`client.c:349-359`): `cfmakeraw`, then explicit
+    /// `c_iflag = ICRNL|IXANY`, `c_oflag = OPOST|ONLCR`, `c_lflag = NOKERNINFO`
+    /// where defined, `c_cflag = CREAD|CS8|HUPCL`, `VMIN = 1`, `VTIME = 0`, and
+    /// the speeds of `saved`.
+    #[must_use]
+    pub fn control_mode(saved: &Self) -> Self {
+        let mut tio = *saved;
+        tio.make_raw();
+        tio.0.c_iflag = libc::ICRNL | libc::IXANY;
+        tio.0.c_oflag = libc::OPOST | libc::ONLCR;
+        #[cfg(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        ))]
+        {
+            tio.0.c_lflag = libc::NOKERNINFO;
+        }
+        #[cfg(not(any(
+            target_os = "macos",
+            target_os = "freebsd",
+            target_os = "openbsd",
+            target_os = "netbsd"
+        )))]
+        {
+            tio.0.c_lflag = 0;
+        }
+        tio.0.c_cflag = libc::CREAD | libc::CS8 | libc::HUPCL;
+        tio.0.c_cc[libc::VMIN] = 1;
+        tio.0.c_cc[libc::VTIME] = 0;
+        tio.copy_speeds(saved);
+        tio
+    }
 }
 
 #[cfg(test)]

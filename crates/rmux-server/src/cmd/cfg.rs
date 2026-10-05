@@ -34,6 +34,23 @@ pub enum CfgCallback {
     Done,
 }
 
+#[derive(Debug)]
+pub enum CfgViewError {
+    Unavailable,
+    Model(crate::model::ModelError),
+}
+
+impl std::fmt::Display for CfgViewError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Unavailable => f.write_str("view mode unavailable"),
+            Self::Model(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for CfgViewError {}
+
 /// Boundaries implemented by the server, client, model, and queue owners.
 pub trait CfgRuntime: ParseContext {
     fn first_client(&self) -> Option<ClientId>;
@@ -45,8 +62,9 @@ pub trait CfgRuntime: ParseContext {
     fn session_attached(&self, session: SessionId) -> bool;
     fn session_active_pane(&self, session: SessionId) -> PaneId;
     fn pane_top_is_view(&self, pane: PaneId) -> bool;
-    fn enter_view_mode(&mut self, pane: PaneId);
-    fn append_view_line(&mut self, pane: PaneId, line: &[u8]);
+    fn enter_view_mode(&mut self, pane: PaneId) -> Result<(), CfgViewError>;
+    fn append_view_line(&mut self, pane: PaneId, line: &[u8]) -> Result<(), CfgViewError>;
+    fn print_cfg_fallback(&mut self, client: Option<ClientId>, cause: &[u8]);
     fn notify_config_error(&mut self, client: ClientId, cause: &[u8]);
     fn print_cfg_cause(&mut self, item: QueueItemId, cause: &[u8]);
     fn load_prompt_history(&mut self);
@@ -290,11 +308,14 @@ impl CfgState {
             return;
         };
         let pane = runtime.session_active_pane(session);
-        if !runtime.pane_top_is_view(pane) {
-            runtime.enter_view_mode(pane);
+        let mut view = runtime.pane_top_is_view(pane);
+        if !view {
+            view = runtime.enter_view_mode(pane).is_ok();
         }
         for cause in self.causes.drain(..) {
-            runtime.append_view_line(pane, cause.as_ref());
+            if !view || runtime.append_view_line(pane, cause.as_ref()).is_err() {
+                runtime.print_cfg_fallback(client, cause.as_ref());
+            }
         }
     }
 }

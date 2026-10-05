@@ -2067,14 +2067,10 @@ pub fn model_value(
             server,
             context.pane?,
         )?)),
-        b"pane_z" => FormatValue::Unsigned(
-            server
-                .windows
-                .get(pane?.window)?
-                .z_order
-                .iter()
-                .position(|id| Some(*id) == context.pane)? as u64,
-        ),
+        b"pane_z" => FormatValue::Unsigned(u64::from(crate::model::pane::pane_z_index(
+            server,
+            context.pane?,
+        )?)),
         b"pane_left" | b"pane_x" => FormatValue::Signed(i64::from(pane?.xoff)),
         b"pane_top" | b"pane_y" => FormatValue::Signed(i64::from(pane?.yoff)),
         b"pane_right" => FormatValue::Signed(i64::from(
@@ -3350,5 +3346,40 @@ int main(int argc,char **argv) {
                 .bytes(),
             b"35"
         );
+    }
+
+    #[test]
+    fn pane_z_skips_hidden_floats_and_uses_tiled_sentinel() {
+        use crate::layout::{self, LayoutGeometry};
+        use crate::model::{pane, spawn::SpawnFlags, window};
+
+        let mut server = crate::model::Server::new();
+        let w = window::window_create(&mut server, 80, 24, 0, 0).unwrap();
+        let tiled = window::window_add_pane(&mut server, w, None, 10, SpawnFlags::default()).unwrap();
+        window::window_set_active_pane(&mut server, w, tiled, false).unwrap();
+        layout::init(&mut server, w, tiled);
+        let g = LayoutGeometry { sx: 20, sy: 6, xoff: 4, yoff: 4 };
+        let mut floats = Vec::new();
+        for _ in 0..3 {
+            let lc = layout::floating_pane(&mut server, w, Some(tiled), &g);
+            let p = window::window_add_pane(&mut server, w, Some(tiled), 10, SpawnFlags::FLOATING).unwrap();
+            layout::assign_pane(&mut server, lc, p, false);
+            floats.push(p);
+        }
+        let [back, hidden, front] = [floats[0], floats[1], floats[2]];
+        server.windows.get_mut(w).unwrap().z_order = vec![back, hidden, front, tiled];
+        let p = server.panes.get_mut(hidden).unwrap();
+        p.saved_layout_cell = p.layout_cell.take();
+        for (p, expected) in [(back, b"0".as_slice()), (front, b"1"), (tiled, b"3")] {
+            let context = FormatContext { pane: Some(p), window: Some(w), ..FormatContext::default() };
+            assert_eq!(model_value(&server, &context, b"pane_z").unwrap().bytes(), expected);
+        }
+        let p = server.panes.get_mut(hidden).unwrap();
+        p.layout_cell = p.saved_layout_cell.take();
+        assert!(pane::pane_is_floating(&server, hidden));
+        for (p, expected) in [(hidden, b"1".as_slice()), (front, b"2"), (tiled, b"4")] {
+            let context = FormatContext { pane: Some(p), window: Some(w), ..FormatContext::default() };
+            assert_eq!(model_value(&server, &context, b"pane_z").unwrap().bytes(), expected);
+        }
     }
 }

@@ -159,6 +159,12 @@ impl ScreenWriteCtx<'_> {
             }
             return;
         }
+        #[cfg(feature = "sixel")]
+        if self.screen.rlower == self.screen.grid.sy() - 1 {
+            self.image_scroll_up(1);
+        } else {
+            self.image_check_line(self.screen.rupper, self.screen.rlower - self.screen.rupper);
+        }
         self.screen
             .grid
             .view_scroll_region_up(self.screen.rupper, self.screen.rlower, bg);
@@ -171,6 +177,8 @@ impl ScreenWriteCtx<'_> {
             .max(1)
             .min(self.screen.rlower - self.screen.rupper + 1);
         self.prepare_scroll(bg);
+        #[cfg(feature = "sixel")]
+        self.image_scroll_up(count);
         for _ in 0..count {
             self.screen
                 .grid
@@ -186,6 +194,8 @@ impl ScreenWriteCtx<'_> {
         let count = count
             .max(1)
             .min(self.screen.rlower - self.screen.rupper + 1);
+        #[cfg(feature = "sixel")]
+        self.image_free_all();
         for _ in 0..count {
             self.screen
                 .grid
@@ -210,6 +220,8 @@ impl ScreenWriteCtx<'_> {
             }
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_free_all();
         self.screen
             .grid
             .view_scroll_region_down(self.screen.rupper, self.screen.rlower, bg);
@@ -228,6 +240,8 @@ impl ScreenWriteCtx<'_> {
     }
 
     pub fn alignmenttest(&mut self) {
+        #[cfg(feature = "sixel")]
+        self.image_free_all();
         let mut cell = DEFAULT_CELL;
         cell.data = Utf8Data::set(b'E');
         let width = self.screen.grid.sx();
@@ -259,6 +273,8 @@ impl ScreenWriteCtx<'_> {
         if count == 0 || self.screen.cx >= self.screen.grid.sx() {
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_check_line(self.screen.cy, 1);
         let snapshot = self.snapshot(false);
         let obscured = self.obscured();
         self.screen
@@ -280,6 +296,8 @@ impl ScreenWriteCtx<'_> {
         if count == 0 || self.screen.cx >= self.screen.grid.sx() {
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_check_line(self.screen.cy, 1);
         let snapshot = self.snapshot(false);
         let obscured = self.obscured();
         self.screen
@@ -301,6 +319,8 @@ impl ScreenWriteCtx<'_> {
         if count == 0 || self.screen.cx >= self.screen.grid.sx() {
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_check_line(self.screen.cy, 1);
         let snapshot = self.snapshot(false);
         let obscured = self.obscured();
         self.screen
@@ -330,6 +350,8 @@ impl ScreenWriteCtx<'_> {
         if count == 0 {
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, height - y);
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
         if in_region {
@@ -363,6 +385,8 @@ impl ScreenWriteCtx<'_> {
         if count == 0 {
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, height - y);
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
         if in_region {
@@ -402,6 +426,8 @@ impl ScreenWriteCtx<'_> {
         }
         let flags = line.flags & GridLineFlags::OSC133_FLAGS;
         let osc133 = line.osc133;
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, 1);
         self.screen.grid.view_clear(0, y, width, 1, bg);
         let line = self.screen.grid.get_line_mut(absolute_y);
         line.flags.insert(flags);
@@ -422,6 +448,8 @@ impl ScreenWriteCtx<'_> {
         if x >= width || (x >= line.cellsize() && bg.is_default()) {
             return;
         }
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, 1);
         self.screen.grid.view_clear(x, y, width - x, 1, bg);
         self.insert_clear(x, y, width - x, bg);
     }
@@ -433,6 +461,8 @@ impl ScreenWriteCtx<'_> {
         }
         let count = self.screen.cx + 1;
         let y = self.screen.cy;
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, 1);
         self.screen.grid.view_clear(0, y, count, 1, bg);
         self.insert_clear(0, y, count, bg);
     }
@@ -462,6 +492,8 @@ impl ScreenWriteCtx<'_> {
         let y = self.screen.cy;
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, height - y);
         if x == 0 && y == 0 && self.scroll_on_clear() {
             self.screen.grid.view_clear_history(bg);
         } else {
@@ -497,6 +529,8 @@ impl ScreenWriteCtx<'_> {
         let y = self.screen.cy;
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
+        #[cfg(feature = "sixel")]
+        self.image_check_line(0, y.wrapping_sub(1));
         if y > 0 {
             self.screen.grid.view_clear(0, 0, width, y, bg);
         }
@@ -528,6 +562,8 @@ impl ScreenWriteCtx<'_> {
         let height = self.screen.grid.sy();
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
+        #[cfg(feature = "sixel")]
+        self.image_free_all();
         if self.scroll_on_clear() {
             self.screen.grid.view_clear_history(bg);
         } else {

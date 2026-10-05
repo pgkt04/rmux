@@ -182,6 +182,8 @@ pub fn select_request_client(clients: impl IntoIterator<Item = InputClient>) -> 
 /// Pipe and control delivery complete before parsing; alternate/sync repairs
 /// complete before the next parser handler runs.
 pub trait PaneInputHost {
+    fn begin_draw(&mut self, _server: &mut Server, _pane: PaneId) {}
+    fn end_draw(&mut self, _server: &mut Server, _pane: PaneId) {}
     fn tty_sink(&mut self) -> &mut dyn TtySink;
     fn write_policy(&self, server: &Server, pane: PaneId) -> ScreenWritePolicy;
     fn now_ms(&self) -> u64;
@@ -304,6 +306,7 @@ pub fn pane_drain_input(
 
 pub fn pane_reset_io(server: &mut Server, id: PaneId) -> Result<(), ModelError> {
     cancel_pane_requests(server, id)?;
+    crate::server::run::close_pane_io(server, id);
     let p = server.panes.get_mut(id).ok_or(ModelError::StaleId)?;
     p.fd = None;
     p.input.clear();
@@ -495,6 +498,7 @@ fn parse_buffer(
         }
         let policy = input_policy(server, id)?;
         let write_policy = host.write_policy(server, id);
+        host.begin_draw(server, id);
         let (consumed, effect) = {
             let p = server.panes.get_mut(id).ok_or(ModelError::StaleId)?;
             let bytes = external.map_or_else(
@@ -532,6 +536,7 @@ fn parse_buffer(
                 }
             }
         };
+        host.end_draw(server, id);
         consumed_total += consumed;
         let Some(effect) = effect else {
             if external.is_none() {
@@ -665,10 +670,7 @@ pub fn apply_effect(
                 )?;
             }
         }
-        OwnedInputEffect::ClipboardReceived { data, .. } => {
-            let limit = option_number(server, server.options.global, b"buffer-limit", 50) as u32;
-            super::paste::paste_add(server, None, data.clone(), limit)?;
-        }
+        OwnedInputEffect::ClipboardReceived { .. } => {}
         OwnedInputEffect::ColourQuery { which, end } => {
             let colour = host.colour(server, id, *which);
             let mut reply = Vec::new();
@@ -844,6 +846,10 @@ pub fn apply_effect(
         .is_some_and(|p| !p.flags.contains(PaneFlags::DESTROYED))
     {
         host.effect(server, id, &effect);
+    }
+    if let OwnedInputEffect::ClipboardReceived { data, .. } = &effect {
+        let limit = option_number(server, server.options.global, b"buffer-limit", 50) as u32;
+        super::paste::paste_add(server, None, data.clone(), limit)?;
     }
     Ok(())
 }

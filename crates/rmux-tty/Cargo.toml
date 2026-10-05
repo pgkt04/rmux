@@ -12,3 +12,6 @@ workspace = true
 rmux-emu.workspace = true
 rmux-util.workspace = true
 rmux-sys.workspace = true
+
+[features]
+sixel = ["rmux-emu/sixel"]

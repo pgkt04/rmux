@@ -182,9 +182,12 @@ pub fn session_create(server: &mut Server, create: SessionCreate) -> SessionId {
             references: 1,
             lock_timer_initialized: false,
             lock_timer_pending: false,
+            statusat: -1,
+            statuslines: 0,
         })
         .expect("session arena");
     server.sessions.retain(id).expect("session root reference");
+    crate::ui::status::status_update_cache(server, id);
     // Explicit duplicate names are rejected by commands, not session_create.
     server.session_names.entry(name).or_insert(id);
     effect(server, SessionEffect::StatusCache(id));

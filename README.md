@@ -74,6 +74,29 @@ Run `TMUX_SRC=/Users/j/fun/tmux cargo test -p rmux-server --test format_json_reg
 for automatic JSON/substitution C extraction; `RMUX_JSON_REGSUB_DRIVER` selects
 an already compiled driver for the parser, typed accessor and substitution corpus.
 
+The G16 control transport (`rmux-server::control`) keeps LF command framing,
+typed command guards, deferred notification FIFO, independent pane OFF/PAUSED
+flags, and two retained consumer offsets. Its reply-barrier chain and per-pane
+chains share generation-bearing block slots; raw bytes remain in the model pane
+buffer and are octal-encoded only when serviced. Control notification sinks are
+registered before hooks. Subscription timers use the model monitor engine.
+Regular identified input/output descriptors use bounded direct I/O scheduled on
+the server loop, rather than mio registration; pipe/socket/tty endpoints retain
+normal readiness ownership. The differential also attaches to an existing
+session with regular-file stdout to cover that startup path.
+Run the private-socket command-stream differential after building the binary:
+`RMUX_CONTROL_BINARY=target/debug/rmux cargo test -p rmux-server --test control_oracle`.
+Only guard timestamps and command sequence numbers are normalized; protocol
+bytes and notification ordering remain exact.
+
+The G20 command handlers connect session/window creation, pane break/join/move,
+pane capture, prompts, menus and modal popups to the model and UI owners. Initial session dimensions
+are passed explicitly to window spawning; repeated environment overrides apply
+after client environment updates. Prompt cancellation and failed asynchronous
+conditions release prepared command state and resume waiting queue items.
+Run the private-socket G20 creation/capture/pane-transfer comparison with
+`RMUX_COMMANDS_A_BINARY=target/debug/rmux cargo test -p rmux-server --test commands_a_oracle`.
+
 ## Build
 
 Stable Rust 1.85 or newer (edition 2024):
@@ -241,6 +264,39 @@ window size and every pane's geometry after each step of split, `new-pane`,
 walk; they skip when `oracle/bin/tmux` is missing. `parse_fuzz_never_panics`
 accepts `RMUX_LAYOUT_FUZZ_SECONDS` and `RMUX_LAYOUT_FUZZ_SEED`.
 
+The G14 server runtime extends the existing model `Server`; it does not wrap a
+second object graph. A single-threaded mio loop owns generational registrations,
+monotonic timers and deferred callbacks. Rejected null endpoints complete reads
+as EOF and writes immediately; regular files advance in bounded 64 KiB turns.
+Pane parsing restores the client root before synchronous effects, hooks and
+control notifications. Command queues run to a fixed point before client redraw
+and the exit predicate. ACLs use verified socket credentials (UID before the
+primary GID), and jobs complete only after both child status and output closure.
+Freeing a live job and killing all jobs signal owned child PIDs with SIGTERM;
+transferring a job moves its PID and descriptor without signaling or closing them.
+
+Client/server transport uses RMUX version 1 frames: a 16-byte little-endian
+header, a 32768-byte physical maximum, explicit string lengths and owned
+SCM_RIGHTS descriptors. Legacy command and file size budgets remain separate
+from framing overhead. There is no imsg compatibility backend or TMUX runtime
+namespace alias. File transfers retain deferred completion and late write-error
+acknowledgments; the CLI owns original standard descriptors so requested closes
+close the originals, not extra duplicates.
+
+Server startup deliberately re-executes the current binary through a hidden
+internal selector instead of returning into Rust after `fork`. The lock-file
+protocol, inherited environment and cwd, socketpair initial peer, foreground
+`-D` behavior and listener-error handshake remain shared with ordinary startup.
+The fresh server process calls `setsid`; prepared pane/job/pipe launches execute
+only prebuilt child actions and never return to arbitrary Rust in the child.
+
+Live format expansion reads client, command-item and mouse snapshots, retains
+owners synchronously, and uses the same job registry for asynchronous output,
+cycle timers, cancellation and hourly cleanup. The G18 configuration viewer is
+not duplicated in G14: until wave C supplies its driver, a typed unavailable
+result follows the documented no-view cause-printing path. The fallback is
+covered by a configuration test and must be replaced by the G18 integration.
+
 ## Pinned oracle
 
 Supply an existing tmux git checkout containing the pin. The build script uses
@@ -288,8 +344,10 @@ oracle. Note that macOS `/usr/bin/mktemp` ignores `TMPDIR`, so scripts that set
 under the per-user `/var/folders/.../T/` rather than the harness root.
 
 `harness/regress-manifest.toml` is the checked-in classification: unchanged,
-namespace-mapped, or adapted. The one raw-imsg test is `needs-fixture` for rmux
-until P7 provides its semantic protocol fixture. Namespace mapping is applied
+namespace-mapped, or adapted. The raw-imsg configuration-client-loss test runs
+its equivalent RMUX identify-then-malformed-command fixture from
+`harness/fixtures/`; the original causal log assertions remain unchanged.
+Namespace mapping is applied
 only with `--rmux` and printed per test. It preserves `TEST_TMUX`, terminfo names
 and command behavior. Oracle failures/timeouts from `--baseline` are reported as
 `oracle-fail`, not rmux failures. `cargo test` validates exact manifest coverage
@@ -307,6 +365,12 @@ observations, not Linux claims.
 
 `rmux_harness::differential::compare` starts two binaries on separate temporary
 sockets, applies the same ordered commands and compares status/stdout/stderr.
+`Step::WaitForPaneOutput` polls each server's capture for expected output with a
+five-second limit; G21 cat fixtures use complete output markers before capture
+or reset instead of relying on sleeps. Socket guards send `kill-server` even
+when startup or a test panics; the regress runner also guards recorded sockets
+on early errors. Teardown checks compare last-session exit, `kill-server`, and
+panic cleanup against the oracle and verify the server and pane processes exit.
 The unit tests prove oracle-vs-oracle parity for display, capture-pane and
 list-panes, and deliberately change a session name to prove mismatch detection.
 They use `oracle/bin/tmux` or `RMUX_ORACLE`; without an oracle they print a skip.

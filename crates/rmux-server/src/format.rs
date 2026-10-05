@@ -144,6 +144,7 @@ pub struct FormatContext {
     pub pane: Option<PaneId>,
     pub buffer: Option<PasteBufferId>,
     pub kind: FormatKind,
+    pub mouse: Option<crate::cmd::find::MouseInput>,
 }
 #[derive(Clone, Debug)]
 pub enum FormatValue {
@@ -197,6 +198,7 @@ impl FormatTree {
             entries: BTreeMap::new(),
         };
         if let Some(item) = item {
+            tree.context.mouse = runtime.mouse(item);
             for (key, value) in runtime.queue_formats(item) {
                 tree.add(&key, value);
             }
@@ -218,6 +220,7 @@ impl FormatTree {
         } else {
             FormatKind::Unknown
         };
+        context.mouse = context.mouse.or(self.context.mouse);
         self.context = runtime.defaults(context);
     }
     pub fn defaults_window(&mut self, window: WindowId) {

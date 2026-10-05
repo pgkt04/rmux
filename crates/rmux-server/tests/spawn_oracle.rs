@@ -26,7 +26,11 @@ impl Oracle {
 }
 impl Drop for Oracle {
     fn drop(&mut self) {
-        let _ = self.run(&["kill-server"]);
+        let _ = Command::new(&self.binary)
+            .arg("-S")
+            .arg(&self.socket)
+            .arg("kill-server")
+            .output();
         let _ = std::fs::remove_file(&self.socket);
     }
 }

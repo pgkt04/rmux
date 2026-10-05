@@ -310,6 +310,7 @@ pub fn resize_window(
             sx,
             sy,
         }));
+    server.emit(b"window-resized", None, Some(id), None);
     let w = server.windows.get_mut(id).unwrap();
     w.pending = None;
     w.flags.remove(super::WindowFlags::RESIZE);

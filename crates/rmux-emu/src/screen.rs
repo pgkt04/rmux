@@ -236,6 +236,8 @@ use crate::cell::{GridAttributes, GridCell, GridCellFlags};
 use crate::colour::Colour;
 use crate::grid::{Grid, GridFlags};
 use crate::hyperlinks::{HyperlinkError, HyperlinkRegistry, Hyperlinks};
+#[cfg(feature = "sixel")]
+use crate::image::{ImageOwnerId, ImageRegistry};
 use rmux_util::{utf8, vis::VisFlags};
 use std::collections::VecDeque;
 
@@ -292,6 +294,10 @@ pub struct Screen {
     pub hyperlinks: Option<Hyperlinks>,
     pub write_list: Vec<write::ScreenWriteLine>,
     pub reset_policy: ScreenResetPolicy,
+    #[cfg(feature = "sixel")]
+    images: ImageOwnerId,
+    #[cfg(feature = "sixel")]
+    saved_images: ImageOwnerId,
 }
 
 impl Screen {
@@ -301,6 +307,7 @@ impl Screen {
         hlimit: u32,
         policy: ScreenResetPolicy,
         registry: &mut HyperlinkRegistry,
+        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
     ) -> Result<Self, HyperlinkError> {
         let mut screen = Self {
             grid: Grid::new(sx, sy, hlimit),
@@ -330,12 +337,31 @@ impl Screen {
             hyperlinks: Some(registry.create()?),
             write_list: Vec::new(),
             reset_policy: policy,
+            #[cfg(feature = "sixel")]
+            images: images.create_owner(),
+            #[cfg(feature = "sixel")]
+            saved_images: images.create_owner(),
         };
-        screen.reinit(true, policy, registry)?;
+        screen.reinit(
+            true,
+            policy,
+            registry,
+            #[cfg(feature = "sixel")]
+            images,
+        )?;
         Ok(screen)
     }
 
-    pub fn release(&mut self, registry: &mut HyperlinkRegistry) -> Result<(), HyperlinkError> {
+    pub fn release(
+        &mut self,
+        registry: &mut HyperlinkRegistry,
+        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+    ) -> Result<(), HyperlinkError> {
+        #[cfg(feature = "sixel")]
+        {
+            images.release_owner(self.images);
+            images.release_owner(self.saved_images);
+        }
         if let Some(links) = self.hyperlinks.take() {
             registry.release(links)?;
         }
@@ -354,6 +380,7 @@ impl Screen {
         check: bool,
         policy: ScreenResetPolicy,
         registry: &mut HyperlinkRegistry,
+        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
     ) -> Result<(), HyperlinkError> {
         self.reset_policy = policy;
         self.cx = 0;
@@ -365,8 +392,15 @@ impl Screen {
             self.mode.insert(ScreenMode::KEYS_EXTENDED);
         }
         if self.is_alternate() {
-            self.alternate_off(None, false);
+            self.alternate_off(
+                None,
+                false,
+                #[cfg(feature = "sixel")]
+                images,
+            );
         }
+        #[cfg(feature = "sixel")]
+        images.free_all(self.images);
         self.saved_cursor = None;
         self.reset_tabs();
         if check {
@@ -441,8 +475,22 @@ impl Screen {
         }
     }
 
-    pub fn resize(&mut self, sx: u32, sy: u32, reflow: bool) {
-        self.resize_cursor(sx, sy, reflow, true, true);
+    pub fn resize(
+        &mut self,
+        sx: u32,
+        sy: u32,
+        reflow: bool,
+        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+    ) {
+        self.resize_cursor(
+            sx,
+            sy,
+            reflow,
+            true,
+            true,
+            #[cfg(feature = "sixel")]
+            images,
+        );
     }
     pub fn resize_cursor(
         &mut self,
@@ -451,10 +499,13 @@ impl Screen {
         mut reflow: bool,
         eat_empty: bool,
         cursor: bool,
+        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
     ) {
         let (mut cx, mut cy) = (self.cx, self.grid.hsize() + self.cy);
         let had_write_list = !self.write_list.is_empty();
         self.write_list.clear();
+        #[cfg(feature = "sixel")]
+        images.free_all(self.images);
         let (sx, sy) = (sx.max(1), sy.max(1));
         if sx != self.grid.sx() {
             self.grid.set_sx(sx);
@@ -527,10 +578,20 @@ impl Screen {
         self.rlower = sy - 1;
     }
 
+    #[cfg(feature = "sixel")]
+    pub fn image_owner(&self) -> ImageOwnerId {
+        self.images
+    }
+
     pub fn is_alternate(&self) -> bool {
         self.saved_grid.is_some()
     }
-    pub fn alternate_on(&mut self, cell: &GridCell, cursor: bool) -> bool {
+    pub fn alternate_on(
+        &mut self,
+        cell: &GridCell,
+        cursor: bool,
+        #[cfg(feature = "sixel")] _images: &mut ImageRegistry,
+    ) -> bool {
         if self.is_alternate() {
             return false;
         }
@@ -541,17 +602,30 @@ impl Screen {
             self.saved_cursor = Some((self.cx, self.cy));
         }
         self.saved_cell = *cell;
+        #[cfg(feature = "sixel")]
+        std::mem::swap(&mut self.images, &mut self.saved_images);
         self.grid
             .view_clear(0, 0, self.grid.sx(), self.grid.sy(), Colour(8));
         self.saved_flags = self.grid.flags;
         self.grid.flags.remove(GridFlags::HISTORY);
         true
     }
-    pub fn alternate_off(&mut self, cell: Option<&mut GridCell>, cursor: bool) -> bool {
+    pub fn alternate_off(
+        &mut self,
+        cell: Option<&mut GridCell>,
+        cursor: bool,
+        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+    ) -> bool {
         let (sx, sy) = (self.grid.sx(), self.grid.sy());
         if let Some(saved) = &self.saved_grid {
             let size = (saved.sx(), saved.sy());
-            self.resize(size.0, size.1, false);
+            self.resize(
+                size.0,
+                size.1,
+                false,
+                #[cfg(feature = "sixel")]
+                images,
+            );
         }
         if cursor && let Some((cx, cy)) = self.saved_cursor {
             self.cx = cx;
@@ -567,8 +641,19 @@ impl Screen {
             if self.saved_flags.contains(GridFlags::HISTORY) {
                 self.grid.flags.insert(GridFlags::HISTORY);
             }
-            self.resize(sx, sy, true);
+            self.resize(
+                sx,
+                sy,
+                true,
+                #[cfg(feature = "sixel")]
+                images,
+            );
             self.saved_grid = None;
+            #[cfg(feature = "sixel")]
+            {
+                images.free_all(self.images);
+                std::mem::swap(&mut self.images, &mut self.saved_images);
+            }
         }
         self.cx = self.cx.min(self.grid.sx() - 1);
         self.cy = self.cy.min(self.grid.sy() - 1);

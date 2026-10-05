@@ -47,8 +47,22 @@ impl ModelView for Server {
             live_tty: p.has_fd(),
         })
     }
-    fn client(&self, _id: ClientId) -> Option<ClientView<'_>> {
-        None
+    fn client(&self, id: ClientId) -> Option<ClientView<'_>> {
+        let client = self.clients.get(id)?;
+        if client.flags.contains(crate::client::ClientFlags::DEAD) {
+            return None;
+        }
+        Some(ClientView {
+            name: client.name_bytes(),
+            tty: client.ttyname.as_deref().unwrap_or(b""),
+            session: client.session,
+            activity: client.activity_time,
+            rmux_pane: client
+                .environ
+                .find(b"RMUX_PANE")
+                .and_then(|entry| entry.value.as_ref())
+                .map(|value| value.as_bytes()),
+        })
     }
     fn sessions(&self, v: &mut dyn FnMut(SessionId)) {
         for id in self.session_names.values() {
@@ -65,16 +79,22 @@ impl ModelView for Server {
             v(*id);
         }
     }
-    fn clients(&self, _v: &mut dyn FnMut(ClientId)) {}
+    fn clients(&self, v: &mut dyn FnMut(ClientId)) {
+        for id in &self.client_order {
+            if self.client(*id).is_some() {
+                v(*id);
+            }
+        }
+    }
     fn marked(&self) -> Option<CmdFindState> {
         let wl = self.marked_winlink?;
         let l = self.winlinks.get(wl)?;
         let pane = self.marked_pane?;
         let state = CmdFindState {
             flags: CmdFindFlags::default(),
-            s: Some(l.session),
+            s: self.marked_session,
             wl: Some(wl),
-            w: Some(l.window),
+            w: self.marked_window,
             wp: Some(pane),
             idx: l.index,
         };
@@ -196,8 +216,12 @@ mod tests {
             ..CmdFindState::default()
         };
         assert!(state.is_valid(&server));
-        server.marked_winlink = Some(link);
-        server.marked_pane = Some(pane);
+        crate::server::operations::server_set_marked(
+            &mut server,
+            Some(session),
+            Some(link),
+            Some(pane),
+        );
         assert_eq!(server.marked(), Some(state));
         pane::pane_destroy(&mut server, pane).unwrap();
         assert!(!state.is_valid(&server));
