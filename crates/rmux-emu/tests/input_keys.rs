@@ -5,11 +5,31 @@
 
 use rmux_emu::input::ExtendedKeysFormat;
 use rmux_emu::input::keys::{
-    KEY_TABLE_LEN, KeyEncodeError, KeyPolicy, encode_key, encode_mouse, table_entries,
+    KEY_TABLE_LEN, KeyEncodeError, KeyPolicy, MouseBytes, encode_key, table_entries,
 };
 use rmux_emu::screen::ScreenMode;
-use rmux_util::key::{KeyCode, KeyFlags, KeyModifiers, SpecialKey};
+use rmux_util::key::{KeyCode, KeyFlags, KeyModifiers, MouseEvent, SpecialKey};
 use rmux_util::utf8::{Utf8Data, from_data};
+
+/// `input_key_get_mouse` on the fields it reads.
+fn encode_mouse(
+    mode: ScreenMode,
+    b: u32,
+    lb: u32,
+    sgr_b: u32,
+    sgr_type: u8,
+    x: u32,
+    y: u32,
+) -> Option<MouseBytes> {
+    let m = MouseEvent {
+        b,
+        lb,
+        sgr_b,
+        sgr_type,
+        ..MouseEvent::default()
+    };
+    rmux_emu::input::keys::encode_mouse(mode, &m, x, y)
+}
 
 const SHIFT: u64 = KeyModifiers::SHIFT.0;
 const META: u64 = KeyModifiers::META.0;

@@ -1,4 +1,4 @@
-// Ported from tmux compat.h, tmux.c @ 8f25579c
+// Ported from tmux tty.c, compat.h, tmux.c @ 8f25579c
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
@@ -131,4 +131,37 @@ pub fn flock(fd: BorrowedFd<'_>, operation: c_int) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+pub fn read(fd: BorrowedFd<'_>, bytes: &mut [u8]) -> io::Result<usize> {
+    // SAFETY: fd is open; bytes is writable for its length throughout the call.
+    let n = unsafe { libc::read(fd.as_raw_fd(), bytes.as_mut_ptr().cast(), bytes.len()) };
+    if n == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n as usize)
+}
+
+pub fn write(fd: BorrowedFd<'_>, bytes: &[u8]) -> io::Result<usize> {
+    // SAFETY: fd is open; bytes is readable for its length throughout the call.
+    let n = unsafe { libc::write(fd.as_raw_fd(), bytes.as_ptr().cast(), bytes.len()) };
+    if n == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n as usize)
+}
+
+pub fn isatty(fd: BorrowedFd<'_>) -> bool {
+    // SAFETY: fd is open for the borrow and isatty has no pointer arguments.
+    unsafe { libc::isatty(fd.as_raw_fd()) != 0 }
+}
+
+pub fn pipe() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut fds = [-1; 2];
+    // SAFETY: fds has room for the two descriptors returned by pipe.
+    if unsafe { libc::pipe(fds.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: successful pipe returned two fresh descriptors with unique ownership.
+    Ok(unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) })
 }

@@ -1,4 +1,4 @@
-// Ported from tmux compat.h, compat/cfmakeraw.c @ 8f25579c
+// Ported from tmux tty.c, compat.h, compat/cfmakeraw.c @ 8f25579c
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd};
@@ -47,6 +47,39 @@ impl TermiosState {
         tio.c_cflag |= CS8;
     }
 
+    /// Outer terminal mode (`tty.c:345-354`), not `cfmakeraw`.
+    pub fn make_tty_raw(&mut self) {
+        let tio = &mut self.0;
+        tio.c_iflag &= !(libc::IXON
+            | libc::IXOFF
+            | libc::ICRNL
+            | libc::INLCR
+            | libc::IGNCR
+            | libc::IMAXBEL
+            | libc::ISTRIP);
+        tio.c_iflag |= libc::IGNBRK;
+        tio.c_oflag &= !(libc::OPOST | libc::ONLCR | libc::OCRNL | libc::ONLRET);
+        tio.c_lflag &= !(libc::IEXTEN
+            | libc::ICANON
+            | libc::ECHO
+            | libc::ECHOE
+            | libc::ECHONL
+            | libc::ECHOCTL
+            | libc::ECHOPRT
+            | libc::ECHOKE
+            | libc::ISIG);
+        tio.c_cc[libc::VMIN] = 1;
+        tio.c_cc[libc::VTIME] = 0;
+    }
+
+    pub fn flush_output(fd: BorrowedFd<'_>) -> io::Result<()> {
+        // SAFETY: fd is open for the borrow; TCOFLUSH is a valid selector.
+        if unsafe { libc::tcflush(fd.as_raw_fd(), libc::TCOFLUSH) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
     pub fn iflag(&self) -> libc::tcflag_t {
         self.0.c_iflag
     }
@@ -82,5 +115,65 @@ impl TermiosState {
     /// The `c_cc` control characters (`VERASE`, `VINTR`, ...).
     pub fn cc(&self) -> &[libc::cc_t] {
         &self.0.c_cc
+    }
+
+    pub fn minimum_read(&self) -> u8 {
+        self.0.c_cc[libc::VMIN]
+    }
+    pub fn read_timeout(&self) -> u8 {
+        self.0.c_cc[libc::VTIME]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::fd::AsFd;
+
+    #[test]
+    fn outer_tty_raw_masks_preserve_control_flags() {
+        let (_master, slave, _) = crate::pty::openpty().unwrap();
+        let original = TermiosState::get(slave.as_fd()).unwrap();
+        let mut raw = original;
+        raw.make_tty_raw();
+        assert_eq!(
+            raw.iflag(),
+            (original.iflag()
+                & !(libc::IXON
+                    | libc::IXOFF
+                    | libc::ICRNL
+                    | libc::INLCR
+                    | libc::IGNCR
+                    | libc::IMAXBEL
+                    | libc::ISTRIP))
+                | libc::IGNBRK
+        );
+        assert_eq!(
+            raw.oflag(),
+            original.oflag() & !(libc::OPOST | libc::ONLCR | libc::OCRNL | libc::ONLRET)
+        );
+        assert_eq!(
+            raw.lflag(),
+            original.lflag()
+                & !(libc::IEXTEN
+                    | libc::ICANON
+                    | libc::ECHO
+                    | libc::ECHOE
+                    | libc::ECHONL
+                    | libc::ECHOCTL
+                    | libc::ECHOPRT
+                    | libc::ECHOKE
+                    | libc::ISIG)
+        );
+        assert_eq!(raw.cflag(), original.cflag());
+        assert_eq!(raw.cc()[libc::VMIN], 1);
+        assert_eq!(raw.cc()[libc::VTIME], 0);
+        raw.set(slave.as_fd()).unwrap();
+        TermiosState::flush_output(slave.as_fd()).unwrap();
+        let actual = TermiosState::get(slave.as_fd()).unwrap();
+        assert_eq!(actual.iflag(), raw.iflag());
+        assert_eq!(actual.oflag(), raw.oflag());
+        assert_eq!(actual.lflag(), raw.lflag());
+        original.set(slave.as_fd()).unwrap();
     }
 }

@@ -10,3 +10,5 @@ workspace = true
 
 [dependencies]
 rmux-emu.workspace = true
+rmux-util.workspace = true
+rmux-sys.workspace = true

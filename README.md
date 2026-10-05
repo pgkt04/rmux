@@ -81,6 +81,48 @@ rounding depends on writer boundaries). `tests/input_random.rs` runs 2000 random
 invariants and whole-versus-split agreement, and `tests/input_parser.rs` and
 `tests/input_keys.rs` hold the spec unit cases.
 
+The G07 outer-terminal port (`rmux-tty`) replaces the ncurses runtime with a
+compiled terminfo reader and typed parameter interpreter, then applies the pinned
+capability overrides, feature table and ACS mappings. `Tty` owns buffered terminal
+output, cursor and attributes, lifecycle, flow-control effects and timer requests;
+the server must drain effects after each call, synchronously refresh `TtyOptions`
+before the next command or hook, and synchronize UTF-8/theme changes through
+`TtyHostInfo`. Capability-expanding operations borrow the server's single
+`TparmState`, preserving uppercase variables across terminals. `draw_line` also
+borrows the shared `HyperlinkRegistry` so its default style can resolve screen
+links. G17 maps G04 draw snapshots to per-client `TtyCtx` and applies returned
+redraw requests before the next draw; no server lookup lives in `rmux-tty`.
+The terminfo tests compile a capability/parameter helper against the oracle's
+Homebrew ncurses 6.6 and compare raw capabilities and `infocmp`; tty byte tests
+compile pinned C output routines and capture their output buffers. Missing
+reference prerequisites report a skip; an available reference must run.
+The selected macOS ncurses build supports directory and inline databases, not
+hashed databases. Optional sixel output remains with G06/P10.
+
+The G08 port (`rmux-tty/src/keys/`, `rmux-tty/src/key_string.rs`) decodes bytes
+from the outer terminal and parses or prints key names. `TtyKeyDecoder` owns
+the ternary key tree (xterm templates, raw table, terminfo `k*` capabilities,
+then `user-keys` in index order; a later insertion replaces the node an earlier
+lookup stops at, as in C; capability and user strings stop at their first NUL,
+and an empty user string is inert instead of reading past its terminator), the
+bracket-paste flag, the last mouse position and the
+escape-timer phase. `next` borrows the unread input and returns one
+`DecodeStep`: a key or mouse event with its raw bytes, or a typed terminal reply
+(OSC 52 clipboard, OSC 4 palette, OSC 10/11 colours, primary/secondary/extended
+DA, DECRPM sync, window size), plus the timer request and theme notification the
+server must apply before the next step. Input forms are the C ones: legacy
+`ESC [ M` and SGR mouse reports, `ESC [ 27 ; m ; k ~` and `ESC [ k ; m u`
+extended keys, and the Meta/NUL/VERASE/C0 byte fallback. `parse_key_name` and
+`write_key_name` keep the C quirks (lowercase `0x` only, `^x`, case-sensitive
+`User%u`, NUL-terminated 64-byte caller output, `Invalid#` for unprintable values).
+Closing a decoder releases its tree storage. The G01 UTF-8 registry is
+thread-local, so neither API takes a context argument.
+`tests/keys_cref.rs` drives the pinned `tty-keys.c`/`key-string.c` through
+`tests/keys_reference.c` with the same scripts (tables, splits at every byte
+with and without expiry, replies, timers, 1500 random sequences, names);
+`tests/keys.rs` holds the tree, timer, `regress/tty-keys.sh` and oracle
+`list-keys` round-trip checks.
+
 ## Pinned oracle
 
 Supply an existing tmux git checkout containing the pin. The build script uses

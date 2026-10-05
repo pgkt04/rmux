@@ -22,7 +22,7 @@ use crate::input::effect::ExtendedKeysFormat;
 use crate::screen::ScreenMode;
 use rmux_util::key::{
     C0, KeyCode, KeyFlags, KeyMasks, KeyModifiers, MOUSE_PARAM_BTN_OFF, MOUSE_PARAM_MAX,
-    MOUSE_PARAM_POS_OFF, MOUSE_PARAM_UTF8_MAX, MouseButtonBits, SpecialKey,
+    MOUSE_PARAM_POS_OFF, MOUSE_PARAM_UTF8_MAX, MouseButtonBits, MouseEvent, SpecialKey,
 };
 use rmux_util::utf8::{Utf8Char, to_data};
 use std::io::Write;
@@ -542,18 +542,11 @@ impl AsRef<[u8]> for MouseBytes {
     }
 }
 
-/// `input_key_get_mouse` (`input-keys.c:713-793`) over the `mouse_event`
-/// fields it reads: `b`, `lb`, `sgr_b`, `sgr_type`, and the pane-relative
-/// `x`, `y`. `None` is the C `0` return.
-pub fn encode_mouse(
-    mode: ScreenMode,
-    b: u32,
-    lb: u32,
-    sgr_b: u32,
-    sgr_type: u8,
-    x: u32,
-    y: u32,
-) -> Option<MouseBytes> {
+/// `input_key_get_mouse` (`input-keys.c:713-793`): reads `b`, `lb`,
+/// `sgr_b` and `sgr_type` from the decoded event and takes the
+/// pane-relative `x`, `y` the server computed. `None` is the C `0` return.
+pub fn encode_mouse(mode: ScreenMode, m: &MouseEvent, x: u32, y: u32) -> Option<MouseBytes> {
+    let (b, lb, sgr_b, sgr_type) = (m.b, m.lb, m.sgr_b, m.sgr_type);
     let b_bits = MouseButtonBits(b);
     if b_bits.is_drag() && !mode.intersects(ScreenMode::MOTION_MOUSE_MODES) {
         return None;

@@ -2462,6 +2462,22 @@ pub const MOUSE_PARAM_MAX: u32 = 0xff;
 pub const MOUSE_PARAM_UTF8_MAX: u32 = 0x7ff;
 pub const MOUSE_PARAM_BTN_OFF: u32 = 0x20;
 pub const MOUSE_PARAM_POS_OFF: u32 = 0x21;
+
+/// Terminal-side fields of `struct mouse_event` (`tmux.h:1698-1724`) that
+/// `tty_keys_mouse` writes (`tty-keys.c:1332-1339`): the decoded position and
+/// button, the previous terminal position and button, and the SGR terminator
+/// and raw button. Resolved targets live in the server's `ResolvedMouseEvent`.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct MouseEvent {
+    pub x: u32,
+    pub y: u32,
+    pub b: u32,
+    pub lx: u32,
+    pub ly: u32,
+    pub lb: u32,
+    pub sgr_type: u8,
+    pub sgr_b: u32,
+}
 #[cfg(test)]
 mod key_tests {
     use super::*;

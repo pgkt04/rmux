@@ -1,4 +1,4 @@
-// Ported from tmux compat.h, compat/fdforkpty.c @ 8f25579c
+// Ported from tmux tty.c, compat.h, compat/fdforkpty.c @ 8f25579c
 
 use std::io;
 use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
@@ -53,6 +53,47 @@ pub unsafe fn login_tty(fd: OwnedFd) -> io::Result<()> {
         // SAFETY: on failure login_tty leaves the descriptor open and we still own it.
         drop(unsafe { OwnedFd::from_raw_fd(raw) });
         return Err(error);
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct Winsize {
+    pub rows: u16,
+    pub cols: u16,
+    pub xpixel: u16,
+    pub ypixel: u16,
+}
+
+pub fn get_winsize(fd: BorrowedFd<'_>) -> io::Result<Winsize> {
+    let mut ws = libc::winsize {
+        ws_row: 0,
+        ws_col: 0,
+        ws_xpixel: 0,
+        ws_ypixel: 0,
+    };
+    // SAFETY: fd is open for the borrow; ws is a writable winsize for TIOCGWINSZ.
+    if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCGWINSZ, &mut ws) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(Winsize {
+        rows: ws.ws_row,
+        cols: ws.ws_col,
+        xpixel: ws.ws_xpixel,
+        ypixel: ws.ws_ypixel,
+    })
+}
+
+pub fn set_winsize(fd: BorrowedFd<'_>, size: Winsize) -> io::Result<()> {
+    let ws = libc::winsize {
+        ws_row: size.rows,
+        ws_col: size.cols,
+        ws_xpixel: size.xpixel,
+        ws_ypixel: size.ypixel,
+    };
+    // SAFETY: fd is open for the borrow; ws is a valid winsize for TIOCSWINSZ.
+    if unsafe { libc::ioctl(fd.as_raw_fd(), libc::TIOCSWINSZ, &ws) } == -1 {
+        return Err(io::Error::last_os_error());
     }
     Ok(())
 }
