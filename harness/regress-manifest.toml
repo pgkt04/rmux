@@ -1,0 +1,811 @@
+# tmux 8f25579c: reviewed namespace-only mapping; raw imsg needs a P7 fixture.
+# Hand review: 31 unchanged, 169 mapped (including input-common.inc users),
+# 1 adapted: cfg-client-lost-before-wait.sh constructs raw imsg headers.
+# Of the 169 mapped, 40 touch the real namespace (TMUX_TMPDIR, TMUX_PANE,
+# tmux-$(id -u), tmux-server-*.log); the other 129 only use the scripts' own
+# unexported `TMUX="$TEST_TMUX -L..."` shell variable, which the mapper renames
+# to RMUX as well (harmless, consistent). Unchanged scripts use $TEST_TMUX only.
+# TEST_TMUX and tmux-256color are not namespace replacements.
+[[tests]]
+name = "alerts.sh"
+category = "mapped"
+
+[[tests]]
+name = "am-terminal.sh"
+category = "mapped"
+
+[[tests]]
+name = "attach-session-redraw.sh"
+category = "unchanged"
+
+[[tests]]
+name = "border-arrows.sh"
+category = "mapped"
+
+[[tests]]
+name = "buffers.sh"
+category = "mapped"
+
+[[tests]]
+name = "capture-pane-hyperlink.sh"
+category = "mapped"
+
+[[tests]]
+name = "capture-pane-sgr0.sh"
+category = "mapped"
+
+[[tests]]
+name = "capture-pane-time.sh"
+category = "mapped"
+
+[[tests]]
+name = "cfg-client-free.sh"
+category = "mapped"
+
+[[tests]]
+name = "cfg-client-lost-before-wait.sh"
+category = "adapted"
+
+[[tests]]
+name = "cfg-client-lost.sh"
+category = "mapped"
+
+[[tests]]
+name = "cfg-load-once.sh"
+category = "mapped"
+
+[[tests]]
+name = "check-names.sh"
+category = "mapped"
+
+[[tests]]
+name = "choose-buffer.sh"
+category = "mapped"
+
+[[tests]]
+name = "choose-client.sh"
+category = "mapped"
+
+[[tests]]
+name = "choose-tree.sh"
+category = "mapped"
+
+[[tests]]
+name = "clear-on-attach.sh"
+category = "unchanged"
+
+[[tests]]
+name = "client-key-order-focus.sh"
+category = "unchanged"
+
+[[tests]]
+name = "clock-mode.sh"
+category = "mapped"
+
+[[tests]]
+name = "cmd-template-replace.sh"
+category = "mapped"
+
+[[tests]]
+name = "codepoint-widths.sh"
+category = "mapped"
+
+[[tests]]
+name = "combine-test.sh"
+category = "mapped"
+
+[[tests]]
+name = "command-alias.sh"
+category = "mapped"
+
+[[tests]]
+name = "command-order.sh"
+category = "mapped"
+
+[[tests]]
+name = "conf-syntax.sh"
+category = "mapped"
+
+[[tests]]
+name = "confirm-before-lock.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-exit-stalled.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-exit.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-new-layouts.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-popup.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-run-shell-exit.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-sanity.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-size.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-client-wait-exit.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-notify-events.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-notify-guard.sh"
+category = "mapped"
+
+[[tests]]
+name = "control-subscriptions.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-commands.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-no-client-scroll.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-redraw.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-scroll-exit.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-selection-mode.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-selection-scroll.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-source-blank.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-test-emacs.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-test-vi.sh"
+category = "mapped"
+
+[[tests]]
+name = "copy-mode-unicode-whitespace.sh"
+category = "mapped"
+
+[[tests]]
+name = "cursor-test1.sh"
+category = "mapped"
+
+[[tests]]
+name = "cursor-test2.sh"
+category = "mapped"
+
+[[tests]]
+name = "cursor-test3.sh"
+category = "mapped"
+
+[[tests]]
+name = "cursor-test4.sh"
+category = "mapped"
+
+[[tests]]
+name = "customize-mode.sh"
+category = "mapped"
+
+[[tests]]
+name = "decrqm-sync.sh"
+category = "mapped"
+
+[[tests]]
+name = "display-message-client.sh"
+category = "unchanged"
+
+[[tests]]
+name = "display-panes.sh"
+category = "mapped"
+
+[[tests]]
+name = "environ-update.sh"
+category = "mapped"
+
+[[tests]]
+name = "environ.sh"
+category = "mapped"
+
+[[tests]]
+name = "find-window.sh"
+category = "mapped"
+
+[[tests]]
+name = "floating-pane-border-clients.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-covers-tiled-pane.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-drag-composite.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-drag-ghost.sh"
+category = "mapped"
+
+[[tests]]
+name = "floating-pane-drag-sb-strip.sh"
+category = "mapped"
+
+[[tests]]
+name = "floating-pane-drag-sync.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-drag-wide-character.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-drag-wide-right.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-geometry.sh"
+category = "mapped"
+
+[[tests]]
+name = "floating-pane-offscreen-alt.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-prompt-wide-character.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-scroll-behind-margins.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-status-cross-client.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-status-format.sh"
+category = "unchanged"
+
+[[tests]]
+name = "floating-pane-top-border-drag.sh"
+category = "mapped"
+
+[[tests]]
+name = "floating-pane-zoom.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-animation.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-fuzzy.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-modifiers.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-mouse.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-no-current-window.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-render-contexts.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-strings.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-time-range.sh"
+category = "mapped"
+
+[[tests]]
+name = "format-variables.sh"
+category = "mapped"
+
+[[tests]]
+name = "has-session-return.sh"
+category = "mapped"
+
+[[tests]]
+name = "hooks-after.sh"
+category = "mapped"
+
+[[tests]]
+name = "hooks-lifecycle.sh"
+category = "mapped"
+
+[[tests]]
+name = "hooks-notify.sh"
+category = "mapped"
+
+[[tests]]
+name = "hooks.sh"
+category = "mapped"
+
+[[tests]]
+name = "if-shell-TERM.sh"
+category = "mapped"
+
+[[tests]]
+name = "if-shell-error.sh"
+category = "mapped"
+
+[[tests]]
+name = "if-shell-nested.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-cursor.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-edit.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-keys.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-malformed.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-modes.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-nowrap-collect.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-osc.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-controls.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-cursor.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-edit.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-history.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-reflow.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-scroll.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-sgr.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-unicode.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-raw-wrap.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-reflow-stress.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-replies.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-requests.sh"
+category = "unchanged"
+
+[[tests]]
+name = "input-scroll.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-sgr.sh"
+category = "mapped"
+
+[[tests]]
+name = "input-unicode.sh"
+category = "mapped"
+
+[[tests]]
+name = "json.sh"
+category = "mapped"
+
+[[tests]]
+name = "kill-session-process-exit.sh"
+category = "mapped"
+
+[[tests]]
+name = "kill-session-zoomed.sh"
+category = "mapped"
+
+[[tests]]
+name = "layout-custom.sh"
+category = "mapped"
+
+[[tests]]
+name = "layout-nesting-limit.sh"
+category = "mapped"
+
+[[tests]]
+name = "layout-set.sh"
+category = "mapped"
+
+[[tests]]
+name = "lifecycle-deferred.sh"
+category = "mapped"
+
+[[tests]]
+name = "list-commands.sh"
+category = "mapped"
+
+[[tests]]
+name = "list-keys-sort-name.sh"
+category = "mapped"
+
+[[tests]]
+name = "menu-live-output.sh"
+category = "mapped"
+
+[[tests]]
+name = "menu-mouse.sh"
+category = "mapped"
+
+[[tests]]
+name = "modal-pane.sh"
+category = "mapped"
+
+[[tests]]
+name = "mode-kill.sh"
+category = "mapped"
+
+[[tests]]
+name = "mode-mutation.sh"
+category = "mapped"
+
+[[tests]]
+name = "mode-tree-menu-position.sh"
+category = "mapped"
+
+[[tests]]
+name = "mode-tree-scroll.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-pane-mouse.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-session-base-index.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-session-command.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-session-environment.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-session-no-client.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-session-size.sh"
+category = "mapped"
+
+[[tests]]
+name = "new-window-command.sh"
+category = "mapped"
+
+[[tests]]
+name = "options-array.sh"
+category = "mapped"
+
+[[tests]]
+name = "options-scope.sh"
+category = "mapped"
+
+[[tests]]
+name = "options-values.sh"
+category = "mapped"
+
+[[tests]]
+name = "osc-11colours.sh"
+category = "mapped"
+
+[[tests]]
+name = "pane-ops.sh"
+category = "mapped"
+
+[[tests]]
+name = "pipe-pane.sh"
+category = "mapped"
+
+[[tests]]
+name = "prompt-keys.sh"
+category = "unchanged"
+
+[[tests]]
+name = "prompt-mechanics.sh"
+category = "unchanged"
+
+[[tests]]
+name = "prompt-words-history.sh"
+category = "mapped"
+
+[[tests]]
+name = "redraw-damage-accumulate.sh"
+category = "unchanged"
+
+[[tests]]
+name = "redraw-damage-blocked-client.sh"
+category = "unchanged"
+
+[[tests]]
+name = "redraw-damage-only.sh"
+category = "unchanged"
+
+[[tests]]
+name = "redraw-damage-viewports.sh"
+category = "unchanged"
+
+[[tests]]
+name = "redraw-multiclient.sh"
+category = "unchanged"
+
+[[tests]]
+name = "redraw-screen-write.sh"
+category = "unchanged"
+
+[[tests]]
+name = "renumber-window-limit.sh"
+category = "mapped"
+
+[[tests]]
+name = "respawn-pane-control-lag.sh"
+category = "mapped"
+
+[[tests]]
+name = "run-shell-cwd.sh"
+category = "mapped"
+
+[[tests]]
+name = "run-shell-output.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-bidi.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-cache.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-fill-character.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-floating.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-indicators.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-menus.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-outside.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-scrollbars-auto-hide.sh"
+category = "unchanged"
+
+[[tests]]
+name = "screen-redraw-scrollbars.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-status.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-tiled.sh"
+category = "mapped"
+
+[[tests]]
+name = "screen-redraw-window-style.sh"
+category = "mapped"
+
+[[tests]]
+name = "server-access.sh"
+category = "mapped"
+
+[[tests]]
+name = "server-socket-error.sh"
+category = "unchanged"
+
+[[tests]]
+name = "session-group-resize.sh"
+category = "mapped"
+
+[[tests]]
+name = "session-ops.sh"
+category = "mapped"
+
+[[tests]]
+name = "set-hook-B.sh"
+category = "mapped"
+
+[[tests]]
+name = "set-hook-E.sh"
+category = "mapped"
+
+[[tests]]
+name = "set-hook-R.sh"
+category = "mapped"
+
+[[tests]]
+name = "show-options-output.sh"
+category = "mapped"
+
+[[tests]]
+name = "socket-path.sh"
+category = "mapped"
+
+[[tests]]
+name = "split-window-wait-kill.sh"
+category = "mapped"
+
+[[tests]]
+name = "style-trim.sh"
+category = "mapped"
+
+[[tests]]
+name = "swap-pane-zoom-error.sh"
+category = "mapped"
+
+[[tests]]
+name = "switch-client-redraw.sh"
+category = "unchanged"
+
+[[tests]]
+name = "switch-mode.sh"
+category = "mapped"
+
+[[tests]]
+name = "sync-output-atomic.sh"
+category = "mapped"
+
+[[tests]]
+name = "sync-output-copy-cursor.sh"
+category = "mapped"
+
+[[tests]]
+name = "sync-output-cursor.sh"
+category = "mapped"
+
+[[tests]]
+name = "sync-output-scroll-clients.sh"
+category = "mapped"
+
+[[tests]]
+name = "sync-output-scroll.sh"
+category = "mapped"
+
+[[tests]]
+name = "sync-output-wrapped.sh"
+category = "mapped"
+
+[[tests]]
+name = "tab-cell-background.sh"
+category = "mapped"
+
+[[tests]]
+name = "targets-panes.sh"
+category = "mapped"
+
+[[tests]]
+name = "targets.sh"
+category = "mapped"
+
+[[tests]]
+name = "terminal-feature-utf8.sh"
+category = "unchanged"
+
+[[tests]]
+name = "theme-report.sh"
+category = "unchanged"
+
+[[tests]]
+name = "tty-draw-line.sh"
+category = "mapped"
+
+[[tests]]
+name = "tty-keys.sh"
+category = "mapped"
+
+[[tests]]
+name = "tty-margins-sb.sh"
+category = "unchanged"
+
+[[tests]]
+name = "utf8-test.sh"
+category = "mapped"
+
+[[tests]]
+name = "wait-for-E.sh"
+category = "mapped"
+
+[[tests]]
+name = "wait-for-client-lost.sh"
+category = "mapped"
+
+[[tests]]
+name = "window-copy-sb-drag-focus-style.sh"
+category = "unchanged"
+
+[[tests]]
+name = "window-index-limit.sh"
+category = "mapped"
+
+[[tests]]
+name = "window-ops.sh"
+category = "mapped"

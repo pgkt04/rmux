@@ -1,0 +1,2023 @@
+{
+  "pin": "8f25579c",
+  "run_date": "2026-10-04T17:43:19Z",
+  "platform": "macos-aarch64",
+  "binary": "/Users/j/fun/rmux/oracle/bin/tmux",
+  "mode": "oracle",
+  "timeout_seconds": 240,
+  "summary": {
+    "pass": 201
+  },
+  "tests": [
+    {
+      "name": "alerts.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 88114,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "am-terminal.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1762,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "attach-session-redraw.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3977,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "border-arrows.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4848,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "buffers.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1571,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "capture-pane-hyperlink.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2588,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "capture-pane-sgr0.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1513,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "capture-pane-time.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1589,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cfg-client-free.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 776,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cfg-client-lost-before-wait.sh",
+      "category": "adapted",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 813,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cfg-client-lost.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3060,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cfg-load-once.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 687,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "check-names.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 7419,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "choose-buffer.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2310,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "choose-client.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1980,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "choose-tree.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2908,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "clear-on-attach.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2139,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "client-key-order-focus.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 676,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "clock-mode.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3270,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cmd-template-replace.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 13090,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "codepoint-widths.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 645,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "combine-test.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1536,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "command-alias.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 577,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "command-order.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2708,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "conf-syntax.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1180,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "confirm-before-lock.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2689,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-exit-stalled.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 22770,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-exit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5428,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-new-layouts.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 727,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-popup.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 518,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-run-shell-exit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1577,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-sanity.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2681,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-size.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2897,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-client-wait-exit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3571,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-notify-events.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1584,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-notify-guard.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 636,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "control-subscriptions.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 23531,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-commands.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2751,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-no-client-scroll.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1098,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-redraw.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 33196,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-scroll-exit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 690,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-selection-mode.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1872,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-selection-scroll.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4189,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-source-blank.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 725,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-test-emacs.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1286,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-test-vi.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2458,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "copy-mode-unicode-whitespace.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3076,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cursor-test1.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 617,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cursor-test2.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 620,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cursor-test3.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 564,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "cursor-test4.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 638,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "customize-mode.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 57789,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "decrqm-sync.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 10865,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "display-message-client.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 685,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "display-panes.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2833,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "environ-update.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2898,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "environ.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1009,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "find-window.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2316,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-border-clients.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2678,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-covers-tiled-pane.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3005,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-drag-composite.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3769,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-drag-ghost.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 11124,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-drag-sb-strip.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 18034,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-drag-sync.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3850,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-drag-wide-character.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1921,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-drag-wide-right.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1917,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-geometry.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2750,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-offscreen-alt.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1105,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-prompt-wide-character.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1152,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-scroll-behind-margins.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5346,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-status-cross-client.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2382,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-status-format.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1470,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-top-border-drag.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 6090,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "floating-pane-zoom.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4127,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-animation.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 7161,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-fuzzy.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1120,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-modifiers.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 8195,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-mouse.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 12330,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-no-current-window.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 650,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-render-contexts.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 9240,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-strings.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2674,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-time-range.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 657,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "format-variables.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 8480,
+      "stdout": "",
+      "stderr": "/tmp/rr-MuruKI/regress/format-variables.sh: line 274: 76743 Terminated: 15          while :; do\n    sleep 1;\ndone > \"$FIFO\"\n",
+      "mapped": false
+    },
+    {
+      "name": "has-session-return.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 553,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "hooks-after.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 6111,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "hooks-lifecycle.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 8674,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "hooks-notify.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4618,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "hooks.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 13751,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "if-shell-TERM.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2663,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "if-shell-error.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 532,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "if-shell-nested.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1543,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-cursor.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4582,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-edit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 8033,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-keys.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 15913,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-malformed.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5719,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-modes.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1673,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-nowrap-collect.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4041,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-osc.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5433,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-controls.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 7949,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-cursor.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2313,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-edit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3987,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-history.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1665,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-reflow.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1624,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-scroll.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3914,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-sgr.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3357,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-unicode.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 7453,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-raw-wrap.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2206,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-reflow-stress.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 10735,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-replies.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 21485,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-requests.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1784,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-scroll.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5778,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-sgr.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3446,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "input-unicode.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 6341,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "json.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1248,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "kill-session-process-exit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5675,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "kill-session-zoomed.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 628,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "layout-custom.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 9485,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "layout-nesting-limit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 695,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "layout-set.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1483,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "lifecycle-deferred.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 7878,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "list-commands.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 578,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "list-keys-sort-name.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 636,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "menu-live-output.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 74919,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "menu-mouse.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3859,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "modal-pane.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 72036,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "mode-kill.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1468,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "mode-mutation.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 12715,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "mode-tree-menu-position.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 21044,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "mode-tree-scroll.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2570,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-pane-mouse.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 6784,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-session-base-index.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 542,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-session-command.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 530,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-session-environment.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3719,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-session-no-client.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1530,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-session-size.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2704,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "new-window-command.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 536,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "options-array.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1125,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "options-scope.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1174,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "options-values.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1196,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "osc-11colours.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 74005,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "pane-ops.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4826,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "pipe-pane.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3757,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "prompt-keys.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 26862,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "prompt-mechanics.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 32986,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "prompt-words-history.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 9964,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "redraw-damage-accumulate.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2271,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "redraw-damage-blocked-client.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3436,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "redraw-damage-only.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 920,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "redraw-damage-viewports.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5369,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "redraw-multiclient.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1947,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "redraw-screen-write.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1827,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "renumber-window-limit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 731,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "respawn-pane-control-lag.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 8904,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "run-shell-cwd.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 724,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "run-shell-output.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4979,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-bidi.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4952,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-cache.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 14044,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-fill-character.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1754,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-floating.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 26123,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-indicators.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 17846,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-menus.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 22490,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-outside.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 10714,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-scrollbars-auto-hide.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 11704,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-scrollbars.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 11939,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-status.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 7161,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-tiled.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 42078,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "screen-redraw-window-style.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4070,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "server-access.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 906,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "server-socket-error.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 499,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "session-group-resize.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1191,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "session-ops.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2922,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "set-hook-B.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 45115,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "set-hook-E.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2522,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "set-hook-R.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 589,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "show-options-output.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 858,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "socket-path.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 716,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "split-window-wait-kill.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 675,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "style-trim.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 35545,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "swap-pane-zoom-error.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 776,
+      "stdout": "",
+      "stderr": "cannot swap down on floating pane\ncannot swap up on floating pane\n",
+      "mapped": false
+    },
+    {
+      "name": "switch-client-redraw.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 844,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "switch-mode.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1221,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "sync-output-atomic.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1603,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "sync-output-copy-cursor.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1428,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "sync-output-cursor.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 5243,
+      "stdout": "pane cursor hides: 5; cursor shows: 5; changes outside sync: 0\nprompt cursor hides: 1; cursor shows: 1; changes outside sync: 0\n",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "sync-output-scroll-clients.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3173,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "sync-output-scroll.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2565,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "sync-output-wrapped.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2879,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "tab-cell-background.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4665,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "targets-panes.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1292,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "targets.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1736,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "terminal-feature-utf8.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 630,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "theme-report.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 4728,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "tty-draw-line.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 29132,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "tty-keys.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 68760,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "tty-margins-sb.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3719,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "utf8-test.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1599,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "wait-for-E.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 12738,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "wait-for-client-lost.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 2413,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "window-copy-sb-drag-focus-style.sh",
+      "category": "unchanged",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 1378,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    },
+    {
+      "name": "window-index-limit.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 591,
+      "stdout": "",
+      "stderr": "create window failed: index 2147483647 in use\ncreate window failed: index 2147483647 in use\n",
+      "mapped": false
+    },
+    {
+      "name": "window-ops.sh",
+      "category": "mapped",
+      "status": "pass",
+      "exit_code": 0,
+      "elapsed_ms": 3090,
+      "stdout": "",
+      "stderr": "",
+      "mapped": false
+    }
+  ]
+}

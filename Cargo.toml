@@ -1,0 +1,25 @@
+[workspace]
+resolver = "3"
+members = ["crates/rmux-sys", "crates/rmux-util", "crates/rmux-emu", "crates/rmux-tty", "crates/rmux-server", "crates/rmux", "harness"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "ISC"
+rust-version = "1.85"
+
+[workspace.lints.clippy]
+all = "deny"
+
+[workspace.dependencies]
+rmux-sys = { path = "crates/rmux-sys" }
+rmux-util = { path = "crates/rmux-util" }
+rmux-emu = { path = "crates/rmux-emu" }
+rmux-tty = { path = "crates/rmux-tty" }
+rmux-server = { path = "crates/rmux-server" }
+libc = "0.2"
+mio = { version = "1", features = ["os-poll", "os-ext"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
+toml = "0.8"

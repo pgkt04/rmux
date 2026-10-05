@@ -1,0 +1,20 @@
+[package]
+name = "rmux-harness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+toml.workspace = true
+rmux-sys.workspace = true
+
+[[bin]]
+name = "regress"
+path = "src/main.rs"

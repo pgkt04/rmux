@@ -1,0 +1,15 @@
+[package]
+name = "rmux-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+rmux-sys.workspace = true
+rmux-util.workspace = true
+rmux-emu.workspace = true
+rmux-tty.workspace = true

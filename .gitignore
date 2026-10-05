@@ -1,0 +1,5 @@
+/target/
+/oracle/bin/
+/oracle/build-*/
+/harness/runs/
+*.log
