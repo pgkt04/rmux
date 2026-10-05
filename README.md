@@ -41,6 +41,46 @@ Homebrew `libutf8proc` the oracle uses (`pkg-config libutf8proc`). On macOS
 `wcwidth`. One test drives `oracle/bin/tmux` with `#{w:...}`. Missing
 prerequisites print a skip; a failing C compile is a test failure.
 
+The G03 grid tests (`rmux-emu/tests/grid*.rs`) drive a C driver built from the
+pinned `grid.c`, `grid-view.c` and `grid-reader.c` (`tests/grid_reference.c`)
+with scripted and randomized operation sequences and compare the full grid
+dump, `grid_string_cells` output and reader cursors line by line. The oracle
+replay feeds `regress/copy-mode-test.txt` to `oracle/bin/tmux` on a private
+socket and compares the copy-mode cursor after each word motion.
+Set membership stops at the C-string NUL boundary and decodes separators without
+per-motion heap allocation. First-column padding, empty grids with history and
+resize allocation tails have pinned-behavior regressions; reflow and unwrap
+use logical row counts, not spare line storage. P2 accepts the in-process million-
+operation grid invariant test; standalone cargo-fuzz targets remain P11 hardening.
+The G05 parser owns the end-to-end byte-stream/capture comparison.
+
+The G04 screen port adds lifecycle, selection, resizing and alternate state,
+screen writing, reusable row collection, Unicode combination, borders and
+preview helpers. `screen::write::TtySink` receives borrowed screen state with
+pre-mutation draw snapshots; `ScreenOnlySink` supports emulator-only execution.
+Recording-sink tests exercise drawing without a terminal implementation. The
+screen C reference compiles pinned `screen.c` and `screen-write.c` in a temporary
+directory and compares scripted and randomized operation-boundary grid dumps.
+Image integration remains P10; server-owned timers, sync replay and alternate
+layout repair stay at the adapter boundary rather than importing server types.
+
+The G05 port (`rmux-emu/src/input/`) is the `input.c` state machine and the
+`input-keys.c` key encoder. `InputCtx::parse_step` runs the parser until the
+next server-visible point (reply, request, title, bell, OSC 133 event, sync or
+alternate switch, ground-timer change) and returns it as an `InputEffect`
+borrowing only parser scratch; handlers resume mid-sequence (private mode
+lists, WINOPS, OSC 4 pairs, OSC 10/11 style-then-redraw, OSC 133 D
+event-then-marker). `InputCtx::parse` drives the steps with a synchronous
+`InputSink`. Server glue (pane flags, request FIFOs, timers, `input_key_pane`)
+lands with G12/G15; the sixel decode waits for G06. `input::dump` reproduces
+`capture-pane -p -e -N -S -`, `-F` and the cursor/mode format line byte for
+byte; `tests/input_oracle.rs` feeds 71 streams covering every sequence family
+to `oracle/bin/tmux` (`cat` in an 80x24 pane) and to the emulator and requires
+exact dumps (three extra byte-split runs compare used cells because storage
+rounding depends on writer boundaries). `tests/input_random.rs` runs 2000 random streams for panics,
+invariants and whole-versus-split agreement, and `tests/input_parser.rs` and
+`tests/input_keys.rs` hold the spec unit cases.
+
 ## Pinned oracle
 
 Supply an existing tmux git checkout containing the pin. The build script uses

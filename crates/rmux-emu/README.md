@@ -60,3 +60,19 @@ cargo test --workspace
 Platform evidence for this change is macOS. Linux scanner/width parity must
 also run in CI; the C-reference harness uses libc widths there rather than
 macOS's utf8proc.
+
+P2 G05 ports the 17-state VT parser and the 217-entry pane key table from
+`input.c` and `input-keys.c`. `parse_step` yields one synchronous effect at
+its original side-effect point; resume before accepting later bytes. Server
+request FIFOs and timers belong to G12/G15, and sixel decoding to G06/P10.
+Partial UTF-8 survives ESC and reset, pending bytes survive reset, DCS bodies
+retain controls, and unterminated pending storage remains unbounded at the pin.
+Unsigned mouse offsets and WINOPS pixel products wrap like C. Insert-mode tabs
+pushed past the margin retain normal behavior instead of the pinned C crash.
+
+`input_oracle` checks exact `capture-pane -p -e -N -S -` plus used-cell/line-flag
+captures and cursor/mode formats for 71 streams; three additional byte-split
+runs compare used cells because storage rounding depends on writer boundaries.
+The corpus uses option defaults. `input_random` exercises 2000 whole/split
+streams; `input_parser` checks ordered effects and the insert-tab crash path;
+`input_keys` covers key modes, backspace, modifiers and mouse encodings.
