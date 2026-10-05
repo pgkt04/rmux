@@ -123,6 +123,46 @@ with and without expiry, replies, timers, 1500 random sequences, names);
 `tests/keys.rs` holds the tree, timer, `regress/tty-keys.sh` and oracle
 `list-keys` round-trip checks.
 
+The G09 option table and environment store (`rmux-server::options`) retain all
+269 pinned entries and seven aliases. Native builds probe ncurses `setupterm`
+for `screen-256color`, `tmux`, then `tmux-256color`, matching `configure.ac`;
+cross builds default to `screen`. Set `RMUX_DEFAULT_TERM` at build time to match
+an oracle configured with `--with-TERM`. Linux selects `vlock` when present in
+the build PATH, otherwise `lock -np`; `RMUX_LOCK_COMMAND` explicitly overrides
+that configured default. Mouse defaults to on on both platforms, as in
+`Makefile.am`. The `systemd` feature clears activation variables in child
+environments. Generated pane identity uses `RMUX` and `RMUX_PANE`, while
+`TERM_PROGRAM=tmux` and the pinned version remain shared terminal-detection
+identifiers. Changes expose an ordered `OptionsChange` plan for the G14 host;
+monitor removal releases values before monitor cleanup and option unlink.
+
+The G11 command framework (`rmux-server::cmd`) ports the handwritten configuration
+lexer and grammar, argument parsing and printing, the 92-command metadata registry,
+target resolution, linked command queues, the 308 default bindings, configuration
+barriers and hook insertion/monitors. Command bodies remain G20/G21; the absent
+server, format and model groups connect through explicit parser, model and runtime
+traits, rather than placeholder production objects. Oracle comparisons use private
+sockets with `-f/dev/null`; parser fixtures compare `source-file -n -v`, and binding
+fixtures compare `list-keys` and `list-keys -N`. Prepared command state releases its
+client lease explicitly on completion or cancellation. Hook option removal frees
+the value, destroys its monitor sink/set, then unlinks the option. For C invalid-union
+or empty-string under-read paths, percentage helpers return a normal numeric error
+instead of dereferencing invalid storage.
+The lexer preserves C's entrypoint distinction: a signed buffer byte `0xff` is
+EOF, while file `getc` returns byte 255. `source-file` uses the buffer path, so
+oracle fuzz comparisons use that same path; file parsing is exercised separately.
+Variable-name byte classification uses safe libc ctype bridges under the startup
+locale, checked for every byte against C in C and UTF-8 locales.
+`parse::OptionsParseContext` uses G09's actual option store and global environment;
+the host supplies condition formatting, home lookup and verbose output through
+`ParseServices`. Default-key initialization errors must be fatal at the host
+boundary. Update pinned binding data with
+`python3 crates/rmux-server/src/cmd/key_bindings/generate_defaults.py <key-bindings.c> <defaults.rs>`;
+its `--check` mode compares decoded literals independently of Rust formatting.
+The ignored `parser_fuzz_ten_minutes_parseonly_oracle_status` test accepts
+`RMUX_CMD_FUZZ_SECONDS` and `RMUX_CMD_FUZZ_SEED`; two 300-second runs with seeds
+1 and 2 provide the ten-minute parser/oracle acceptance run within bounded jobs.
+
 ## Pinned oracle
 
 Supply an existing tmux git checkout containing the pin. The build script uses

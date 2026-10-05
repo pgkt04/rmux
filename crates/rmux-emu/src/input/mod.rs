@@ -25,6 +25,7 @@
 
 mod c0_esc;
 mod csi;
+pub use csi::TMUX_VERSION;
 mod dcs;
 pub mod dump;
 pub mod effect;

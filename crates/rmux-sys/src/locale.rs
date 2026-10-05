@@ -62,6 +62,21 @@ pub fn setup_ctype() -> Result<(), LocaleError> {
     setup_ctype_named(&[c"en_US.UTF-8", c"C.UTF-8"])
 }
 
+pub fn is_alnum(byte: u8) -> bool {
+    // SAFETY: an unsigned byte is in the ctype argument domain.
+    unsafe { libc::isalnum(i32::from(byte)) != 0 }
+}
+
+pub fn is_digit(byte: u8) -> bool {
+    // SAFETY: an unsigned byte is in the ctype argument domain.
+    unsafe { libc::isdigit(i32::from(byte)) != 0 }
+}
+
+pub fn is_alpha(byte: u8) -> bool {
+    // SAFETY: an unsigned byte is in the ctype argument domain.
+    unsafe { libc::isalpha(i32::from(byte)) != 0 }
+}
+
 mod ffi {
     use std::ffi::c_int;
 
@@ -303,5 +318,77 @@ mod tests {
             LocaleError::NotUtf8(b"US-ASCII".to_vec()).to_string(),
             "need UTF-8 locale (LC_CTYPE) but have US-ASCII"
         );
+    }
+
+    #[test]
+    fn byte_classification_child() {
+        let Ok(locale) = std::env::var("RMUX_SYS_CTYPE_BYTES_CHILD") else {
+            return;
+        };
+        let locale = std::ffi::CString::new(locale).unwrap();
+        assert!(setlocale_ctype(&locale));
+        print!("BYTES:");
+        for byte in 0..=255 {
+            print!(
+                "{}{}{}",
+                u8::from(is_alnum(byte)),
+                u8::from(is_digit(byte)),
+                u8::from(is_alpha(byte))
+            );
+        }
+        println!();
+    }
+
+    #[test]
+    fn all_byte_classifications_match_c_and_utf8_locales() {
+        let root = std::env::temp_dir().join(format!("rmux-ctype-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = root.join("ctype.c");
+        let executable = root.join("ctype");
+        std::fs::write(&source,b"#include <ctype.h>\n#include <locale.h>\n#include <stdio.h>\nint main(int argc,char **argv){if(argc!=2||!setlocale(LC_CTYPE,argv[1]))return 2;for(int i=0;i<256;i++)printf(\"%d%d%d\",!!isalnum((unsigned char)i),!!isdigit((unsigned char)i),!!isalpha((unsigned char)i));puts(\"\");return 0;}\n").unwrap();
+        let status = match Command::new("cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&executable)
+            .status()
+        {
+            Ok(status) => status,
+            Err(error) => {
+                eprintln!("skip: C compiler missing for byte classification: {error}");
+                let _ = std::fs::remove_dir_all(root);
+                return;
+            }
+        };
+        assert!(status.success(), "ctype reference compilation failed");
+        let utf8 = if cfg!(target_os = "macos") {
+            "en_US.UTF-8"
+        } else {
+            "C.UTF-8"
+        };
+        for locale in ["C", utf8] {
+            let reference = Command::new(&executable).arg(locale).output().unwrap();
+            assert!(reference.status.success(), "missing test locale {locale}");
+            let rust = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "locale::tests::byte_classification_child",
+                    "--nocapture",
+                ])
+                .env("RMUX_SYS_CTYPE_BYTES_CHILD", locale)
+                .output()
+                .unwrap();
+            assert!(rust.status.success());
+            let stdout = String::from_utf8(rust.stdout).unwrap();
+            let bytes = stdout
+                .lines()
+                .find_map(|line| line.strip_prefix("BYTES:"))
+                .unwrap();
+            assert_eq!(
+                bytes.as_bytes(),
+                reference.stdout.strip_suffix(b"\n").unwrap(),
+                "locale {locale}"
+            );
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

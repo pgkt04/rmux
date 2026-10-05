@@ -54,6 +54,7 @@ ids!(
     RequestId,
     EditorId,
     MonitorSetId,
+    HooksMonitorId,
     PasteBufferId
 );
 

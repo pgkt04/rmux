@@ -155,3 +155,150 @@ impl TryFrom<i32> for PaneBorderIndicator {
 }
 
 pub mod environment;
+pub mod parse;
+pub mod push;
+pub mod scope;
+pub mod store;
+pub mod table;
+#[cfg(test)]
+mod tests;
+
+pub use parse::{Ambiguous, find_choice, map_name, match_name, parse_name, search};
+pub use store::{
+    CommandParser, FormatExpander, MonitorSink, Options, OptionsArray, OptionsArrayItem,
+    OptionsEntry, OptionsLookup, OptionsParseCtx, OptionsRemoved, OptionsStore, OptionsValue,
+    default_to_string,
+};
+pub use table::{OPTIONS_OTHER_NAMES, OPTIONS_TABLE};
+
+use rmux_util::bytes::ByteString;
+
+/// One row of `options_table[]` (`tmux.h:2469-2488`) without the unused
+/// `alternative_name`.
+#[derive(Debug)]
+pub struct OptionsTableEntry {
+    pub name: &'static [u8],
+    pub kind: OptionsTableType,
+    pub scope: OptionsScope,
+    pub flags: OptionsTableFlags,
+    pub minimum: u32,
+    pub maximum: u32,
+    pub choices: Option<&'static [&'static [u8]]>,
+    pub default_str: Option<&'static [u8]>,
+    pub default_num: i64,
+    pub default_arr: Option<&'static [&'static [u8]]>,
+    pub separator: Option<&'static [u8]>,
+    pub pattern: Option<&'static [u8]>,
+    pub text: &'static [u8],
+    pub unit: Option<&'static [u8]>,
+}
+
+impl OptionsTableEntry {
+    pub fn is_array(&self) -> bool {
+        self.flags.contains(OptionsTableFlags::ARRAY)
+    }
+    pub fn is_hook(&self) -> bool {
+        self.flags.contains(OptionsTableFlags::HOOK)
+    }
+    /// The name as UTF-8 for diagnostics; table names are ASCII.
+    pub fn name_str(&self) -> &'static str {
+        std::str::from_utf8(self.name).unwrap_or("<non-utf8>")
+    }
+}
+
+/// One row of `options_other_names[]` (`tmux.h:2491-2494`).
+#[derive(Debug)]
+pub struct OptionsNameMap {
+    pub from: &'static [u8],
+    pub to: &'static [u8],
+}
+
+/// An array item key; derive order equals `options_array_cmp`
+/// (`options.c:78-98`): numeric keys first by value, then text keys by bytes.
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub enum OptionsArrayKey {
+    Index(u32),
+    Name(ByteString),
+}
+
+/// A resolved option name: a table name borrowed from the table, or an
+/// owned `@` user option name.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub enum OptionName {
+    Table(&'static [u8]),
+    User(ByteString),
+}
+
+impl OptionName {
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            OptionName::Table(n) => n,
+            OptionName::User(n) => n,
+        }
+    }
+}
+
+/// The `char **cause` text of a failed option operation, byte-exact.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptionsError(pub ByteString);
+
+impl OptionsError {
+    pub fn new(prefix: &[u8], value: &[u8]) -> OptionsError {
+        let mut s = ByteString::with_capacity(prefix.len() + value.len());
+        s.extend_from_slice(prefix);
+        s.extend_from_slice(value);
+        OptionsError(s)
+    }
+    pub fn text(text: &[u8]) -> OptionsError {
+        OptionsError(ByteString::from(text))
+    }
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for OptionsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+impl std::error::Error for OptionsError {}
+
+/// Read-only option values that lower crates consume without the store.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OptionsSnapshot {
+    pub escape_time: i64,
+    pub user_keys: Vec<ByteString>,
+    pub alternate_screen: bool,
+    pub scroll_on_clear: bool,
+    pub variation_selector_always_wide: bool,
+    pub extended_keys: i64,
+}
+
+impl OptionsSnapshot {
+    /// `escape-time`, `user-keys`, `extended-keys`, and
+    /// `variation-selector-always-wide` come from the server tree;
+    /// `alternate-screen` and `scroll-on-clear` from `window` (a window or
+    /// pane tree, or `global_w`).
+    pub fn from_store(store: &OptionsStore, window: crate::ids::OptionsId) -> OptionsSnapshot {
+        let global = store.global;
+        let user_keys = store
+            .get(global, b"user-keys")
+            .map(|(_, o)| {
+                o.array_items()
+                    .map(|(_, item)| ByteString::from(item.value().as_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        OptionsSnapshot {
+            escape_time: store.get_number(global, b"escape-time"),
+            user_keys,
+            alternate_screen: store.get_number(window, b"alternate-screen") != 0,
+            scroll_on_clear: store.get_number(window, b"scroll-on-clear") != 0,
+            variation_selector_always_wide: store
+                .get_number(global, b"variation-selector-always-wide")
+                != 0,
+            extended_keys: store.get_number(global, b"extended-keys"),
+        }
+    }
+}

@@ -13,3 +13,7 @@ rmux-sys.workspace = true
 rmux-util.workspace = true
 rmux-emu.workspace = true
 rmux-tty.workspace = true
+
+[features]
+# Clears LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES in environ_for_session (environ.c:273-277).
+systemd = []
