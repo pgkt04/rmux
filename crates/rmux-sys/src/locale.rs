@@ -77,6 +77,11 @@ pub fn is_alpha(byte: u8) -> bool {
     unsafe { libc::isalpha(i32::from(byte)) != 0 }
 }
 
+pub fn to_lower(byte: u8) -> u8 {
+    // SAFETY: an unsigned byte is in the ctype argument domain.
+    unsafe { libc::tolower(i32::from(byte)) as u8 }
+}
+
 mod ffi {
     use std::ffi::c_int;
 
@@ -390,5 +395,45 @@ mod tests {
             );
         }
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn to_lower_all_bytes_match_c() {
+        use std::io::Write;
+        use std::process::Stdio;
+        let directory =
+            std::env::temp_dir().join(format!("rmux-copy-lower-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let binary = directory.join("lower");
+        let mut compiler = match Command::new(std::env::var_os("CC").unwrap_or_else(|| "cc".into()))
+            .args(["-std=c99", "-x", "c", "-", "-o"])
+            .arg(&binary)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(compiler) => compiler,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                eprintln!("C lowercase comparison skipped: C compiler unavailable");
+                std::fs::remove_dir_all(directory).unwrap();
+                return;
+            }
+            Err(error) => panic!("cannot launch C compiler: {error}"),
+        };
+        compiler.stdin.take().unwrap().write_all(b"#include <ctype.h>\n#include <stdio.h>\nint main(void){for(unsigned i=0;i<256;i++)putchar(tolower((unsigned char)i));return 0;}\n").unwrap();
+        let compiled = compiler.wait_with_output().unwrap();
+        assert!(
+            compiled.status.success(),
+            "C lowercase compile: {}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+        let reference = Command::new(binary).output().unwrap();
+        assert!(reference.status.success());
+        let mut actual: Vec<u8> = (0..=u8::MAX).map(to_lower).collect();
+        if std::env::var_os("RMUX_COPY_LOWER_MUTATE").is_some() {
+            actual[0] ^= 1;
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+        assert_eq!(actual, reference.stdout);
     }
 }

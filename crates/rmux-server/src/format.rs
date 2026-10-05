@@ -222,6 +222,7 @@ impl FormatTree {
         };
         context.mouse = context.mouse.or(self.context.mouse);
         self.context = runtime.defaults(context);
+        runtime.add_mode_formats(self);
     }
     pub fn defaults_window(&mut self, window: WindowId) {
         self.context.window = Some(window);
@@ -229,6 +230,7 @@ impl FormatTree {
     pub fn defaults_pane(&mut self, runtime: &mut dyn FormatRuntime, pane: PaneId) {
         self.context.pane = Some(pane);
         self.context = runtime.defaults(self.context);
+        runtime.add_mode_formats(self);
     }
     pub fn defaults_paste_buffer(&mut self, buffer: PasteBufferId) {
         self.context.buffer = Some(buffer);

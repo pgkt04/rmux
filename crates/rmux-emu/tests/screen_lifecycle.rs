@@ -34,6 +34,8 @@ fn construction_reset_tabs_and_release() {
             extended_keys: true,
         },
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     )
     .unwrap();
     assert!(
@@ -42,8 +44,18 @@ fn construction_reset_tabs_and_release() {
     );
     assert!(!s.tabs[2]);
     assert!(s.titles.0.is_empty());
-    s.release(&mut registry).unwrap();
-    s.release(&mut registry).unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
     assert!(s.hyperlinks.is_none());
 }
 
@@ -94,7 +106,12 @@ fn metadata_title_bound_progress_and_cursor_styles() {
     s.set_default_cursor(Colour(42), 4);
     assert_eq!(s.default_cstyle, ScreenCursorStyle::Underline);
     assert_eq!(s.default_ccolour, Colour(42));
-    s.release(&mut registry).unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -163,7 +180,12 @@ fn selection_branch_edges_and_style() {
     assert_eq!(s.select_cell(&source), source);
     s.clear_selection();
     assert!(s.selection.is_none());
-    s.release(&mut registry).unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -171,9 +193,21 @@ fn resize_history_alt_and_no_alt_cursor_restore() {
     let mut registry = HyperlinkRegistry::new();
     let mut s = screen(&mut registry, 20);
     s.cy = 3;
-    s.resize(20, 2, false);
+    s.resize(
+        20,
+        2,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     assert_eq!((s.grid.hsize(), s.grid.hscrolled, s.cy), (2, 2, 1));
-    s.resize(20, 4, false);
+    s.resize(
+        20,
+        4,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     assert_eq!((s.grid.hsize(), s.grid.hscrolled, s.cy), (0, 0, 3));
     let cell = GridCell {
         fg: Colour(3),
@@ -182,23 +216,65 @@ fn resize_history_alt_and_no_alt_cursor_restore() {
     s.grid.view_set_cell(1, 1, &cell);
     s.cx = 7;
     s.cy = 1;
-    assert!(s.alternate_on(&cell, true));
-    assert!(!s.alternate_on(&cell, true));
-    s.resize(10, 3, false);
+    assert!(s.alternate_on(
+        &cell,
+        true,
+        #[cfg(feature = "sixel")]
+        None
+    ));
+    assert!(!s.alternate_on(
+        &cell,
+        true,
+        #[cfg(feature = "sixel")]
+        None
+    ));
+    s.resize(
+        10,
+        3,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     let mut restored = GridCell::default();
-    assert!(s.alternate_off(Some(&mut restored), true));
+    assert!(s.alternate_off(
+        Some(&mut restored),
+        true,
+        #[cfg(feature = "sixel")]
+        None
+    ));
     assert_eq!(restored, cell);
     assert_eq!((s.grid.sx(), s.grid.sy()), (10, 3));
     assert_eq!(s.grid.view_get_cell(1, 1).fg, cell.fg);
     s.cx = 100;
     s.cy = 100;
-    assert!(!s.alternate_off(None, false));
+    assert!(!s.alternate_off(
+        None,
+        false,
+        #[cfg(feature = "sixel")]
+        None
+    ));
     assert_eq!((s.cx, s.cy), (9, 2));
-    assert!(!s.alternate_off(Some(&mut restored), true));
+    assert!(!s.alternate_off(
+        Some(&mut restored),
+        true,
+        #[cfg(feature = "sixel")]
+        None
+    ));
     assert_eq!((s.cx, s.cy), (7, 1));
-    s.resize(0, 0, false);
+    s.resize(
+        0,
+        0,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     assert_eq!((s.grid.sx(), s.grid.sy()), (1, 1));
-    s.release(&mut registry).unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -218,7 +294,12 @@ fn mode_and_reusable_print_diagnostics() {
     let mut out = Vec::new();
     assert_eq!(s.print(Some(0), &mut out, |_| None), b"0000 \"X\"\n");
     assert_eq!(s.print(Some(1), &mut out, |_| None), b"0001 \"\"\n");
-    s.release(&mut registry).unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -230,11 +311,28 @@ fn tab_width_and_custom_stop_matrix() {
             assert_eq!(s.tabs[x as usize], x > 0 && x % 8 == 0);
         }
         s.tabs[0] = true;
-        s.resize(width, 3, true);
+        s.resize(
+            width,
+            3,
+            true,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         assert!(s.tabs[0]);
-        s.resize(width + 1, 3, false);
+        s.resize(
+            width + 1,
+            3,
+            false,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         assert!(!s.tabs[0]);
-        s.release(&mut registry).unwrap();
+        s.release(
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
     }
 }
 
@@ -245,18 +343,39 @@ fn resize_height_history_eat_empty_matrix() {
         for eat_empty in [false, true] {
             let mut s = screen(&mut registry, history);
             s.cy = 1;
-            s.resize_cursor(20, 2, false, eat_empty, true);
+            s.resize_cursor(
+                20,
+                2,
+                false,
+                eat_empty,
+                true,
+                #[cfg(feature = "sixel")]
+                None,
+            );
             let pushed = if history != 0 && !eat_empty { 2 } else { 0 };
             assert_eq!(s.grid.hsize(), pushed);
             assert_eq!(s.grid.hscrolled, pushed);
             let cy = if eat_empty { 1 } else { 0 };
             assert_eq!(s.cy, cy);
             assert_eq!((s.rupper, s.rlower), (0, 1));
-            s.resize_cursor(20, 5, false, true, true);
+            s.resize_cursor(
+                20,
+                5,
+                false,
+                true,
+                true,
+                #[cfg(feature = "sixel")]
+                None,
+            );
             assert_eq!(s.grid.hsize(), 0);
             assert_eq!(s.grid.hscrolled, 0);
             assert_eq!(s.grid.view_get_cell(0, 4).bg, Colour(8));
-            s.release(&mut registry).unwrap();
+            s.release(
+                &mut registry,
+                #[cfg(feature = "sixel")]
+                None,
+            )
+            .unwrap();
         }
     }
 }
@@ -311,5 +430,10 @@ fn selection_direction_mode_and_equal_endpoint_matrix() {
             assert!(s.check_selection(0, 0));
         }
     }
-    s.release(&mut registry).unwrap();
+    s.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    )
+    .unwrap();
 }

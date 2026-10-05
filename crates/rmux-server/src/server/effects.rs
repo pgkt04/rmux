@@ -430,6 +430,7 @@ pub fn drain_effects(server: &mut Server) -> io::Result<()> {
             ModelEffect::RecalculateSizes => recalculate_sizes(server),
         }
     }
+    crate::tsp::broker::recompute(server);
     Ok(())
 }
 fn session_effect(server: &mut Server, effect: SessionEffect) -> io::Result<()> {
@@ -571,7 +572,9 @@ fn pane_effect(server: &mut Server, effect: PaneEffect) -> io::Result<()> {
             previous: _,
             current: _,
             entered: _,
-        } => {}
+        }
+        | PaneEffect::PromptChanged { pane: _, kind: _ }
+        | PaneEffect::TitleChanged { pane: _, new: _ } => {}
     }
     Ok(())
 }
@@ -706,6 +709,8 @@ pub fn input_effect(server: &mut Server, pane: PaneId, effect: &OwnedInputEffect
         // Reply bytes, requests, flags, renames and named notifications were
         // applied synchronously by pane_input::apply_effect, before this call.
         OwnedInputEffect::Reply(_)
+        | OwnedInputEffect::TspMessage(_)
+        | OwnedInputEffect::TerminalReset
         | OwnedInputEffect::Request { kind: _, end: _ }
         | OwnedInputEffect::ClipboardQuery { clip: _, end: _ }
         | OwnedInputEffect::ColourQuery { which: _, end: _ }

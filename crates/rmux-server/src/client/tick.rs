@@ -80,6 +80,7 @@ pub fn tick(server: &mut Server) {
     for w in window_ids(server) {
         check_window_resize(server, w);
     }
+    crate::tsp::broker::recompute(server);
 
     // Notify modes that pane styles may have changed.
     for w in window_ids(server) {
@@ -107,6 +108,8 @@ pub fn tick(server: &mut Server) {
             check_redraw(server, c);
             reset_state(server, c);
         }
+        // event_add(&tty->event_out) for output queued above (tty_write).
+        crate::client::tty_io::sync(server, c);
     }
 
     // Clear window redraw state after processing all clients. Deferred
@@ -362,6 +365,9 @@ fn prompt_cursor(
 /// The scroll region and attributes are cleared when idle (waiting for an
 /// event) as this is the most likely time a user may interrupt tmux.
 pub fn reset_state(server: &mut Server, c: ClientId) {
+    if crate::tsp::broker::native_client(server, c) {
+        return;
+    }
     let Some(client) = server.clients.get(c) else {
         return;
     };
@@ -655,6 +661,9 @@ fn any_pane_redraw(server: &Server, c: ClientId, w: WindowId) -> bool {
 
 /// `server_client_check_redraw` (`server-client.c:2357-2478`).
 pub fn check_redraw(server: &mut Server, c: ClientId) {
+    if crate::tsp::broker::native_client(server, c) {
+        return;
+    }
     let Some(client) = server.clients.get(c) else {
         return;
     };

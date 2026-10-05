@@ -331,6 +331,10 @@ fn mouse_input(ev: &ResolvedMouseEvent) -> MouseInput {
         y: ev.event.y,
         last_x: ev.event.lx,
         last_y: ev.event.ly,
+        b: ev.event.b,
+        lb: ev.event.lb,
+        sgr_type: ev.event.sgr_type,
+        sgr_b: ev.event.sgr_b,
         offset_x: ev.target.ox,
         offset_y: ev.target.oy,
         status_at: ev.target.status_at,
@@ -872,6 +876,7 @@ mod tests {
             offset_y: 3,
             status_at: 0,
             status_lines: 2,
+            ..MouseInput::default()
         };
         let command = command(
             &metadata::CMD_MOVE_PANE,

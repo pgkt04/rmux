@@ -48,6 +48,7 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
                 .displayed_screen()
                 .mode
                 .contains(ScreenMode::BRACKETPASTE);
+        let start = pane.output.len();
         if bracketed {
             pane.output.extend_from_slice(b"\x1b[200~");
         }
@@ -73,6 +74,8 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         if bracketed {
             pane.output.extend_from_slice(b"\x1b[201~");
         }
+        let client = server.queue.items.get(item).and_then(|item| item.client);
+        crate::model::pane::hold_encoded_input(server, wp, client, start);
     }
 
     if let Some(pb) = pb

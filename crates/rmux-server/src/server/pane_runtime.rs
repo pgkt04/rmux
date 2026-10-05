@@ -59,10 +59,19 @@ impl PaneInputHost for PaneHost {
         let time = if server.current_time.0 == 0 {
             0
         } else {
-            server.current_time.0.wrapping_sub(server.start_time.0).wrapping_add(1) as u32
+            server
+                .current_time
+                .0
+                .wrapping_sub(server.start_time.0)
+                .wrapping_add(1) as u32
         };
-        server.panes.get_mut(pane).expect("live pane line clock")
-            .base.grid.set_line_clock(rmux_emu::grid::LineTime(time));
+        server
+            .panes
+            .get_mut(pane)
+            .expect("live pane line clock")
+            .base
+            .grid
+            .set_line_clock(rmux_emu::grid::LineTime(time));
         let snapshot = PaneDrawSnapshot::capture(server, pane).expect("live pane draw snapshot");
         self.colours = snapshot.defaults;
         self.sink = Some(PaneSink::new(
@@ -698,14 +707,24 @@ mod tests {
         let (mut server, pane, _) = fixture();
         server.start_time = (100, 0);
         server.current_time = (105, 0);
-        pane_parse_buffer(&mut server, pane, b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n").unwrap();
+        pane_parse_buffer(
+            &mut server,
+            pane,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\n",
+        )
+        .unwrap();
         let grid = &server.panes.get(pane).unwrap().base.grid;
         assert!(grid.hsize() > 0);
         assert_eq!(grid.lines()[0].time.to_wall(server.start_time.0), 105);
         server.current_time = (109, 0);
         pane_parse_buffer(&mut server, pane, b"six\r\n").unwrap();
         let grid = &server.panes.get(pane).unwrap().base.grid;
-        assert_eq!(grid.lines()[grid.hsize() as usize - 1].time.to_wall(server.start_time.0), 109);
+        assert_eq!(
+            grid.lines()[grid.hsize() as usize - 1]
+                .time
+                .to_wall(server.start_time.0),
+            109
+        );
     }
 
     #[test]
@@ -713,16 +732,63 @@ mod tests {
         let (mut server, pane, _) = fixture();
         model::pane::pane_resize(&mut server, pane, 6, 3).unwrap();
         server.panes.get_mut(pane).unwrap().base.grid.set_hlimit(2);
-        pane_parse_buffer(&mut server, pane, b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix").unwrap();
+        pane_parse_buffer(
+            &mut server,
+            pane,
+            b"one\r\ntwo\r\nthree\r\nfour\r\nfive\r\nsix",
+        )
+        .unwrap();
         let grid = &server.panes.get(pane).unwrap().base.grid;
-        assert_eq!((grid.sx(), grid.sy(), grid.hsize(), grid.hlimit()), (6, 3, 2, 2));
-        server.panes.get_mut(pane).unwrap().base.grid.clear_history();
+        assert_eq!(
+            (grid.sx(), grid.sy(), grid.hsize(), grid.hlimit()),
+            (6, 3, 2, 2)
+        );
+        server
+            .panes
+            .get_mut(pane)
+            .unwrap()
+            .base
+            .grid
+            .clear_history();
         assert_eq!(server.panes.get(pane).unwrap().base.grid.hsize(), 0);
-        assert_eq!(server.panes.get(pane).unwrap().base.grid.view_get_cell(0, 0).data.bytes(), b"f");
-        assert_eq!(server.panes.get(pane).unwrap().base.grid.view_get_cell(0, 2).data.bytes(), b"s");
+        assert_eq!(
+            server
+                .panes
+                .get(pane)
+                .unwrap()
+                .base
+                .grid
+                .view_get_cell(0, 0)
+                .data
+                .bytes(),
+            b"f"
+        );
+        assert_eq!(
+            server
+                .panes
+                .get(pane)
+                .unwrap()
+                .base
+                .grid
+                .view_get_cell(0, 2)
+                .data
+                .bytes(),
+            b"s"
+        );
         server.panes.get_mut(pane).unwrap().base.grid.set_hlimit(5);
         pane_parse_buffer(&mut server, pane, b"\x1b[H\x1b[JZ").unwrap();
         assert!(server.panes.get(pane).unwrap().base.grid.hsize() > 0);
-        assert_eq!(server.panes.get(pane).unwrap().base.grid.view_get_cell(0, 0).data.bytes(), b"Z");
+        assert_eq!(
+            server
+                .panes
+                .get(pane)
+                .unwrap()
+                .base
+                .grid
+                .view_get_cell(0, 0)
+                .data
+                .bytes(),
+            b"Z"
+        );
     }
 }

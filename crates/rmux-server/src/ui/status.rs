@@ -290,7 +290,11 @@ fn status_pop_screen(srv: &mut Server, c: ClientId) {
     sl.references = sl.references.saturating_sub(1);
     if sl.references == 0 {
         if let Some(mut s) = sl.active.take() {
-            let _ = s.release(&mut sl.registry);
+            let _ = s.release(
+                &mut sl.registry,
+                #[cfg(feature = "sixel")]
+                None,
+            );
         }
     }
 }
@@ -302,9 +306,19 @@ pub fn status_init(c: &mut Client) {
     for e in &mut sl.entries {
         e.ranges.clear();
     }
-    sl.screen.resize(sx.max(1), 1, false);
+    sl.screen.resize(
+        sx.max(1),
+        1,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     if let Some(mut s) = sl.active.take() {
-        let _ = s.release(&mut sl.registry);
+        let _ = s.release(
+            &mut sl.registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
     }
     sl.references = 0;
 }
@@ -327,9 +341,17 @@ pub fn status_free(srv: &mut Server, c: ClientId) {
     };
     let sl = &mut client.status;
     if let Some(mut s) = sl.active.take() {
-        let _ = s.release(&mut sl.registry);
+        let _ = s.release(
+            &mut sl.registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
     }
-    let _ = sl.screen.release(&mut sl.registry);
+    let _ = sl.screen.release(
+        &mut sl.registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
 }
 
 /// Draw status line for client. Returns true when it changed.
@@ -406,7 +428,13 @@ pub fn status_redraw(srv: &mut Server, c: ClientId) -> bool {
         sl.style = gc;
     }
     if sl.screen.grid.sx() != width || sl.screen.grid.sy() != lines {
-        sl.screen.resize(width, lines, false);
+        sl.screen.resize(
+            width,
+            lines,
+            false,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         changed = true;
         force = true;
     }
@@ -416,6 +444,8 @@ pub fn status_redraw(srv: &mut Server, c: ClientId) -> bool {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut sl.registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     let blank = |ctx: &mut ScreenWriteCtx<'_>, n: u32| {
         let mut sp = gc;
@@ -602,7 +632,11 @@ fn status_begin_overlay(sl: &mut StatusLine, tty_sx: u32, lines: u32) -> Option<
 
 fn status_finish_overlay(sl: &mut StatusLine, mut old: Screen) -> bool {
     let changed = sl.active().grid.compare(&old.grid);
-    let _ = old.release(&mut sl.registry);
+    let _ = old.release(
+        &mut sl.registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     changed
 }
 
@@ -661,8 +695,14 @@ pub fn status_message_redraw(srv: &mut Server, c: ClientId) -> bool {
             return false;
         };
         let mut sink = ScreenOnlySink;
-        let mut ctx =
-            ScreenWriteCtx::start(active, &mut sink, ScreenWritePolicy::default(), registry);
+        let mut ctx = ScreenWriteCtx::start(
+            active,
+            &mut sink,
+            ScreenWritePolicy::default(),
+            registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         ctx.fast_copy(screen, 0, 0, tty_sx, lines);
         ctx.cursormove(ax as i32, messageline as i32, false);
         crate::format::draw::draw(&mut ctx, &gc, aw, &expanded, None, false);
@@ -680,6 +720,9 @@ pub trait StatusPromptInput {
         text: Option<&[u8]>,
         key: PromptKeyResult,
     ) -> PromptResult;
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        None
+    }
     /// prompt_free_cb: called exactly once before the continuation drops.
     fn free(&mut self, _srv: &mut Server) {}
 }
@@ -715,6 +758,9 @@ impl PromptHost for StatusPromptHost {
             Some(input) => input.fire(srv, self.c, text, key),
             None => PromptResult::Close,
         }
+    }
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        self.input.as_mut().and_then(|input| input.take_update())
     }
     fn free(&mut self, srv: &mut Server) {
         if let Some(mut input) = self.input.take() {
@@ -872,8 +918,14 @@ pub fn status_prompt_redraw(srv: &mut Server, c: ClientId) -> bool {
             return false;
         };
         let mut sink = ScreenOnlySink;
-        let mut ctx =
-            ScreenWriteCtx::start(active, &mut sink, ScreenWritePolicy::default(), registry);
+        let mut ctx = ScreenWriteCtx::start(
+            active,
+            &mut sink,
+            ScreenWritePolicy::default(),
+            registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         ctx.fast_copy(screen, 0, 0, tty_sx, lines);
         let mut pdd = PromptDrawData {
             cursor_x: &mut cursor_x,

@@ -68,9 +68,20 @@ use rmux_util::log_debug;
 use super::store::OptionsStore;
 use crate::ids::OptionsId;
 
-/// The pinned tmux version reported as `TERM_PROGRAM_VERSION` and
-/// `#{version}` (`configure.ac:3`, `tmux.c:429-432`).
+/// The pinned tmux version used by `#{version}` (`configure.ac:3`).
 pub const TMUX_VERSION: &[u8] = rmux_emu::input::TMUX_VERSION.as_bytes();
+
+/// The rmux version reported to pane programs and broker peers.
+pub const RMUX_VERSION: &[u8] = env!("CARGO_PKG_VERSION").as_bytes();
+
+/// Server-start broker switch. Only the exact value `0` disables it.
+pub fn tsp_broker_enabled_from_env() -> bool {
+    tsp_broker_enabled(std::env::var_os("RMUX_TSP_BROKER").as_deref())
+}
+
+pub(crate) fn tsp_broker_enabled(value: Option<&std::ffi::OsStr>) -> bool {
+    value != Some(std::ffi::OsStr::new("0"))
+}
 
 static NEXT_SERIAL: AtomicU64 = AtomicU64::new(1);
 
@@ -284,11 +295,11 @@ pub fn environ_for_session(
     let none = EnvironmentFlags::default();
     if !no_term {
         env.set(b"TERM", none, ctx.default_terminal);
-        env.set(b"TERM_PROGRAM", none, b"tmux");
-        env.set(b"TERM_PROGRAM_VERSION", none, TMUX_VERSION);
+        env.set(b"TERM_PROGRAM", none, b"rmux");
+        env.set(b"TERM_PROGRAM_VERSION", none, RMUX_VERSION);
         env.set(b"COLORTERM", none, b"truecolor");
     }
-    #[cfg(feature = "systemd")]
+    #[cfg(all(feature = "systemd", target_os = "linux"))]
     {
         env.clear(b"LISTEN_PID");
         env.clear(b"LISTEN_FDS");
@@ -457,7 +468,7 @@ mod tests {
                 .value
                 .as_deref()
                 .map(|v| &v[..]),
-            Some(&b"tmux"[..])
+            Some(&b"rmux"[..])
         );
         assert_eq!(
             env.find(b"TERM_PROGRAM_VERSION")
@@ -465,7 +476,7 @@ mod tests {
                 .value
                 .as_deref()
                 .map(|v| &v[..]),
-            Some(&b"next-3.9"[..])
+            Some(RMUX_VERSION)
         );
         assert_eq!(
             env.find(b"COLORTERM")
@@ -576,7 +587,29 @@ mod tests {
         for name in [b"LISTEN_PID".as_slice(), b"LISTEN_FDS", b"LISTEN_FDNAMES"] {
             let entry = env.find(name).unwrap();
             assert_eq!(entry.flags, HIDDEN);
-            assert_eq!(entry.value.is_none(), cfg!(feature = "systemd"));
+            assert_eq!(
+                entry.value.is_none(),
+                cfg!(all(feature = "systemd", target_os = "linux"))
+            );
+        }
+    }
+
+    #[test]
+    fn tsp_broker_starts_on_unless_env_is_exactly_zero() {
+        for (value, enabled) in [
+            (None, true),
+            (Some("0"), false),
+            (Some(""), true),
+            (Some("1"), true),
+            (Some("off"), true),
+            (Some("00"), true),
+            (Some("0\n"), true),
+        ] {
+            assert_eq!(
+                tsp_broker_enabled(value.map(std::ffi::OsStr::new)),
+                enabled,
+                "{value:?}"
+            );
         }
     }
 }

@@ -218,6 +218,41 @@ pub fn execute_menu(server: &mut Server, command: &Command, item: QueueItemId) -
     let Some(tc) = item_target_client(server, item) else {
         return CmdReturn::Normal;
     };
+    if let Some(pane) = fs
+        .wp
+        .filter(|pane| !crate::tsp::broker::pane_cell_ready(server, *pane))
+    {
+        crate::tsp::broker::defer_cell_ui(
+            server,
+            pane,
+            Box::new(move |server| {
+                let failed = server
+                    .panes
+                    .get(pane)
+                    .and_then(|pane| pane.tsp.as_ref())
+                    .and_then(|state| state.switch.as_ref())
+                    .is_some_and(|switch| switch.failed);
+                let command = server
+                    .queue
+                    .items
+                    .get(item)
+                    .and_then(|queued| match &queued.kind {
+                        crate::cmd::queue::QueueItemKind::Command { list, index } => {
+                            Some((std::rc::Rc::clone(list), *index))
+                        }
+                        _ => None,
+                    });
+                if !failed
+                    && let Some((list, index)) = command
+                    && execute_menu(server, &list.commands[index], item) == CmdReturn::Wait
+                {
+                    return;
+                }
+                crate::cmd::queue::continue_item(&mut server.queue, item);
+            }),
+        );
+        return CmdReturn::Wait;
+    }
     let choice = if args.get(b'C') == Some(b"-".as_slice()) {
         -1
     } else if args.has(b'C') != 0 {

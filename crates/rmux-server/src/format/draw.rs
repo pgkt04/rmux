@@ -549,6 +549,8 @@ fn merge_after(s: &mut [Screen], index: usize, width_after: u32, octx: &mut Scre
         &mut sink,
         ScreenWritePolicy::default(),
         octx.registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.fast_copy(&back[0], 0, 0, width_after, 1);
     ctx.finish();
@@ -570,6 +572,8 @@ fn flush_cells(
         &mut sink,
         ScreenWritePolicy::default(),
         octx.registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     for cell in cells.iter() {
         ctx.cell(cell);
@@ -623,6 +627,8 @@ pub fn draw(
             &mut sink,
             ScreenWritePolicy::default(),
             octx.registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         ctx.clearendofline(current_default.bg);
         ctx.finish();
@@ -876,7 +882,11 @@ pub fn draw(
     }
 
     for mut screen in s {
-        let _ = screen.release(octx.registry);
+        let _ = screen.release(
+            octx.registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
     }
     octx.cursormove(ocx as i32, ocy as i32, false);
 }

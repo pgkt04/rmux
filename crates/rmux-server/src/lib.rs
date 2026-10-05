@@ -9,4 +9,5 @@ pub mod model;
 pub mod modes;
 pub mod options;
 pub mod server;
+pub mod tsp;
 pub mod ui;

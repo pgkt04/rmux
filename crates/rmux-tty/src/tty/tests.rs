@@ -5,6 +5,8 @@ use rmux_emu::cell::{GridAttributes as A, GridCellFlags};
 use rmux_emu::colour::{Colour, ColourFlags, ColourPalette, indexed_to_16};
 use rmux_emu::hyperlinks::{HyperlinkId, HyperlinkRegistry};
 use rmux_emu::screen::{ProgressBar, ProgressBarState, Screen, ScreenResetPolicy};
+#[path = "protocol_tests.rs"]
+mod protocol_tests;
 
 const CAPS: &[&str] = &[
     "am=1",
@@ -99,7 +101,15 @@ fn fixture() -> (Tty, OwnedFd, TparmState) {
     (tty, master, state)
 }
 fn bytes(tty: &mut Tty) -> Vec<u8> {
-    tty.out.drain(..).collect()
+    let mut result = Vec::new();
+    while !tty.out.is_empty() || !tty.protocol_out.is_empty() {
+        crate::tty::protocol::write_queued(&mut tty.protocol_out, &mut tty.out, |bytes| {
+            result.extend_from_slice(bytes);
+            Ok(bytes.len())
+        })
+        .unwrap();
+    }
+    result
 }
 fn remove(tty: &mut Tty, cap: &[u8]) {
     tty.term_mut().apply(cap, false, TtyTermFlags(0));
@@ -677,7 +687,13 @@ fn cursor_styles_mouse_modes_colour_title_path_and_progress() {
         },
     );
     assert_eq!(bytes(&mut tty), b"TaFW/xF<v1,101>");
-    screen.release(&mut registry).unwrap();
+    screen
+        .release(
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -857,7 +873,13 @@ fn cursor_region_boundaries_and_fallback_visibility() {
     tty.flags.insert(TtyFlags::NOCURSOR);
     tty.update_mode(&mut state, ScreenMode::CURSOR, Some(&screen));
     assert_eq!(bytes(&mut tty), b"I");
-    screen.release(&mut registry).unwrap();
+    screen
+        .release(
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 
 #[test]

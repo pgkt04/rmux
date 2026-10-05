@@ -168,6 +168,10 @@ fn exiting(server: &mut Server, id: ClientId) {
     if let Some(tty) = c.tty.as_mut() {
         tty.close(tparm);
     }
+    crate::client::tty_io::sync(server, id);
+    let Some(c) = server.clients.get_mut(id) else {
+        return;
+    };
     if let Some(peer) = c.peer {
         let _ = proc_send(server, peer, ProtocolMessage::new(Kind::Exited, Vec::new()));
     }
@@ -201,6 +205,7 @@ fn wakeup(server: &mut Server, id: ClientId) {
     c.drag.flag = 0;
     c.drag.update = None;
     c.drag.release = None;
+    crate::client::tty_io::sync(server, id);
     server_redraw_client(server, id);
     crate::server::run::recalculate_sizes(server);
     if let Some(s) = session {
@@ -485,6 +490,13 @@ fn dispatch_identify(
     }
     c.flags.insert(ClientFlags::IDENTIFIED);
     identify_name(c);
+    if let Some(pid) = c.pid {
+        log_debug!(
+            "client {} IDENTIFY_CLIENTPID {}",
+            String::from_utf8_lossy(c.name_bytes()),
+            pid.0
+        );
+    }
     log_debug!(
         "client {id:?} name is {}",
         String::from_utf8_lossy(c.name_bytes())

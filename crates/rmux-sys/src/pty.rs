@@ -347,7 +347,7 @@ impl PreparedLaunch {
                 ] {
                     libc::sigaction(signal, &action, std::ptr::null_mut());
                 }
-                close_child_fds(self.max_fd);
+                crate::proc::close_child_fds(self.max_fd);
                 libc::sigprocmask(libc::SIG_SETMASK, &mask.old, std::ptr::null_mut());
                 let env = environments[actual].as_ptr();
                 for executable in &self.executables {
@@ -437,22 +437,6 @@ fn above_standard_fds(fd: OwnedFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
 
-unsafe fn close_child_fds(max_fd: i32) {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: only the child invokes this, with no live fd owners surviving exec.
-        if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } == 0 {
-            return;
-        }
-    }
-    for fd in 3..max_fd {
-        // SAFETY: close accepts arbitrary descriptor numbers; only child state changes.
-        unsafe {
-            libc::close(fd);
-        }
-    }
-}
-
 pub const fn default_search_path() -> &'static [u8] {
     #[cfg(target_os = "macos")]
     {
@@ -513,6 +497,89 @@ mod launch_signal_tests {
                     .unwrap()
             ),
             0
+        );
+    }
+
+    #[test]
+    fn prepared_launch_first_output_does_not_scan_open_max() {
+        use std::os::fd::{AsFd, AsRawFd};
+        use std::time::{Duration, Instant};
+        let launch = PreparedLaunch::new(LaunchOptions {
+            shell: b"/bin/sh".to_vec(),
+            argv: vec![b"printf READY".to_vec()],
+            environment: Vec::new(),
+            cwd: b"/".to_vec(),
+            home: None,
+            termios: None,
+            backspace: 127,
+            size: Winsize {
+                cols: 80,
+                rows: 24,
+                ..Default::default()
+            },
+        })
+        .unwrap();
+        let started = Instant::now();
+        let child = launch.launch().unwrap();
+        let deadline = Duration::from_millis(100);
+        let mut output = Vec::new();
+        let mut failure = None;
+        while !output.windows(5).any(|bytes| bytes == b"READY") {
+            let Some(remaining) = deadline.checked_sub(started.elapsed()) else {
+                break;
+            };
+            let mut descriptor = libc::pollfd {
+                fd: child.master.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: descriptor is one initialized poll record for a live fd.
+            let result = unsafe {
+                libc::poll(
+                    &mut descriptor,
+                    1,
+                    remaining.as_millis().max(1) as libc::c_int,
+                )
+            };
+            if result < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                failure = Some(error.to_string());
+                break;
+            }
+            if result == 0 {
+                break;
+            }
+            let mut bytes = [0u8; 32];
+            match crate::fd::read(child.master.as_fd(), &mut bytes) {
+                Ok(0) => break,
+                Ok(count) => output.extend_from_slice(&bytes[..count]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(error) => {
+                    failure = Some(error.to_string());
+                    break;
+                }
+            }
+        }
+        let elapsed = started.elapsed();
+        let status = crate::proc::wait_process(child.pid, false)
+            .unwrap()
+            .unwrap();
+        assert!(failure.is_none(), "first child output: {failure:?}");
+        assert_eq!(crate::proc::exit_code(status), 0);
+        assert!(
+            output.windows(5).any(|bytes| bytes == b"READY"),
+            "child produced no marker within {deadline:?}; elapsed={elapsed:?}, bytes={output:?}"
+        );
+        assert!(
+            elapsed < deadline,
+            "child first-output latency {elapsed:?} exceeded {deadline:?}"
         );
     }
 }

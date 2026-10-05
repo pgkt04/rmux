@@ -122,13 +122,11 @@ impl RunShellState {
         let Some(wp) = wp else {
             return;
         };
-        // View-mode entry is the G18 CfgRuntime hook; until copy mode lands it
-        // reports Unavailable and the line takes the cfg fallback route.
         let mut view = CfgModelRuntime::pane_top_is_view(server, wp);
         if !view {
             view = CfgRuntime::enter_view_mode(server, wp).is_ok();
         }
-        if !view || CfgRuntime::append_view_line(server, wp, msg).is_err() {
+        if !view || crate::modes::copy::view::add(server, wp, true, msg).is_err() {
             CfgRuntime::print_cfg_fallback(server, self.client, msg);
         }
     }
@@ -374,6 +372,38 @@ mod tests {
         assert_eq!(lines, vec![&b"a"[..], b"b", b"", b"rest"]);
         assert_eq!(split_output(b"").count(), 0);
         assert_eq!(split_output(b"x\n").collect::<Vec<_>>(), vec![&b"x"[..]]);
+    }
+
+    #[test]
+    fn targeted_shell_output_parses_styles_and_carriage_return() {
+        let mut server = Server::default();
+        let window = crate::model::window::window_create(&mut server, 20, 4, 0, 0).unwrap();
+        let pane = crate::model::pane::pane_create(&mut server, window, 20, 4, 10).unwrap();
+        let state = RunShellState {
+            client: None,
+            command: RunShellCommand::None,
+            cwd: None,
+            item: None,
+            session: None,
+            pane_id: server.panes.get(pane).unwrap().public_id as i32,
+            flags: JobFlags::default(),
+        };
+        state.print(&mut server, b"\x1b[31mstyled\x1b[0m\rreplace");
+        let mode = server.panes.get(pane).unwrap().modes.first().unwrap().id;
+        let screen = crate::modes::copy::state::data(&server, mode)
+            .unwrap()
+            .backing
+            .screen();
+        assert_eq!(screen.grid.get_cell(0, 0).data.bytes(), b"r");
+        assert_eq!(screen.grid.get_cell(6, 0).data.bytes(), b"e");
+        assert_eq!(screen.cx, 7);
+        state.print(&mut server, b"\x1b[32mgreen");
+        let screen = crate::modes::copy::state::data(&server, mode)
+            .unwrap()
+            .backing
+            .screen();
+        assert_eq!(screen.grid.get_cell(0, 1).data.bytes(), b"g");
+        assert_eq!(screen.grid.get_cell(0, 1).fg, rmux_emu::colour::Colour(2));
     }
 
     #[test]

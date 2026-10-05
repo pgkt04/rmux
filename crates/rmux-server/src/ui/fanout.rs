@@ -322,6 +322,9 @@ fn select_client(
     client: &Client,
     invisible_panes: bool,
 ) -> Target {
+    if crate::tsp::broker::native_pane_client(client, snap.pane) {
+        return Target::Skip;
+    }
     // tty_client_ready
     if !info.ready || client.tty.is_none() {
         return Target::Skip;
@@ -524,6 +527,10 @@ impl TtySink for PaneSink {
                 if *allow_invisible {
                     flags.insert(TtyCtxFlags::INVISIBLE_PANES);
                 }
+            }
+            #[cfg(feature = "sixel")]
+            DrawCommand::SixelImage { image } => {
+                data = TtyCommandData::SixelImage(image);
             }
         }
         let mut damage = Vec::new();
@@ -819,6 +826,23 @@ fn sync_flush_dirty(srv: &mut Server, wp: PaneId) {
         if sink.snapshot.obscured {
             flags.insert(TtyCtxFlags::PANE_OBSCURED);
         }
+        // screen_write_initctx(&ctx, &ttyctx, 1, 1): tty_cmd_syncstart opens
+        // the client transaction before any dirty line (screen-write.c:1312).
+        let mut ignore = |_: u32, _: u32| {};
+        sink.write(
+            TtyCommand::SyncStart,
+            s,
+            hyperlinks,
+            &DEFAULT_CELL,
+            TtyCommandData::Count(0),
+            flags,
+            s.cx,
+            s.cy,
+            s.rupper,
+            s.rlower,
+            Colour::DEFAULT,
+            &mut ignore,
+        );
         // screen_write_sync_apply_scroll
         if sync.scrolled != 0 && !redraw {
             if sync.rlower >= sy || sync.rupper > sync.rlower {
@@ -969,6 +993,70 @@ pub fn pane_set_selection(srv: &mut Server, wp: PaneId, selector: &[u8], data: &
         );
     });
 }
+
+/// tty_draw_images: replay only the selected screen, in insertion order.
+#[cfg(feature = "sixel")]
+pub fn tty_draw_images(
+    tty: &mut rmux_tty::tty::Tty,
+    tparm: &mut TparmState,
+    srv: &Server,
+    c: ClientId,
+    wp: PaneId,
+) {
+    let Some(pane) = srv.panes.get(wp) else {
+        return;
+    };
+    if styles::client_window(srv, c) != Some(pane.window) || pane.layout_cell.is_none() {
+        return;
+    }
+    let screen = pane.screen();
+    let Some(owner) = screen.image_owner() else {
+        return;
+    };
+    let (bigger, wox, woy, wsx, wsy) = tty.window_offset();
+    let mut flags = TtyCtxFlags::INVISIBLE_PANES;
+    if bigger {
+        flags.insert(TtyCtxFlags::WINDOW_BIGGER);
+    }
+    let top_lines = if status::status_at_line(srv, c) == 0 {
+        status::status_line_size(srv, c)
+    } else {
+        0
+    };
+    for &id in srv.images.ordered(owner) {
+        let Some(image) = srv.images.get(owner, id) else {
+            continue;
+        };
+        let ctx = TtyCtx {
+            s: screen,
+            cell: &DEFAULT_CELL,
+            flags,
+            data: TtyCommandData::SixelImage(image),
+            ocx: image.px,
+            ocy: image.py,
+            orupper: screen.rupper,
+            orlower: screen.rlower,
+            xoff: pane.xoff,
+            yoff: pane.yoff.wrapping_add(top_lines as i32),
+            rxoff: pane.xoff,
+            ryoff: pane.yoff,
+            sx: pane.sx,
+            sy: pane.sy,
+            bg: Colour::DEFAULT.0 as u32,
+            defaults: DEFAULT_CELL,
+            style_ctx: TtyStyleCtx::default(),
+            wox,
+            woy,
+            wsx,
+            wsy,
+        };
+        tty.command(tparm, TtyCommand::SixelImage, &ctx);
+    }
+}
+
+#[cfg(all(test, feature = "sixel"))]
+#[path = "image_tests.rs"]
+mod image_tests;
 
 #[cfg(test)]
 mod tests {

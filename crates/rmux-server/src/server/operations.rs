@@ -450,6 +450,8 @@ pub fn server_destroy_pane(
     if !pane.flags.contains(PaneFlags::STATUSREADY) {
         return Ok(());
     }
+    crate::tsp::broker::pane_exited(server, id);
+    let pane = server.panes.get(id).ok_or(ModelError::StaleId)?;
     let retain = retain_exit(
         server.options.get_number(pane.options, b"remain-on-exit"),
         pane.status,
@@ -505,6 +507,8 @@ pub fn server_destroy_pane(
                 &mut sink,
                 policy,
                 &mut server.hyperlinks,
+                #[cfg(feature = "sixel")]
+                Some(&mut server.images),
             );
             writer.scrollregion(0, sy - 1);
             writer.cursormove(0, (sy - 1) as i32, false);
@@ -519,6 +523,7 @@ pub fn server_destroy_pane(
             );
             writer.finish();
         }
+        crate::tsp::broker::drain_anchors(server, id);
         if let Some(pane) = server.panes.get_mut(id) {
             pane.base.mode.remove(rmux_emu::screen::ScreenMode::CURSOR);
             pane.flags.insert(PaneFlags::REDRAW);

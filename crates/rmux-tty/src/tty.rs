@@ -76,6 +76,8 @@ impl std::ops::Not for TtyFlags {
 
 mod attr;
 mod output;
+mod protocol;
+pub use protocol::{MAX_PROTOCOL_BYTES, PROTOCOL_CONTROL_RESERVE, ProtocolTransaction, QueueFull};
 #[cfg(test)]
 mod tests;
 
@@ -154,6 +156,7 @@ pub enum TtyEffect {
     AllRedrawFlags,
     Discarded(usize),
     Written(usize),
+    ProtocolInvalidated { generation: u64 },
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TtyTimer {
@@ -161,6 +164,7 @@ pub enum TtyTimer {
     Clipboard,
     Block,
     Key,
+    Protocol,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerRequest {
@@ -229,6 +233,12 @@ pub struct Tty {
     pub(crate) keys: TtyKeyDecoder,
     pub(crate) write_pending: bool,
     pub(crate) read_pending: bool,
+    protocol_out: protocol::ProtocolQueue,
+    protocol_generation: u64,
+    protocol_stop: bool,
+    protocol_close: bool,
+    read_limit: Option<usize>,
+    read_paused: bool,
 }
 
 impl Tty {
@@ -274,6 +284,12 @@ impl Tty {
             keys: TtyKeyDecoder::default(),
             write_pending: false,
             read_pending: false,
+            protocol_out: protocol::ProtocolQueue::default(),
+            protocol_generation: 0,
+            protocol_stop: false,
+            protocol_close: false,
+            read_limit: None,
+            read_paused: false,
         }
     }
 
@@ -308,6 +324,10 @@ impl Tty {
 
     pub fn start(&mut self, state: &mut TparmState, opts: &TtyOptions) {
         self.opts = opts.clone();
+        self.reset_protocol();
+        self.protocol_stop = false;
+        self.protocol_close = false;
+        self.read_paused = false;
         rmux_sys::fd::set_blocking(self.fd(), false);
         self.read_pending = true;
         let mut tio = self.tio;
@@ -358,6 +378,11 @@ impl Tty {
         if !self.flags.contains(TtyFlags::STARTED) {
             return;
         }
+        if !self.protocol_out.is_empty() {
+            self.stop_after_protocol(state, opts);
+            return;
+        }
+        self.reset_protocol();
         self.flags.remove(TtyFlags::STARTED);
         for timer in [TtyTimer::Start, TtyTimer::Clipboard, TtyTimer::Block] {
             self.timer(timer, None);
@@ -432,6 +457,10 @@ impl Tty {
         self.timer(TtyTimer::Key, None);
         let opts = self.opts.clone();
         self.stop(state, &opts);
+        if self.protocol_stop {
+            self.protocol_close = true;
+            return;
+        }
         if self.flags.contains(TtyFlags::OPENED) {
             self.in_buf = ByteBuffer::new();
             self.out = VecDeque::new();
@@ -480,30 +509,88 @@ impl Tty {
         self.xpixel = xp;
         self.ypixel = yp;
     }
+    /// `tty_read_callback` read step. mio readiness is edge-triggered, so
+    /// drain while reads fill the buffer; a short read means the fd is empty.
+    /// `EAGAIN`/`EINTR` are not a closed tty.
     pub fn on_readable(&mut self) -> ReadOutcome {
+        if self.read_paused {
+            return ReadOutcome::Bytes(0);
+        }
         let mut bytes = [0; 4096];
-        match rmux_sys::fd::read(self.fd(), &mut bytes) {
-            Ok(n) if n != 0 => {
-                self.in_buf.add(&bytes[..n]);
-                ReadOutcome::Bytes(n)
+        let mut total = 0;
+        let protocol = self.protocol_partial();
+        // Protocol bodies may exceed the ordinary-input budget. Do not read
+        // even one trailing ordinary byte under that framing exemption.
+        if protocol && self.in_buf.data().ends_with(b"\x1b\\") {
+            return ReadOutcome::Bytes(0);
+        }
+        loop {
+            let maximum = crate::keys::MAX_TSP_INPUT_BODY + 4096;
+            let allowance = self
+                .read_limit
+                .unwrap_or(maximum)
+                .min(maximum)
+                .saturating_sub(self.in_buf.len())
+                .min(if protocol { 1 } else { bytes.len() });
+            if allowance == 0 {
+                return ReadOutcome::Bytes(total);
             }
-            _ => {
-                self.read_pending = false;
-                self.effects.push(TtyEffect::ReadClosed);
-                ReadOutcome::Closed
+            match rmux_sys::fd::read(self.fd(), &mut bytes[..allowance]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    self.in_buf.add(&bytes[..n]);
+                    total += n;
+                    if protocol && self.in_buf.data().ends_with(b"\x1b\\") {
+                        return ReadOutcome::Bytes(total);
+                    }
+                    if n == allowance {
+                        continue;
+                    }
+                    return ReadOutcome::Bytes(total);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    return ReadOutcome::Bytes(total);
+                }
+                Err(_) => break,
             }
         }
+        self.reset_protocol();
+        self.read_pending = false;
+        self.effects.push(TtyEffect::ReadClosed);
+        ReadOutcome::Closed
     }
+    /// `tty_write_callback`: a transient error keeps the write interest so
+    /// queued output is not stranded.
     pub fn on_writable(&mut self) -> io::Result<usize> {
         self.write_pending = false;
-        let n = rmux_sys::fd::write(self.fd(), self.out.as_slices().0)?;
-        self.out.drain(..n);
-        if self.redraw_bytes > 0 {
+        let fd = self.fd.as_fd();
+        let (n, is_protocol) =
+            match protocol::write_queued(&mut self.protocol_out, &mut self.out, |bytes| {
+                rmux_sys::fd::write(fd, bytes)
+            }) {
+                Ok(result) => result,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    self.write_pending = !self.out.is_empty() || !self.protocol_out.is_empty();
+                    return Ok(0);
+                }
+                Err(e) => {
+                    self.reset_protocol();
+                    return Err(e);
+                }
+            };
+        self.finish_protocol_stop();
+        if !is_protocol && self.redraw_bytes > 0 {
             self.redraw_bytes = self.redraw_bytes.saturating_sub(n);
-        } else if self.block_maybe() {
+        } else if !is_protocol && self.block_maybe() {
             return Ok(n);
         }
-        self.write_pending = !self.out.is_empty();
+        self.write_pending = !self.out.is_empty() || !self.protocol_out.is_empty();
         Ok(n)
     }
     pub(crate) fn block_maybe(&mut self) -> bool {
@@ -522,6 +609,8 @@ impl Tty {
         }
         self.flags.insert(TtyFlags::BLOCK);
         self.out.clear();
+        self.protocol_out.discard_cells();
+        self.write_pending = !self.protocol_out.is_empty();
         self.effects.push(TtyEffect::Discarded(size));
         self.discarded = 0;
         self.timer(TtyTimer::Block, Some(Duration::from_millis(100)));
@@ -552,6 +641,7 @@ impl Tty {
                 }
             }
             TtyTimer::Key => self.keys.timer_fired(),
+            TtyTimer::Protocol => self.keys.protocol_timer_fired(),
         }
     }
     pub fn send_requests(&mut self, now: SystemTime) {
@@ -559,8 +649,18 @@ impl Tty {
             return;
         }
         if self.term().flags().contains(TtyTermFlags::VT100LIKE) {
+            if !self.flags.contains(TtyFlags::HAVEDA)
+                && !self
+                    .keys
+                    .pending_da1()
+                    .any(|owner| owner == crate::keys::Da1Owner::Discovery)
+            {
+                let _ = self.queue_da1(
+                    crate::keys::Da1Owner::Discovery,
+                    ProtocolTransaction::new(Vec::new()).control(),
+                );
+            }
             for (flag, bytes) in [
-                (TtyFlags::HAVEDA, &b"\x1b[c"[..]),
                 (TtyFlags::HAVEDA2, &b"\x1b[>c"[..]),
                 (TtyFlags::HAVEXDA, &b"\x1b[>q"[..]),
                 (TtyFlags::HAVESYNC, &b"\x1b[?2026$p"[..]),
@@ -636,7 +736,7 @@ impl Tty {
         self.write_pending
     }
     pub fn wants_read(&self) -> bool {
-        self.read_pending
+        self.read_pending && !self.read_paused
     }
     pub fn set_redraw_bytes(&mut self, n: usize) {
         self.redraw_bytes = n;
@@ -675,12 +775,41 @@ impl Tty {
         self.term.as_mut().expect("tty term requested before open")
     }
     pub fn out_len(&self) -> usize {
-        self.out.len()
+        self.out.len() + self.protocol_out.bytes
     }
     /// `tty->sync_offset` (`server-client.c:2393`): queued bytes before the
     /// current synchronized frame started.
     pub fn sync_offset(&self) -> usize {
         self.sync_offset
+    }
+    /// One `tty_keys_next` step over the pending input bytes (`tty-keys.c:745`).
+    pub fn decode_next(
+        &mut self,
+        ctx: &crate::keys::KeyDecodeContext,
+    ) -> crate::keys::DecodeStep<'_> {
+        let step = self.keys.next(self.in_buf.data(), ctx);
+        if matches!(
+            step,
+            crate::keys::DecodeStep::Complete {
+                input: crate::keys::TtyInput::Tsp { .. }
+                    | crate::keys::TtyInput::Da1Sentinel { .. }
+                    | crate::keys::TtyInput::ProtocolFault(_),
+                ..
+            } | crate::keys::DecodeStep::Discard {
+                cancel_timer: true,
+                ..
+            }
+        ) {
+            self.timers.push(TimerRequest {
+                timer: TtyTimer::Protocol,
+                after: None,
+            });
+        }
+        step
+    }
+    /// `tio.c_cc[VERASE]` unless `_POSIX_VDISABLE` (`tty-keys.c` backspace).
+    pub fn verase(&self) -> Option<u8> {
+        self.tio.erase()
     }
     pub fn fd(&self) -> BorrowedFd<'_> {
         self.fd.as_fd()

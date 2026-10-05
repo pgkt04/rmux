@@ -328,6 +328,11 @@ pub fn client_query(
 
 fn client_value(server: &mut Server, context: &FormatContext, key: &[u8]) -> Option<FormatValue> {
     let id = context.evaluated_client?;
+    if key == b"client_tsp" {
+        return Some(FormatValue::Bytes(ByteString::from(
+            server.clients.get(id)?.tsp.format(),
+        )));
+    }
     if key == b"client_user" {
         let client = server.clients.get(id)?;
         if client.user.is_none() {
@@ -458,7 +463,8 @@ fn server_value(server: &Server, key: &[u8]) -> Option<FormatValue> {
 
 fn mouse_value(server: &Server, context: &FormatContext, key: &[u8]) -> Option<FormatValue> {
     let mouse = context.mouse.as_ref()?;
-    let pane = find::mouse_pane(server, mouse).and_then(|(_, _, pane)| server.panes.get(pane));
+    let pane_id = find::mouse_pane(server, mouse).map(|(_, _, pane)| pane);
+    let pane = pane_id.and_then(|pane| server.panes.get(pane));
     let coordinates = pane.and_then(|pane| {
         find::mouse_at(
             find::PaneGeometry {
@@ -471,6 +477,19 @@ fn mouse_value(server: &Server, context: &FormatContext, key: &[u8]) -> Option<F
             false,
         )
     });
+    if mouse.valid && pane.is_some_and(|pane| !pane.modes.is_empty()) {
+        let pane = pane_id?;
+        let (x, y) = coordinates?;
+        let value = match key {
+            b"mouse_word" => crate::modes::copy::render::get_word(server, pane, x, y),
+            b"mouse_line" => crate::modes::copy::render::get_line(server, pane, y),
+            b"mouse_hyperlink" => crate::modes::copy::render::get_hyperlink(server, pane, x, y),
+            _ => None,
+        };
+        if matches!(key, b"mouse_word" | b"mouse_line" | b"mouse_hyperlink") {
+            return value.map(FormatValue::Bytes);
+        }
+    }
     let client = context
         .evaluated_client
         .and_then(|id| server.clients.get(id));
@@ -512,7 +531,32 @@ fn mouse_value(server: &Server, context: &FormatContext, key: &[u8]) -> Option<F
     )
 }
 
+pub fn add_mode_formats(server: &Server, tree: &mut crate::format::FormatTree) {
+    let Some(mode) = tree
+        .context
+        .pane
+        .and_then(|id| server.panes.get(id))
+        .and_then(|pane| pane.modes.first())
+    else {
+        return;
+    };
+    if matches!(mode.name.as_slice(), b"copy-mode" | b"view-mode") {
+        crate::modes::copy::render::formats(server, mode.id, tree);
+    }
+}
+
+pub fn copy_value(server: &Server, context: &FormatContext, key: &[u8]) -> Option<FormatValue> {
+    let mode = server.panes.get(context.pane?)?.modes.first()?;
+    if !matches!(mode.name.as_slice(), b"copy-mode" | b"view-mode") {
+        return None;
+    }
+    crate::modes::copy::render::format_value(server, mode.id, key)
+}
+
 pub fn builtin(server: &mut Server, context: &FormatContext, key: &[u8]) -> Option<FormatValue> {
+    if let Some(value) = copy_value(server, context, key) {
+        return Some(value);
+    }
     if (key.starts_with(b"client_") && key != b"client_mode_format")
         || matches!(
             key,
@@ -1101,6 +1145,62 @@ mod tests {
     }
 
     #[test]
+    fn client_tsp_reports_probe_state_not_terminal_identity() {
+        use crate::tsp::client::{Capability, RequestOwner};
+        let mut server = Server::new();
+        let id = client(&mut server, b"tsp");
+        let context = FormatContext {
+            evaluated_client: Some(id),
+            ..FormatContext::default()
+        };
+        let c = server.clients.get_mut(id).unwrap();
+        c.term_name = Some(b"tern".to_vec());
+        c.environ
+            .set(b"TERM_PROGRAM", EnvironmentFlags::default(), b"tern");
+        assert_eq!(
+            builtin(&mut server, &context, b"client_tsp")
+                .unwrap()
+                .bytes(),
+            b"unknown"
+        );
+        let token = server
+            .clients
+            .get_mut(id)
+            .unwrap()
+            .tsp
+            .request(RequestOwner::Detection);
+        assert_eq!(
+            builtin(&mut server, &context, b"client_tsp")
+                .unwrap()
+                .bytes(),
+            b"unknown"
+        );
+        server.clients.get_mut(id).unwrap().tsp.sentinel(token);
+        assert_eq!(
+            builtin(&mut server, &context, b"client_tsp")
+                .unwrap()
+                .bytes(),
+            b"no"
+        );
+        let hello = serde_json::from_value(serde_json::json!({"v":1,"kinds":["text"],"credits":2}))
+            .unwrap();
+        server.clients.get_mut(id).unwrap().tsp.capability = Capability::V1(hello);
+        assert_eq!(
+            builtin(&mut server, &context, b"client_tsp")
+                .unwrap()
+                .bytes(),
+            b"v1"
+        );
+        server.clients.get_mut(id).unwrap().tsp.invalidate(2);
+        assert_eq!(
+            builtin(&mut server, &context, b"client_tsp")
+                .unwrap()
+                .bytes(),
+            b"unknown"
+        );
+    }
+
+    #[test]
     fn mouse_pane_coordinates_and_base_line_use_captured_event() {
         use crate::model::session::session_attach;
         use crate::model::window::{window_add_pane, window_create, window_set_active_pane};
@@ -1167,5 +1267,100 @@ mod tests {
         );
         assert!(builtin(&mut server, &context, b"mouse_line").is_some());
         assert!(builtin(&mut server, &context, b"mouse_status_line").is_none());
+        let mode = crate::model::pane::pane_set_mode(
+            &mut server,
+            pane,
+            b"copy-mode",
+            crate::modes::WindowModeFlags::default(),
+            std::rc::Rc::new(crate::modes::copy::CopyModeDriver {
+                kind: crate::modes::copy::CopyModeKind::Copy {
+                    source: None,
+                    args: crate::cmd::arguments::Args::default(),
+                },
+            }),
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        let data = crate::modes::copy::state::data_mut(&mut server, mode).unwrap();
+        for (x, byte) in b"snapshot word".iter().copied().enumerate() {
+            cell.data = rmux_util::utf8::Utf8Data::set(byte);
+            data.backing.screen_mut().grid.set_cell(x as u32, 1, &cell);
+        }
+        assert_eq!(
+            builtin(&mut server, &context, b"mouse_word")
+                .unwrap()
+                .bytes(),
+            b"snapshot"
+        );
+        assert_eq!(
+            builtin(&mut server, &context, b"mouse_line")
+                .unwrap()
+                .bytes(),
+            b"snapshot word"
+        );
+        assert_eq!(
+            builtin(&mut server, &context, b"mouse_x").unwrap().bytes(),
+            b"2"
+        );
+    }
+
+    #[test]
+    fn copy_and_view_defaults_register_scalar_and_lazy_mode_formats() {
+        use crate::modes::copy::{CopyModeDriver, CopyModeKind, state};
+        use std::rc::Rc;
+
+        for view in [false, true] {
+            let mut server = Server::new();
+            let window = crate::model::window::window_create(&mut server, 20, 5, 0, 0).unwrap();
+            let pane = crate::model::pane::pane_create(&mut server, window, 20, 5, 10).unwrap();
+            let kind = if view {
+                CopyModeKind::View
+            } else {
+                CopyModeKind::Copy {
+                    source: None,
+                    args: crate::cmd::arguments::Args::default(),
+                }
+            };
+            let mode = crate::model::pane::pane_set_mode(
+                &mut server,
+                pane,
+                if view { b"view-mode" } else { b"copy-mode" },
+                crate::modes::WindowModeFlags::default(),
+                Rc::new(CopyModeDriver { kind }),
+                false,
+            )
+            .unwrap()
+            .unwrap();
+            let data = state::data_mut(&mut server, mode).unwrap();
+            data.cx = 1;
+            data.cy = 0;
+            let mut cell = rmux_emu::cell::DEFAULT_CELL;
+            for (x, byte) in b"hello".iter().copied().enumerate() {
+                cell.data = rmux_util::utf8::Utf8Data::set(byte);
+                data.backing.screen_mut().grid.set_cell(x as u32, 0, &cell);
+            }
+            let context = FormatContext {
+                pane: Some(pane),
+                ..FormatContext::default()
+            };
+            let mut tree = crate::format::create_defaults(&mut server, None, context);
+            assert_eq!(&*tree.expand(&mut server, b"#{copy_cursor_x}:#{copy_cursor_y}:#{selection_mode}:#{copy_cursor_word}:#{copy_cursor_line}"), b"1:0:char:hello:hello");
+            assert_eq!(
+                &*FormatRuntime::builtin(&mut server, &context, b"copy_cursor_word")
+                    .unwrap()
+                    .bytes(),
+                b"hello"
+            );
+            tree.release(&mut server);
+
+            let mut tree = FormatTree::create(None, None, 0, FormatFlags::NONE, &mut server);
+            tree.defaults_pane(&mut server, pane);
+            assert_eq!(
+                &*tree.expand(&mut server, b"#{copy_cursor_x}:#{copy_cursor_line}"),
+                b"1:hello"
+            );
+            tree.release(&mut server);
+        }
     }
 }

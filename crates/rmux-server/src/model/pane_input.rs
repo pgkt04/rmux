@@ -17,6 +17,8 @@ use std::time::Duration;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnedInputEffect {
     Reply(Vec<u8>),
+    TspMessage(Vec<u8>),
+    TerminalReset,
     Request {
         kind: InputRequestKind,
         end: InputEnd,
@@ -57,6 +59,8 @@ impl From<InputEffect<'_>> for OwnedInputEffect {
     fn from(value: InputEffect<'_>) -> Self {
         match value {
             InputEffect::Reply(bytes) => Self::Reply(bytes.to_vec()),
+            InputEffect::TspMessage { payload } => Self::TspMessage(payload.to_vec()),
+            InputEffect::TerminalReset => Self::TerminalReset,
             InputEffect::Request { kind, end } => Self::Request { kind, end },
             InputEffect::ClipboardQuery { clip, end } => Self::ClipboardQuery { clip, end },
             InputEffect::ClipboardReceived { clip, data } => Self::ClipboardReceived {
@@ -245,7 +249,7 @@ pub fn input_policy(server: &Server, id: PaneId) -> Result<InputPolicy, ModelErr
             b"input-buffer-size",
             input::INPUT_BUF_DEFAULT_SIZE as i64,
         ) as usize,
-        sixel: false,
+        sixel: cfg!(feature = "sixel"),
         pixels: Some((w.xpixel, w.ypixel)),
         has_pane: true,
         writer_has_pane: pane.modes.is_empty(),
@@ -512,6 +516,8 @@ fn parse_buffer(
                     write_policy,
                     &mut server.hyperlinks,
                     state,
+                    #[cfg(feature = "sixel")]
+                    Some(&mut server.images),
                 )
             } else {
                 ScreenWriteCtx::start(
@@ -519,6 +525,8 @@ fn parse_buffer(
                     host.tty_sink(),
                     write_policy,
                     &mut server.hyperlinks,
+                    #[cfg(feature = "sixel")]
+                    Some(&mut server.images),
                 )
             };
             match p
@@ -537,6 +545,7 @@ fn parse_buffer(
             }
         };
         host.end_draw(server, id);
+        crate::tsp::broker::drain_anchors(server, id);
         consumed_total += consumed;
         let Some(effect) = effect else {
             if external.is_none() {
@@ -586,7 +595,7 @@ fn make_request(
     }
     Ok(request_id)
 }
-fn queue_reply(
+pub fn queue_reply(
     server: &mut Server,
     id: PaneId,
     bytes: Vec<u8>,
@@ -644,6 +653,10 @@ pub fn apply_effect(
         OwnedInputEffect::Reply(bytes) => {
             queue_reply(server, id, bytes.clone(), true, host.now_ms())?
         }
+        OwnedInputEffect::TspMessage(payload) => {
+            crate::tsp::broker::pane_message(server, id, payload);
+        }
+        OwnedInputEffect::TerminalReset => crate::tsp::broker::pane_reset(server, id),
         OwnedInputEffect::Request { kind, end } => {
             add_request(server, host, id, *kind, *end)?;
         }
@@ -807,6 +820,9 @@ pub fn apply_effect(
                 }
             };
             let window = p.window;
+            if *event == Osc133Event::Prompt {
+                crate::tsp::broker::pane_prompt(server, id);
+            }
             server.emit(event_name, None, Some(window), Some(id));
         }
         OwnedInputEffect::AlternateChanged { entering } => {
@@ -821,6 +837,7 @@ pub fn apply_effect(
                 pane_send_resize(server, id, sx, sy)?;
                 pane_clear_resizes(server, id, None)?;
             }
+            crate::tsp::broker::pane_alternate(server, id, *entering);
             window::effect(server, WindowEffect::Borders(window));
             window::effect(server, WindowEffect::Redraw(window));
         }
@@ -831,14 +848,22 @@ pub fn apply_effect(
             let window = server.panes.get(id).ok_or(ModelError::StaleId)?.window;
             window::effect(server, WindowEffect::Borders(window));
             window::effect(server, WindowEffect::Status(window));
-            if matches!(
-                &effect,
-                OwnedInputEffect::TitleChanged(_) | OwnedInputEffect::TitlePopped(_)
-            ) {
+            if let OwnedInputEffect::TitleChanged(title) | OwnedInputEffect::TitlePopped(title) =
+                &effect
+            {
+                server.effects.push_back(ModelEffect::Pane(
+                    super::pane::PaneEffect::TitleChanged {
+                        pane: id,
+                        new: title.clone(),
+                    },
+                ));
                 server.emit(b"pane-title-changed", None, Some(window), Some(id));
             }
         }
-        OwnedInputEffect::Bell => {}
+        OwnedInputEffect::Bell => {
+            let window = server.panes.get(id).ok_or(ModelError::StaleId)?.window;
+            server.emit(b"pane-bell", None, Some(window), Some(id));
+        }
     }
     if server
         .panes
@@ -1086,6 +1111,20 @@ mod tests {
         window::window_add_pane(s, w, None, 10, SpawnFlags::default()).unwrap()
     }
     #[test]
+    fn protocol_effects_own_barrier_payload_and_preserve_reset() {
+        let mut payload = b"tsp;q;{\"q\":\"hello\"}".to_vec();
+        let effect = OwnedInputEffect::from(InputEffect::TspMessage { payload: &payload });
+        payload.fill(b'x');
+        assert_eq!(
+            effect,
+            OwnedInputEffect::TspMessage(b"tsp;q;{\"q\":\"hello\"}".to_vec())
+        );
+        assert_eq!(
+            OwnedInputEffect::from(InputEffect::TerminalReset),
+            OwnedInputEffect::TerminalReset
+        );
+    }
+    #[test]
     fn offsets_clamp_drain_and_reset() {
         let mut s = Server::default();
         let id = pane(&mut s);
@@ -1200,6 +1239,7 @@ mod tests {
         events: Vec<&'static str>,
         destroy_on_title: bool,
         alternate_clean: bool,
+        drawing: bool,
     }
     impl Default for Host {
         fn default() -> Self {
@@ -1208,10 +1248,19 @@ mod tests {
                 events: Vec::new(),
                 destroy_on_title: false,
                 alternate_clean: false,
+                drawing: false,
             }
         }
     }
     impl PaneInputHost for Host {
+        fn begin_draw(&mut self, _: &mut Server, _: PaneId) {
+            assert!(!self.drawing);
+            self.drawing = true;
+        }
+        fn end_draw(&mut self, _: &mut Server, _: PaneId) {
+            assert!(self.drawing);
+            self.drawing = false;
+        }
         fn tty_sink(&mut self) -> &mut dyn TtySink {
             &mut self.sink
         }
@@ -1244,6 +1293,12 @@ mod tests {
             ClientTheme::Unknown
         }
         fn effect(&mut self, server: &mut Server, pane: PaneId, effect: &OwnedInputEffect) {
+            assert!(!self.drawing, "parser effects must follow end_draw");
+            if matches!(effect, OwnedInputEffect::TspMessage(_)) {
+                self.events.push("tsp");
+            } else if matches!(effect, OwnedInputEffect::Reply(_)) {
+                self.events.push("reply");
+            }
             if matches!(
                 effect,
                 OwnedInputEffect::AlternateChanged { entering: true }
@@ -1278,6 +1333,76 @@ mod tests {
         fn stop_sync(&mut self, _: &mut Server, _: PaneId) {
             self.events.push("sync-stop");
         }
+    }
+    #[test]
+    fn broker_probe_and_da1_wait_in_order_behind_older_request() {
+        let mut server = Server::default();
+        let id = pane(&mut server);
+        let client = ClientId::from_parts(1, 0);
+        make_request(
+            &mut server,
+            id,
+            RequestKind::Palette { idx: 1 },
+            Some(client),
+            InputEnd::St,
+            0,
+        )
+        .unwrap();
+        let mut host = Host::default();
+        pane_parse_buffer(
+            &mut server,
+            &mut host,
+            id,
+            b"\x1b_tsp;q;{\"q\":\"hello\",\"v\":[1],\"features\":[\"rmux-reprobe\"]}\x1b\\\x1b[c",
+        )
+        .unwrap();
+        assert!(server.panes.get(id).unwrap().output.is_empty());
+        let mut expected = crate::tsp::wire::WireMessage::json(
+            b'r',
+            &crate::tsp::wire::probe_reply(1, false, None),
+        )
+        .encode();
+        expected.extend_from_slice(if cfg!(feature = "sixel") {
+            b"\x1b[?1;2;4c"
+        } else {
+            b"\x1b[?1;2c"
+        });
+        input_request_reply(
+            &mut server,
+            client,
+            &InputReply::Palette(input::InputRequestPaletteData {
+                idx: 1,
+                c: Colour::NONE,
+            }),
+        )
+        .unwrap();
+        assert_eq!(server.panes.get(id).unwrap().output, expected);
+        assert_eq!(host.events, ["tsp", "reply"]);
+    }
+
+    #[test]
+    fn protocol_query_barrier_precedes_da1_and_keeps_ordinary_grid_output() {
+        let mut server = Server::default();
+        let id = pane(&mut server);
+        let previous_title = server.panes.get(id).unwrap().base.title.clone();
+        let mut host = Host::default();
+        pane_parse_buffer(
+            &mut server,
+            &mut host,
+            id,
+            b"\x1b_tsp;q;{\"q\":\"hello\",\"v\":[1]}\x1b\\\x1b[cX",
+        )
+        .unwrap();
+        assert_eq!(host.events, ["tsp", "reply"]);
+        let pane = server.panes.get(id).unwrap();
+        assert_eq!(pane.base.grid.view_string_cells(0, 0, 1), b"X");
+        let da1: &[u8] = if cfg!(feature = "sixel") {
+            b"\x1b[?1;2;4c"
+        } else {
+            b"\x1b[?1;2c"
+        };
+        assert_eq!(pane.output, da1);
+        assert_eq!(pane.base.title, previous_title);
     }
     #[test]
     fn alternate_repairs_before_remaining_input_and_orders_consumers() {

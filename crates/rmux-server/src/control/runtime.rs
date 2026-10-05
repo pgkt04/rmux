@@ -462,7 +462,7 @@ pub fn on_read(server: &mut Server, id: ClientId) {
     let Some(io) = &mut s.io else {
         return;
     };
-    let result = io.reader().read_ready();
+    let result = io.reader().read_once();
     let bytes = io.reader().take_input();
     let lines = s.input.feed(&bytes);
     if result.is_err() || result.is_ok_and(|p| p.eof) {
@@ -639,5 +639,111 @@ mod tests {
         stop(&mut server, id);
         assert!(!server.deferred.contains_key(&callback));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn commands_arrive_before_control_eof_marks_client_exiting() {
+        use std::os::fd::AsFd;
+
+        let mut server = Server::new();
+        let (input, sender) = rmux_sys::fd::pipe().unwrap();
+        rmux_sys::fd::write(sender.as_fd(), b"display-message -p value\n").unwrap();
+        drop(sender);
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let mut client = crate::client::Client::new(None, (0, 0));
+        client.flags = ClientFlags::CONTROL;
+        client.fd = Some(input);
+        client.out_fd = Some(output.into());
+        let id = server.clients.insert(client).unwrap();
+        server.client_order.push_back(id);
+        start(&mut server, id).unwrap();
+        ready(&mut server, id);
+        on_read(&mut server, id);
+        assert!(server.queue.clients.get(&id).unwrap().head.is_some());
+        assert!(
+            !server
+                .clients
+                .get(id)
+                .unwrap()
+                .flags
+                .contains(ClientFlags::EXIT)
+        );
+        on_read(&mut server, id);
+        assert!(
+            server
+                .clients
+                .get(id)
+                .unwrap()
+                .flags
+                .contains(ClientFlags::EXIT)
+        );
+        stop(&mut server, id);
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn fifo_writer_close_exits_control_client_without_input() {
+        use std::os::fd::AsFd;
+        use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+
+        let path = std::env::temp_dir().join(format!("rmux-control-fifo-{}", std::process::id()));
+        rmux_sys::server::make_fifo(path.as_os_str().as_bytes(), 0o600).unwrap();
+        let input = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let sender = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert!(rmux_sys::server::descriptor_is_fifo(input.as_fd()).unwrap());
+        let output = std::fs::OpenOptions::new()
+            .write(true)
+            .open("/dev/null")
+            .unwrap();
+        let mut server = Server::new();
+        let mut client = crate::client::Client::new(None, (0, 0));
+        client.flags = ClientFlags::CONTROL;
+        client.fd = Some(input.into());
+        client.out_fd = Some(output.into());
+        let id = server.clients.insert(client).unwrap();
+        server.client_order.push_back(id);
+        start(&mut server, id).unwrap();
+        ready(&mut server, id);
+        let events = server.event_loop.poll(Some(Duration::ZERO)).unwrap();
+        assert!(!events.iter().any(|event| {
+            matches!(event.action, LoopAction::ControlRead(client) if client == id)
+                && event.readable
+        }));
+        assert!(
+            !server
+                .clients
+                .get(id)
+                .unwrap()
+                .flags
+                .contains(ClientFlags::EXIT)
+        );
+        drop(sender);
+        let events = server
+            .event_loop
+            .poll(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert!(events.iter().any(|event| {
+            matches!(event.action, LoopAction::ControlRead(client) if client == id)
+                && event.readable
+        }));
+        on_read(&mut server, id);
+        assert!(
+            server
+                .clients
+                .get(id)
+                .unwrap()
+                .flags
+                .contains(ClientFlags::EXIT)
+        );
+        assert!(state(&mut server, id).unwrap().input.exited);
+        assert!(state(&mut server, id).unwrap().direct_drive.is_none());
+        stop(&mut server, id);
     }
 }

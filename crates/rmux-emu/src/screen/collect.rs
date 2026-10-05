@@ -101,13 +101,6 @@ impl ScreenWriteCtx<'_> {
         item.x = x;
         let used = item.used;
         let gc = item.gc;
-        #[cfg(feature = "sixel")]
-        {
-            let changed = self
-                .images
-                .check_area(self.screen.image_owner(), x, y, used, 1);
-            self.image_redraw(changed);
-        }
         self.insert_item(y, item);
         let mut bx = x;
         if x != 0 {
@@ -125,6 +118,15 @@ impl ScreenWriteCtx<'_> {
                     self.clear_cell(bx, y);
                 }
             }
+        }
+        #[cfg(feature = "sixel")]
+        if let Some(owner) = self.screen.image_owner() {
+            let changed = self
+                .images
+                .as_deref_mut()
+                .expect("image registry")
+                .check_area(owner, x, y, used, 1);
+            self.image_redraw(changed);
         }
         let mut row = std::mem::take(&mut self.screen.write_list[y as usize].data);
         self.screen
@@ -331,6 +333,8 @@ mod tests {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         let mut expected = [None; 32];
         let mut seed = 0x72a493u32;

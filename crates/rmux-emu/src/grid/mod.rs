@@ -20,6 +20,7 @@
 //! `hsize..hsize + sy` are the visible area. Everything here works in
 //! absolute rows; `view.rs` adds `hsize`.
 
+mod anchors;
 pub mod names;
 pub mod reader;
 pub mod reflow;
@@ -178,6 +179,10 @@ impl std::ops::Not for GridFlags {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct LineTime(pub u32);
 
+/// Emulator-local identity resolved by the pane's logical surface store.
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct SurfaceAnchorId(pub u64);
+
 impl LineTime {
     /// `grid_line_time`: wall-clock seconds, given the server start seconds.
     pub fn to_wall(self, start_secs: i64) -> i64 {
@@ -287,9 +292,14 @@ pub struct GridLine {
     pub time: LineTime,
     pub osc133: Osc133Data,
     pub flags: GridLineFlags,
+    surface_anchor: Option<SurfaceAnchorId>,
 }
 
 impl GridLine {
+    pub fn surface_anchor(&self) -> Option<SurfaceAnchorId> {
+        self.surface_anchor
+    }
+
     pub fn cellsize(&self) -> u32 {
         u32::from(self.cellsize)
     }
@@ -318,6 +328,7 @@ impl GridLine {
             time: self.time,
             osc133: self.osc133,
             flags: self.flags,
+            surface_anchor: None,
         }
     }
 
@@ -660,6 +671,7 @@ pub struct Grid {
     pub scroll_generation: u32,
     lines: Vec<GridLine>,
     line_clock: LineTime,
+    surface_anchor_removals: Vec<SurfaceAnchorId>,
 }
 
 impl Grid {
@@ -683,6 +695,7 @@ impl Grid {
             scroll_generation: 0,
             lines,
             line_clock: LineTime(0),
+            surface_anchor_removals: Vec::new(),
         };
         gd.check_is_clear();
         gd
@@ -772,11 +785,15 @@ impl Grid {
     /// `grid_adjust_lines` (`grid.c:256-260`): change the storage length
     /// only. New lines start empty.
     pub fn adjust_lines(&mut self, lines: u32) {
+        if (lines as usize) < self.lines.len() {
+            self.remove_surface_anchors_in(lines as usize..self.lines.len());
+        }
         self.lines.resize_with(lines as usize, GridLine::default);
     }
 
     /// `grid_free_lines` (`grid.c:362-369`).
     pub fn free_lines(&mut self, py: u32, ny: u32) {
+        self.remove_surface_anchors_in(py as usize..(py + ny) as usize);
         for gl in &mut self.lines[py as usize..(py + ny) as usize] {
             *gl = GridLine::default();
         }
@@ -784,6 +801,7 @@ impl Grid {
 
     /// `grid_empty_line` (`grid.c:592-598`).
     pub fn empty_line(&mut self, py: u32, bg: Colour) {
+        self.remove_surface_anchors_in(py as usize..py as usize + 1);
         empty_line(self.sx, &mut self.lines[py as usize], bg);
     }
 
@@ -810,6 +828,7 @@ impl Grid {
 
     /// `grid_trim_history` (`grid.c:432-442`).
     fn trim_history(&mut self, ny: u32) {
+        self.remove_surface_anchors_in(0..ny as usize);
         self.lines.drain(0..ny as usize);
     }
 
@@ -838,6 +857,7 @@ impl Grid {
             return;
         }
         let start = (self.hsize + self.sy - ny) as usize;
+        self.remove_surface_anchors_in(start..self.lines.len());
         self.lines.truncate(start);
         self.hsize -= ny;
     }
@@ -870,6 +890,7 @@ impl Grid {
     /// the region up, empty the bottom.
     pub fn scroll_history_region(&mut self, upper: u32, lower: u32, bg: Colour) {
         let hsize = self.hsize as usize;
+        self.remove_surface_anchors_in(upper as usize..upper as usize + 1);
         self.lines.push(GridLine::default());
         self.lines[hsize..].rotate_right(1);
 
@@ -898,6 +919,7 @@ impl Grid {
         if !self.check_y("grid_set_cell", py) {
             return;
         }
+        self.remove_surface_anchors_in(py as usize..py as usize + 1);
         set_cell_in_line(self.sx, &mut self.lines[py as usize], px, gc);
     }
 
@@ -913,6 +935,9 @@ impl Grid {
             return;
         }
         let slen = s.len() as u32;
+        if slen != 0 {
+            self.remove_surface_anchors_in(py as usize..py as usize + 1);
+        }
         let gl = &mut self.lines[py as usize];
         expand_line(self.sx, gl, px + slen, Colour::DEFAULT);
         if px + slen > gl.cellused() {
@@ -948,12 +973,19 @@ impl Grid {
             let mut ox = nx;
             if bg.is_default() {
                 if px > sx {
+                    if gl.surface_anchor.is_some() {
+                        self.remove_surface_anchors_in(yy as usize..yy as usize + 1);
+                    }
                     continue;
                 }
                 if px.wrapping_add(nx) > sx {
                     ox = sx - px;
                 }
             }
+            if gl.surface_anchor.is_some() {
+                self.remove_surface_anchors_in(yy as usize..yy as usize + 1);
+            }
+            let gl = &mut self.lines[yy as usize];
             expand_line(self.sx, gl, px.wrapping_add(ox), Colour::DEFAULT);
             for xx in px..px.wrapping_add(ox) {
                 clear_cell(gl, xx as usize, bg, false);
@@ -998,7 +1030,7 @@ impl Grid {
             if yy >= py && yy < py.wrapping_add(ny) {
                 continue;
             }
-            self.lines[yy as usize] = GridLine::default();
+            self.empty_line(yy, Colour::DEFAULT);
         }
         if dy != 0 {
             self.lines[dy as usize - 1]
@@ -1037,6 +1069,7 @@ impl Grid {
         if !self.check_y("grid_move_cells", py) {
             return;
         }
+        self.remove_surface_anchors_in(py as usize..py as usize + 1);
         move_cells_in_line(self.sx, &mut self.lines[py as usize], dx, px, nx, bg);
     }
 
@@ -1059,6 +1092,9 @@ impl Grid {
     /// `grid_line_length` (`grid.c:1668-1686`).
     pub fn line_length(&self, py: u32) -> u32 {
         let gl = self.get_line(py);
+        if gl.surface_anchor.is_some() {
+            return self.sx;
+        }
         let mut px = gl.cellsize().min(self.sx);
         while px > 0 {
             let gc = self.get_cell(px - 1, py);

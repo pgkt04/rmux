@@ -285,6 +285,7 @@ fn internal_server(args: &[Vec<u8>]) -> ! {
         flags: ClientFlags::from_bits_retain(flags),
         initial_peer,
         lock,
+        activation_listener: None,
         config_files: args[5..].to_vec(),
     }) {
         Ok(code) => code,
@@ -294,6 +295,20 @@ fn internal_server(args: &[Vec<u8>]) -> ! {
 }
 
 fn main() {
+    #[cfg(all(feature = "systemd", target_os = "linux"))]
+    let activation_listener = match rmux_sys::systemd::take_activation_listener() {
+        Ok(listener) => listener,
+        Err(error) => {
+            let cause = error
+                .raw_os_error()
+                .map(rmux_sys::strerror)
+                .unwrap_or_else(|| error.to_string().into_bytes());
+            eprintln!("systemd socket error ({})", String::from_utf8_lossy(&cause));
+            std::process::exit(1);
+        }
+    };
+    #[cfg(not(all(feature = "systemd", target_os = "linux")))]
+    let activation_listener = None;
     let raw_args: Vec<Vec<u8>> = std::env::args_os().map(OsStringExt::into_vec).collect();
     let argv0 = raw_args.first().cloned().unwrap_or_default();
     let args = &raw_args[raw_args.len().min(1)..];
@@ -374,7 +389,7 @@ fn main() {
     }
 
     // tmux.c:624
-    std::process::exit(client::run(config, server));
+    std::process::exit(client::run(config, server, activation_listener));
 }
 
 #[cfg(test)]

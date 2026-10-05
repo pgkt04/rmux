@@ -1,4 +1,4 @@
-// Ported from tmux server.c, proc.c, window.c, resize.c @ 8f25579c
+// Ported from tmux server.c, proc.c, window.c, resize.c, input.c, session.c @ 8f25579c
 // Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
 // Permission to use, copy, modify, and distribute this software for any purpose
 // with or without fee is hereby granted, provided that the above copyright
@@ -40,6 +40,7 @@ pub struct Startup {
     pub flags: ClientFlags,
     pub initial_peer: Option<OwnedFd>,
     pub lock: Option<OwnedFd>,
+    pub activation_listener: Option<OwnedFd>,
     pub config_files: Vec<Vec<u8>>,
 }
 #[derive(Clone, Debug)]
@@ -172,18 +173,23 @@ fn accept(server: &mut Server) -> io::Result<()> {
     }
     Ok(())
 }
-pub fn initialize_process_options(server:&mut Server) {
-    let mut options=std::mem::take(&mut server.options);
-    let shell=rmux_util::shell::get_shell(b"rmux");
-    options.set_string(options.global_s,b"default-shell",false,&shell,server);
-    if let Some(editor)=std::env::var_os("VISUAL").or_else(||std::env::var_os("EDITOR")) {
-        let editor=editor.as_bytes();options.set_string(options.global,b"editor",false,editor,server);
-        let base=editor.rsplit(|&byte|byte==b'/').next().unwrap_or(editor);
-        let keys=if base.windows(2).any(|word|word==b"vi"){rmux_util::key::ModeKeys::Vi}else{rmux_util::key::ModeKeys::Emacs} as i64;
-        options.set_number_value(options.global_s,b"status-keys",keys);
-        options.set_number_value(options.global_w,b"mode-keys",keys);
+pub fn initialize_process_options(server: &mut Server) {
+    let mut options = std::mem::take(&mut server.options);
+    let shell = rmux_util::shell::get_shell(b"rmux");
+    options.set_string(options.global_s, b"default-shell", false, &shell, server);
+    if let Some(editor) = std::env::var_os("VISUAL").or_else(|| std::env::var_os("EDITOR")) {
+        let editor = editor.as_bytes();
+        options.set_string(options.global, b"editor", false, editor, server);
+        let base = editor.rsplit(|&byte| byte == b'/').next().unwrap_or(editor);
+        let keys = if base.windows(2).any(|word| word == b"vi") {
+            rmux_util::key::ModeKeys::Vi
+        } else {
+            rmux_util::key::ModeKeys::Emacs
+        } as i64;
+        options.set_number_value(options.global_s, b"status-keys", keys);
+        options.set_number_value(options.global_w, b"mode-keys", keys);
     }
-    server.options=options;
+    server.options = options;
 }
 pub fn server_start(mut startup: Startup) -> io::Result<i32> {
     rmux_util::log::open("server");
@@ -201,7 +207,7 @@ pub fn server_start(mut startup: Startup) -> io::Result<i32> {
     server.cfg.files = startup.config_files.into_iter().map(Into::into).collect();
     server.current_time = wall_time();
     server.start_time = server.current_time;
-    let mask = rmux_sys::server::SignalMask::block()?;
+    let mask = rmux_sys::server::SignalMask::for_server()?;
     let mut signals = rmux_sys::server::SignalWake::new()?;
     server
         .event_loop
@@ -214,16 +220,43 @@ pub fn server_start(mut startup: Startup) -> io::Result<i32> {
         .map_err(|e| io::Error::other(format!("default key binding: {e:?}")))?;
     crate::control::build_events(&mut server);
     hooks::build_events(&mut server);
-    let listener = rmux_sys::server::bind_listener(
-        &server.socket_path,
-        startup.flags.contains(ClientFlags::DEFAULTSOCKET),
+    #[cfg(all(feature = "systemd", target_os = "linux"))]
+    let (listener, activation_error) = if let Some(fd) = startup.activation_listener.take() {
+        match rmux_sys::systemd::create_listener(fd) {
+            Ok((listener, path)) => {
+                server.socket_path = path;
+                (Ok(listener), false)
+            }
+            Err(error) => (Err(error), true),
+        }
+    } else {
+        (
+            rmux_sys::server::bind_listener(
+                &server.socket_path,
+                startup.flags.contains(ClientFlags::DEFAULTSOCKET),
+            ),
+            false,
+        )
+    };
+    #[cfg(not(all(feature = "systemd", target_os = "linux")))]
+    let (listener, activation_error) = (
+        rmux_sys::server::bind_listener(
+            &server.socket_path,
+            startup.flags.contains(ClientFlags::DEFAULTSOCKET),
+        ),
+        false,
     );
     let cause = listener.as_ref().err().map(|e| {
-        format!(
-            "error creating {} ({})",
-            String::from_utf8_lossy(&server.socket_path),
-            e
-        )
+        if activation_error {
+            let cause = rmux_sys::strerror(e.raw_os_error().unwrap_or(libc::EINVAL));
+            format!("systemd socket error ({})", String::from_utf8_lossy(&cause))
+        } else {
+            format!(
+                "error creating {} ({})",
+                String::from_utf8_lossy(&server.socket_path),
+                e
+            )
+        }
     });
     server.listener.listener = listener.ok();
     if server.listener.listener.is_some() {
@@ -488,6 +521,10 @@ fn dispatch(server: &mut Server, event: LoopReady) -> io::Result<()> {
         }
         LoopAction::ControlWrite(id) => crate::control::on_write(server, id),
         LoopAction::ControlMonitor(id) => crate::control::monitor_timer(server, id),
+        LoopAction::ClientTty(id) => {
+            crate::client::tty_io::on_ready(server, id, readable, writable)
+        }
+        LoopAction::ClientTtyTimer(id, timer) => crate::client::tty_io::on_timer(server, id, timer),
         LoopAction::ClientRepeatTimer(id) => crate::client::keys::repeat_timer(server, id),
         LoopAction::ClientClickTimer(id) => crate::client::mouse::click_timer(server, id),
         LoopAction::ClientExitTimer(id) => crate::client::exit::exit_timer(server, id),
@@ -495,6 +532,7 @@ fn dispatch(server: &mut Server, event: LoopReady) -> io::Result<()> {
         LoopAction::PaneResizeTimer(id) => crate::client::tick::resize_timer(server, id),
         LoopAction::RedrawTimer => crate::client::tick::redraw_timer(server),
         LoopAction::StatusTimer(id) => crate::ui::status::status_timer_fire(server, id),
+        LoopAction::CopyTimer(action) => crate::modes::copy::timer(server, action),
         LoopAction::MessageTimer(id) => crate::ui::status::status_message_expire(server, id),
         action @ (LoopAction::SessionFree(_)
         | LoopAction::SessionLock(_)
@@ -528,23 +566,37 @@ fn model_event(
     use crate::cmd::find::{self, CmdFindFlags};
     let mut strings: Vec<(&[u8], Vec<u8>)> = Vec::new();
     let mut ints: Vec<(&[u8], i32)> = Vec::new();
+    let mut uints: Vec<(&[u8], u32)> = Vec::new();
+    let mut windows: Vec<(&[u8], WindowId)> = Vec::new();
+    let mut panes: Vec<(&[u8], PaneId)> = Vec::new();
     let mut link = None;
-    match server.effects.back() {
-        Some(ModelEffect::Paste(event)) => strings.push((b"name", event.name.as_bytes().to_vec())),
+    let metadata = server
+        .effects
+        .iter()
+        .rev()
+        .find(|effect| !matches!(effect, ModelEffect::Event { .. }));
+    match metadata {
+        Some(ModelEffect::Paste(event)) if name == event.event.as_bytes() => {
+            strings.push((b"name", event.name.as_bytes().to_vec()));
+        }
         Some(ModelEffect::Session(
             model::session::SessionEffect::WindowLinked { winlink, index, .. }
             | model::session::SessionEffect::WindowUnlinked { winlink, index, .. },
-        )) => {
+        )) if matches!(name, b"window-linked" | b"window-unlinked") => {
             link = Some(*winlink);
             ints.push((b"window_index", *index));
         }
         Some(ModelEffect::Session(model::session::SessionEffect::WindowChanged {
+            new_window,
             new_index,
             old,
             ..
-        })) => {
+        })) if name == b"session-window-changed" => {
+            windows.push((b"new_window", *new_window));
             ints.push((b"window_index", *new_index));
-            if let Some((_, idx)) = old {
+            ints.push((b"new_window_index", *new_index));
+            if let Some((window, idx)) = old {
+                windows.push((b"old_window", *window));
                 ints.push((b"old_window_index", *idx));
             }
         }
@@ -552,32 +604,124 @@ fn model_event(
             group,
             size,
             ..
-        })) => {
-            strings.push((b"session_group", group.clone()));
-            ints.push((b"session_group_size", *size as i32));
+        })) if matches!(
+            name,
+            b"session-added-to-group" | b"session-removed-from-group"
+        ) =>
+        {
+            strings.push((b"group", group.clone()));
+            uints.push((b"group_size", *size));
         }
-        Some(ModelEffect::Window(model::window::WindowEffect::Renamed { old, .. })) => {
-            strings.push((b"old_name", old.clone()))
+        Some(ModelEffect::Window(model::window::WindowEffect::Renamed { old, new, .. }))
+            if name == b"window-renamed" =>
+        {
+            strings.push((b"old_name", old.clone()));
+            strings.push((b"new_name", new.clone()));
+        }
+        Some(ModelEffect::Window(model::window::WindowEffect::PaneChanged {
+            old, new, ..
+        })) if name == b"window-pane-changed" => {
+            panes.push((b"new_pane", *new));
+            if let Some(old) = old {
+                panes.push((b"old_pane", *old));
+            }
+        }
+        Some(ModelEffect::Window(model::window::WindowEffect::PaneMoved {
+            old_window,
+            new_window,
+            old_index,
+            new_index,
+            ..
+        })) if name == b"pane-moved" => {
+            windows.push((b"old_window", *old_window));
+            windows.push((b"new_window", *new_window));
+            if let Some(index) = old_index {
+                ints.push((b"old_window_index", *index));
+            }
+            if let Some(index) = new_index {
+                ints.push((b"window_index", *index));
+                ints.push((b"new_window_index", *index));
+            }
         }
         Some(ModelEffect::Pane(model::pane::PaneEffect::ModeChanged {
-            previous, current, ..
-        })) => {
+            previous,
+            current,
+            entered,
+            ..
+        })) if matches!(
+            name,
+            b"pane-mode-entered" | b"pane-mode-exited" | b"pane-mode-changed"
+        ) =>
+        {
             if let Some(previous) = previous {
-                strings.push((b"old_mode", previous.clone()));
+                strings.push((b"previous_mode", previous.clone()));
             }
             if let Some(current) = current {
-                strings.push((b"pane_mode", current.clone()));
+                strings.push((b"current_mode", current.clone()));
             }
+            ints.push((b"mode_entered", i32::from(*entered)));
+        }
+        Some(ModelEffect::Pane(model::pane::PaneEffect::PromptChanged { kind, .. }))
+            if matches!(name, b"pane-prompt-opened" | b"pane-prompt-closed") =>
+        {
+            strings.push((
+                b"prompt_type",
+                crate::ui::prompt::prompt_type_string(*kind)
+                    .as_bytes()
+                    .to_vec(),
+            ));
+        }
+        Some(ModelEffect::Pane(model::pane::PaneEffect::TitleChanged { new, .. }))
+            if name == b"pane-title-changed" =>
+        {
+            strings.push((b"new_title", new.clone()));
+        }
+        Some(ModelEffect::Pane(model::pane::PaneEffect::Resized { size, .. }))
+            if name == b"pane-resized" =>
+        {
+            uints.push((b"old_width", size.osx));
+            uints.push((b"old_height", size.osy));
+            uints.push((b"width", size.sx));
+            uints.push((b"height", size.sy));
         }
         Some(ModelEffect::Resize(model::resize::ResizeEffect::Resized {
-            old_sx, old_sy, ..
-        })) => {
-            ints.push((b"old_width", *old_sx as i32));
-            ints.push((b"old_height", *old_sy as i32));
+            old_sx,
+            old_sy,
+            sx,
+            sy,
+            ..
+        })) if name == b"window-resized" => {
+            uints.push((b"old_width", *old_sx));
+            uints.push((b"old_height", *old_sy));
+            uints.push((b"width", *sx));
+            uints.push((b"height", *sy));
+        }
+        Some(ModelEffect::Spawn(model::spawn::SpawnEffect::PaneCreated {
+            winlink,
+            window_index,
+            command,
+            cwd,
+            empty,
+            respawn,
+            ..
+        })) if name == b"pane-created" => {
+            link = Some(*winlink);
+            ints.push((b"window_index", *window_index));
+            strings.push((b"pane_command", command.clone()));
+            strings.push((b"pane_current_path", cwd.clone()));
+            ints.push((b"created_empty", i32::from(*empty)));
+            ints.push((b"created_respawn", i32::from(*respawn)));
         }
         _ => {}
     }
-    let mut target = if let Some(id) = pane {
+    let mut target = if let (Some(link), Some(pane)) = (link, pane) {
+        Some(find::from_winlink_pane(
+            server,
+            link,
+            pane,
+            CmdFindFlags::default(),
+        ))
+    } else if let Some(id) = pane {
         find::from_pane(server, id, CmdFindFlags::default())
     } else if let Some(id) = link {
         Some(find::from_winlink(server, id, CmdFindFlags::default()))
@@ -609,11 +753,20 @@ fn model_event(
     if let Some(p) = pane.filter(|id| server.panes.get(*id).is_some()) {
         payload.set_pane(server, b"pane", p);
     }
+    for (key, value) in windows {
+        payload.set_window(server, key, value);
+    }
+    for (key, value) in panes {
+        payload.set_pane(server, key, value);
+    }
     for (key, value) in strings {
         payload.set_string(server, key, &value);
     }
     for (key, value) in ints {
         payload.set_int(server, key, value);
+    }
+    for (key, value) in uints {
+        payload.set_uint(server, key, value);
     }
     super::events::fire(server, name, payload);
 }
@@ -676,6 +829,418 @@ pub fn apply_option_changes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn event_fixture(server: &mut Server, name: &[u8]) -> (SessionId, WindowId, PaneId) {
+        let options = server.options.create(Some(server.options.global_s));
+        let session = model::session::session_create(
+            server,
+            model::session::SessionCreate {
+                prefix: None,
+                name: Some(name.to_vec()),
+                cwd: b"/".to_vec(),
+                environment: crate::options::environment::Environment::new(),
+                options,
+                termios: None,
+            },
+        );
+        let window = model::window::window_create(server, 80, 24, 0, 0).unwrap();
+        let pane = model::window::window_add_pane(
+            server,
+            window,
+            None,
+            10,
+            model::spawn::SpawnFlags::default(),
+        )
+        .unwrap();
+        server.windows.get_mut(window).unwrap().active = Some(pane);
+        let link = model::session::session_attach(server, session, window, 0).unwrap();
+        model::session::session_set_current(server, session, Some(link));
+        (session, window, pane)
+    }
+
+    #[test]
+    fn pane_change_payload_preserves_old_and_new_panes_until_dispatch() {
+        let mut server = Server::new();
+        let (_, window, old) = event_fixture(&mut server, b"main");
+        let new = model::window::window_add_pane(
+            &mut server,
+            window,
+            None,
+            10,
+            model::spawn::SpawnFlags::default(),
+        )
+        .unwrap();
+        server.model_event = Some(model_event);
+        super::super::events::add_sink(&mut server, b"window-pane-changed", |server, event| {
+            assert_eq!(event.get_pane(b"pane"), event.get_pane(b"new_pane"));
+            let (old, new) = if server.source_file_depth == 0 {
+                (b"%0".as_slice(), b"%1".as_slice())
+            } else {
+                (b"%1".as_slice(), b"%0".as_slice())
+            };
+            assert_eq!(
+                event
+                    .print(server, b"old_pane")
+                    .as_ref()
+                    .map(|value| value.as_bytes()),
+                Some(old)
+            );
+            assert_eq!(
+                event
+                    .print(server, b"new_pane")
+                    .as_ref()
+                    .map(|value| value.as_bytes()),
+                Some(new)
+            );
+            server.source_file_depth += 1;
+        });
+        model::window::window_set_active_pane(&mut server, window, new, true).unwrap();
+        model::window::window_remove_pane(&mut server, window, new).unwrap();
+        assert_eq!(server.windows.get(window).unwrap().active, Some(old));
+        assert_eq!(server.source_file_depth, 2);
+    }
+
+    #[test]
+    fn pane_prompt_open_and_both_close_paths_export_prompt_type() {
+        use crate::ui::prompt::{self, PromptFlags, PromptType};
+        let mut server = Server::new();
+        let (_, _, pane) = event_fixture(&mut server, b"main");
+        let client = server
+            .clients
+            .insert(crate::client::Client::new(None, (0, 0)))
+            .unwrap();
+        server.model_event = Some(model_event);
+        for name in [
+            b"pane-prompt-opened".as_slice(),
+            b"pane-prompt-closed".as_slice(),
+        ] {
+            super::super::events::add_sink(&mut server, name, |server, event| {
+                let kind = if server.source_file_depth < 2 {
+                    b"search".as_slice()
+                } else {
+                    b"command".as_slice()
+                };
+                assert_eq!(event.get_string(b"prompt_type"), Some(kind));
+                assert!(event.get_pane(b"pane").is_some());
+                server.source_file_depth += 1;
+            });
+        }
+        for kind in [PromptType::Search, PromptType::Command] {
+            prompt::pane_prompt_set(
+                &mut server,
+                pane,
+                client,
+                None,
+                b"(prompt)",
+                None,
+                None,
+                PromptFlags::default(),
+                kind,
+            );
+            if kind == PromptType::Search {
+                model::pane::pane_clear_prompt(&mut server, pane).unwrap();
+            } else {
+                model::pane::pane_prompt_key(
+                    &mut server,
+                    pane,
+                    client,
+                    rmux_util::key::KeyCode(13),
+                    None,
+                    false,
+                )
+                .unwrap();
+            }
+        }
+        assert_eq!(server.source_file_depth, 4);
+    }
+
+    #[test]
+    fn output_activity_rearms_after_enabling_monitor_and_deduplicates() {
+        let mut server = Server::new();
+        let (session, _, _) = event_fixture(&mut server, b"main");
+        let window = model::window::window_create(&mut server, 80, 24, 0, 0).unwrap();
+        let pane = model::window::window_add_pane(
+            &mut server,
+            window,
+            None,
+            10,
+            model::spawn::SpawnFlags::default(),
+        )
+        .unwrap();
+        server.windows.get_mut(window).unwrap().active = Some(pane);
+        let link = model::session::session_attach(&mut server, session, window, 1).unwrap();
+        server.model_event = Some(model_event);
+        super::super::events::add_sink(&mut server, b"alert-activity", |server, event| {
+            assert!(event.get_session(b"session").is_some());
+            assert!(event.get_window(b"window").is_some());
+            server.source_file_depth += 1;
+        });
+        pane_parse_buffer(&mut server, pane, b"x").unwrap();
+        assert!(!server.alerts.is_pending(window));
+        let options = server.windows.get(window).unwrap().options;
+        server
+            .options
+            .set_number_value(options, b"monitor-activity", 1);
+        pane_parse_buffer(&mut server, pane, b"x").unwrap();
+        assert!(server.alerts.is_pending(window));
+        model::alerts::alerts_dispatch(&mut server);
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 1);
+        assert!(
+            server
+                .winlinks
+                .get(link)
+                .unwrap()
+                .flags
+                .contains(model::WinlinkFlags::ACTIVITY)
+        );
+        pane_parse_buffer(&mut server, pane, b"x").unwrap();
+        model::alerts::alerts_dispatch(&mut server);
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 1);
+        model::window::winlink_clear_flags(&mut server, link);
+        pane_parse_buffer(&mut server, pane, b"x").unwrap();
+        model::alerts::alerts_dispatch(&mut server);
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 2);
+    }
+
+    #[test]
+    fn destroying_monitor_option_owners_keeps_global_monitor_on_survivor() {
+        use crate::cmd::find::{self, CmdFindFlags};
+        use crate::model::monitor::{MonitorFlags, MonitorType};
+        let mut server = Server::new();
+        let (session, window, pane) = event_fixture(&mut server, b"three");
+        event_fixture(&mut server, b"zzz-survivor");
+        server.option_monitor_removed = Some(|server, id| hooks::monitor_free(server, id));
+        let target = find::from_session(&server, session, CmdFindFlags::default());
+        let scopes = [
+            (
+                server.panes.get(pane).unwrap().options,
+                b"@pane".as_slice(),
+                Some(session),
+            ),
+            (
+                server.windows.get(window).unwrap().options,
+                b"@window".as_slice(),
+                Some(session),
+            ),
+            (
+                server.sessions.get(session).unwrap().options,
+                b"@session".as_slice(),
+                None,
+            ),
+        ];
+        let mut scoped = Vec::new();
+        for (options, name, session) in scopes {
+            let id = hooks::monitor_add(
+                &mut server,
+                hooks::MonitorSpec {
+                    options,
+                    name,
+                    kind: MonitorType::Session,
+                    public_id: -1,
+                    format: b"#{session_name}",
+                    flags: MonitorFlags::default(),
+                    target: &target,
+                    session,
+                },
+            )
+            .unwrap();
+            scoped.push(id);
+        }
+        let options = server.options.global_s;
+        let global = hooks::monitor_add(
+            &mut server,
+            hooks::MonitorSpec {
+                options,
+                name: b"@global",
+                kind: MonitorType::Session,
+                public_id: -1,
+                format: b"#{session_name}",
+                flags: MonitorFlags::default(),
+                target: &target,
+                session: None,
+            },
+        )
+        .unwrap();
+        let set = server
+            .hooks
+            .monitors
+            .get(global)
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .set;
+        crate::control::monitor_timer(&mut server, set);
+        super::super::events::add_sink(&mut server, b"@global", |server, event| {
+            assert_eq!(event.get_string(b"last"), Some(b"three".as_slice()));
+            assert_eq!(event.get_string(b"value"), Some(b"zzz-survivor".as_slice()));
+            assert_ne!(event.get_target(server, CmdFindFlags::default()).s, None);
+            server.source_file_depth += 1;
+        });
+        model::session::session_destroy(&mut server, session, true);
+        model::alerts::alerts_dispatch(&mut server);
+        assert!(model::session::session_free(&mut server, session));
+        for monitor in scoped {
+            assert!(server.hooks.monitors.get(monitor).is_none());
+        }
+        crate::control::monitor_timer(&mut server, set);
+        assert_eq!(server.source_file_depth, 1);
+        assert!(server.hooks.monitors.get(global).is_some());
+        hooks::monitor_remove(&mut server, options, b"@global");
+    }
+
+    #[test]
+    fn title_payload_exports_each_osc_and_title_stack_transition() {
+        let mut server = Server::new();
+        let (_, _, pane) = event_fixture(&mut server, b"main");
+        server.model_event = Some(model_event);
+        super::super::events::add_sink(&mut server, b"pane-title-changed", |server, event| {
+            let expected = [
+                b"stackbase".as_slice(),
+                b"stacktemp".as_slice(),
+                b"stackbase".as_slice(),
+            ];
+            assert_eq!(
+                event.get_string(b"new_title"),
+                Some(expected[server.source_file_depth as usize])
+            );
+            let pane = event.get_pane(b"pane").unwrap();
+            assert_eq!(
+                server.panes.get(pane).unwrap().base.title,
+                expected[server.source_file_depth as usize]
+            );
+            server.source_file_depth += 1;
+        });
+        pane_parse_buffer(
+            &mut server,
+            pane,
+            b"\x1b]2;stackbase\x07\x1b[22;0t\x1b]2;stacktemp\x07\x1b[23;0t",
+        )
+        .unwrap();
+        assert_eq!(server.source_file_depth, 3);
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 3);
+    }
+
+    #[test]
+    fn creating_detached_noncurrent_window_queues_activity_without_output() {
+        let mut server = Server::new();
+        let (session, _, _) = event_fixture(&mut server, b"mon");
+        model::alerts::alerts_dispatch(&mut server);
+        let defaults = server.options.global_w;
+        server
+            .options
+            .set_number_value(defaults, b"monitor-activity", 1);
+        let window = model::window::window_create(&mut server, 80, 24, 0, 0).unwrap();
+        assert!(server.alerts.is_pending(window));
+        let pane = model::window::window_add_pane(
+            &mut server,
+            window,
+            None,
+            10,
+            model::spawn::SpawnFlags::default(),
+        )
+        .unwrap();
+        server.windows.get_mut(window).unwrap().active = Some(pane);
+        let link = model::session::session_attach(&mut server, session, window, 1).unwrap();
+        model::window::window_set_name(&mut server, window, b"newact", false).unwrap();
+        server.model_event = Some(model_event);
+        super::super::events::add_sink(&mut server, b"alert-activity", |server, event| {
+            let window = event.get_window(b"window").unwrap();
+            assert_eq!(server.windows.get(window).unwrap().name, b"newact");
+            server.source_file_depth += 1;
+        });
+        model::alerts::alerts_dispatch(&mut server);
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 1);
+        assert!(
+            server
+                .winlinks
+                .get(link)
+                .unwrap()
+                .flags
+                .contains(model::WinlinkFlags::ACTIVITY)
+        );
+    }
+
+    #[test]
+    fn pane_created_exports_command_empty_respawn_path_and_exact_winlink() {
+        let mut server = Server::new();
+        let (session, window, pane) = event_fixture(&mut server, b"main");
+        let link = model::session::session_attach(&mut server, session, window, 9).unwrap();
+        server.model_event = Some(model_event);
+        super::super::events::add_sink(&mut server, b"pane-created", |server, event| {
+            let (command, empty, respawn) = match server.source_file_depth {
+                0 => (b"\"sleep 30\"".as_slice(), 0, 0),
+                1 => (b"/bin/sh".as_slice(), 1, 0),
+                _ => (b"\"sleep 30\"".as_slice(), 0, 1),
+            };
+            assert_eq!(event.get_string(b"pane_command"), Some(command));
+            assert_eq!(
+                event.get_string(b"pane_current_path"),
+                Some(b"/tmp".as_slice())
+            );
+            assert_eq!(event.get_int(b"created_empty"), Some(empty));
+            assert_eq!(event.get_int(b"created_respawn"), Some(respawn));
+            assert_eq!(event.get_int(b"window_index"), Some(9));
+            let target = event.get_target(server, crate::cmd::find::CmdFindFlags::default());
+            assert_eq!(server.winlinks.get(target.wl.unwrap()).unwrap().index, 9);
+            server.source_file_depth += 1;
+        });
+        for (command, empty, respawn) in [
+            (b"\"sleep 30\"".as_slice(), false, false),
+            (b"/bin/sh".as_slice(), true, false),
+            (b"\"sleep 30\"".as_slice(), false, true),
+        ] {
+            server
+                .effects
+                .push_back(ModelEffect::Spawn(model::spawn::SpawnEffect::PaneCreated {
+                    session,
+                    winlink: link,
+                    window,
+                    pane,
+                    window_index: 9,
+                    command: command.to_vec(),
+                    cwd: b"/tmp".to_vec(),
+                    empty,
+                    respawn,
+                }));
+            server.emit(b"pane-created", Some(session), Some(window), Some(pane));
+        }
+        assert_eq!(server.source_file_depth, 3);
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 3);
+    }
+
+    #[test]
+    fn parser_bell_fires_for_pane_when_window_bell_monitoring_is_disabled() {
+        let mut server = Server::new();
+        let (_, window, pane) = event_fixture(&mut server, b"main");
+        let options = server.windows.get(window).unwrap().options;
+        server.options.set_number_value(options, b"monitor-bell", 0);
+        server.model_event = Some(model_event);
+        super::super::events::add_sink(&mut server, b"pane-bell", |server, event| {
+            let pane = event.get_pane(b"pane").unwrap();
+            let window = event.get_window(b"window").unwrap();
+            assert_eq!(server.panes.get(pane).unwrap().window, window);
+            assert!(
+                !server
+                    .windows
+                    .get(window)
+                    .unwrap()
+                    .flags
+                    .contains(model::WindowFlags::BELL)
+            );
+            server.source_file_depth += 1;
+        });
+        pane_parse_buffer(&mut server, pane, b"\x07").unwrap();
+        assert_eq!(server.source_file_depth, 1);
+        assert!(!server.alerts.is_pending(window));
+        drain_effects(&mut server).unwrap();
+        assert_eq!(server.source_file_depth, 1);
+    }
+
     #[test]
     fn exit_empty_precedes_exit_unattached() {
         for shutdown in [false, true] {

@@ -22,6 +22,7 @@ impl Drop for ServerCleanup<'_> {
 fn transcript(binary: &Path, socket: &Path, regular_attach: bool) -> Vec<u8> {
     let _cleanup = ServerCleanup { binary, socket };
     let output_path = socket.with_extension("stream");
+    // An empty shell command exits before attach when child startup is fast.
     if regular_attach {
         let status = Command::new(binary)
             .args(["-f", "/dev/null", "-S"])
@@ -33,7 +34,7 @@ fn transcript(binary: &Path, socket: &Path, regular_attach: bool) -> Vec<u8> {
                 "control-parity",
                 "-n",
                 "control-window",
-                "",
+                "exec sleep 100",
             ])
             .status()
             .expect("detached session creation");
@@ -51,7 +52,7 @@ fn transcript(binary: &Path, socket: &Path, regular_attach: bool) -> Vec<u8> {
             "control-parity",
             "-n",
             "control-window",
-            "",
+            "exec sleep 100",
         ]);
     }
     let stdout = if regular_attach {

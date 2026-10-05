@@ -562,7 +562,10 @@ mod tests {
     }
     #[test]
     fn oversized_header_fails_before_payload_allocation() {
-        let mut rx = RmuxBackend { input: b"RMUX".to_vec(), ..Default::default() };
+        let mut rx = RmuxBackend {
+            input: b"RMUX".to_vec(),
+            ..Default::default()
+        };
         rx.input.extend_from_slice(&VERSION.to_le_bytes());
         rx.input
             .extend_from_slice(&(ProtocolMessageKind::Ready as u16).to_le_bytes());

@@ -15,8 +15,12 @@ rmux-emu.workspace = true
 rmux-tty.workspace = true
 mio.workspace = true
 libc.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+base64 = "0.22"
+sha2 = "0.10"
 
 [features]
 # Clears LISTEN_PID/LISTEN_FDS/LISTEN_FDNAMES in environ_for_session (environ.c:273-277).
-systemd = []
+systemd = ["rmux-sys/systemd"]
 sixel = ["rmux-emu/sixel", "rmux-tty/sixel"]

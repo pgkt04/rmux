@@ -135,6 +135,8 @@ fn real_pty_launch_parser_capture_matches_pinned_oracle() {
             ..Default::default()
         },
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     parser.parse(
         &mut writer,

@@ -15,8 +15,8 @@
  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-//! The 17 parser states and their transition tables (`input.c:349-763`),
-//! indexed by byte at compile time.
+//! The 17 pinned parser states (`input.c:349-763`) plus TSP-only completion
+//! and discard states, indexed by byte at compile time.
 
 /// `struct input_state` identity (`input.c:392-508`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -37,11 +37,15 @@ pub(crate) enum StateId {
     DcsIgnore,
     OscString,
     ApcString,
+    TspString,
+    TspEscape,
+    TspDiscard,
+    TspDiscardEscape,
     RenameString,
     ConsumeSt,
 }
 
-pub(crate) const STATE_COUNT: usize = 17;
+pub(crate) const STATE_COUNT: usize = 21;
 
 impl StateId {
     pub(crate) const ALL: [StateId; STATE_COUNT] = [
@@ -60,6 +64,10 @@ impl StateId {
         StateId::DcsIgnore,
         StateId::OscString,
         StateId::ApcString,
+        StateId::TspString,
+        StateId::TspEscape,
+        StateId::TspDiscard,
+        StateId::TspDiscardEscape,
         StateId::RenameString,
         StateId::ConsumeSt,
     ];
@@ -81,9 +89,19 @@ impl StateId {
             StateId::DcsIgnore => "dcs_ignore",
             StateId::OscString => "osc_string",
             StateId::ApcString => "apc_string",
+            StateId::TspString => "tsp_string",
+            StateId::TspEscape => "tsp_escape",
+            StateId::TspDiscard => "tsp_discard",
+            StateId::TspDiscardEscape => "tsp_discard_escape",
             StateId::RenameString => "rename_string",
             StateId::ConsumeSt => "consume_st",
         }
+    }
+    pub(crate) const fn is_tsp(self) -> bool {
+        matches!(
+            self,
+            Self::TspString | Self::TspEscape | Self::TspDiscard | Self::TspDiscardEscape
+        )
     }
 
     /// The state enter handler (`input.c:392-508`).
@@ -142,6 +160,7 @@ pub(crate) enum Handler {
     DcsDispatch,
     TopBitSet,
     EndBel,
+    TspDispatch,
 }
 
 /// `struct input_transition` (`input.c:350-356`).
@@ -397,6 +416,29 @@ const CONSUME_ST: [Transition; 7] = cat(
     cat::<3, 1, 4>(c0_ignored(), [t(0x20, 0xff, None, None)]),
 );
 
+const TSP_STRING: [Transition; 6] = [
+    t(0x00, 0x17, Some(H::Input), None),
+    t(0x18, 0x18, None, Some(S::TspDiscard)),
+    t(0x19, 0x19, Some(H::Input), None),
+    t(0x1a, 0x1a, None, Some(S::TspDiscard)),
+    t(0x1b, 0x1b, None, Some(S::TspEscape)),
+    t(0x1c, 0xff, Some(H::Input), None),
+];
+const TSP_ESCAPE: [Transition; 3] = [
+    t(b'\\', b'\\', Some(H::TspDispatch), Some(S::Ground)),
+    t(0x1b, 0x1b, None, Some(S::TspDiscardEscape)),
+    t(0x00, 0xff, None, Some(S::TspDiscard)),
+];
+const TSP_DISCARD: [Transition; 2] = [
+    t(0x1b, 0x1b, None, Some(S::TspDiscardEscape)),
+    t(0x00, 0xff, None, None),
+];
+const TSP_DISCARD_ESCAPE: [Transition; 3] = [
+    t(b'\\', b'\\', None, Some(S::Ground)),
+    t(0x1b, 0x1b, None, None),
+    t(0x00, 0xff, None, Some(S::TspDiscard)),
+];
+
 /// The transition table of a state (`input.c:511-763`), in C order.
 pub(crate) const fn table(state: StateId) -> &'static [Transition] {
     match state {
@@ -415,6 +457,10 @@ pub(crate) const fn table(state: StateId) -> &'static [Transition] {
         S::DcsIgnore => &DCS_IGNORE,
         S::OscString => &OSC_STRING,
         S::ApcString | S::RenameString => &STRING_BODY,
+        S::TspString => &TSP_STRING,
+        S::TspEscape => &TSP_ESCAPE,
+        S::TspDiscard => &TSP_DISCARD,
+        S::TspDiscardEscape => &TSP_DISCARD_ESCAPE,
         S::ConsumeSt => &CONSUME_ST,
     }
 }

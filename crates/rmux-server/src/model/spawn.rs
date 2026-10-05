@@ -199,6 +199,17 @@ fn launch_policy(
     );
     sc.environment.copy_into(&mut environment);
     let none = EnvironmentFlags::default();
+    environment.set(b"TERM_PROGRAM", none, b"rmux");
+    environment.set(
+        b"TERM_PROGRAM_VERSION",
+        none,
+        crate::options::environment::RMUX_VERSION,
+    );
+    if server.tsp_broker_enabled {
+        environment.set(b"RMUX_TSP", none, b"1");
+    } else {
+        environment.unset(b"RMUX_TSP");
+    }
     let p = server.panes.get_mut(pane).ok_or(ModelError::StaleId)?;
     if !sc.argv.is_empty() {
         p.argv.clone_from(&sc.argv);
@@ -305,6 +316,7 @@ pub fn spawn_pane(server: &mut Server, sc: &mut SpawnContext) -> Result<PaneId, 
             );
             return Err(ModelError::Message(message));
         }
+        crate::tsp::broker::pane_respawn(server, pane);
         super::pane_input::pane_reset_io(server, pane)?;
         super::pane::pane_reset_mode_all(server, pane)?;
         let reset = rmux_emu::screen::ScreenResetPolicy {
@@ -315,7 +327,13 @@ pub fn spawn_pane(server: &mut Server, sc: &mut SpawnContext) -> Result<PaneId, 
         };
         let p = server.panes.get_mut(pane).ok_or(ModelError::StaleId)?;
         p.base
-            .reinit(false, reset, &mut server.hyperlinks)
+            .reinit(
+                false,
+                reset,
+                &mut server.hyperlinks,
+                #[cfg(feature = "sixel")]
+                Some(&mut server.images),
+            )
             .map_err(|e| ModelError::Sys(e.to_string()))?;
         p.flags
             .remove(PaneFlags::STATUSREADY | PaneFlags::STATUSDRAWN);
@@ -741,4 +759,70 @@ pub fn spawn_editor(
     })?;
     server.panes.get_mut(pane).unwrap().editor = Some(editor);
     Ok(editor)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pane_environment_uses_start_broker_flag_not_inherited_capabilities() {
+        let mut server = Server::new();
+        let global = server.options.global;
+        let mut options = std::mem::take(&mut server.options);
+        options.set_string(
+            global,
+            b"default-terminal",
+            false,
+            b"screen-256color",
+            &mut server,
+        );
+        server.options = options;
+        let none = EnvironmentFlags::default();
+        server
+            .global_environment
+            .set(b"TERM_PROGRAM", none, b"tern");
+        server.global_environment.set(b"RMUX_TSP", none, b"stale");
+        server.global_environment.set(b"PI_TUI_NATIVE", none, b"0");
+        let mut session_environment = Environment::new();
+        session_environment.set(b"RMUX_TSP", none, b"session-marker");
+        let options = server.options.create(Some(server.options.global_s));
+        let session = super::super::session::session_create(
+            &mut server,
+            super::super::session::SessionCreate {
+                prefix: None,
+                name: Some(b"environment".to_vec()),
+                cwd: b"/tmp".to_vec(),
+                environment: session_environment,
+                options,
+                termios: None,
+            },
+        );
+        let window = super::super::window::window_create(&mut server, 80, 24, 0, 0).unwrap();
+        let pane = super::super::pane::pane_create(&mut server, window, 80, 24, 0).unwrap();
+        let mut context = SpawnContext::new(session);
+        context.environment.set(b"RMUX_TSP", none, b"spawn-marker");
+        context.environment.set(b"TERM_PROGRAM", none, b"tern");
+        context
+            .environment
+            .set(b"TERM_PROGRAM_VERSION", none, b"outer-version");
+        for enabled in [true, false] {
+            server.tsp_broker_enabled = enabled;
+            let launch = launch_policy(&mut server, &context, pane).unwrap();
+            let value = |name: &[u8]| {
+                launch.environment.iter().find_map(|entry| {
+                    let (key, value) = entry.split_at(entry.iter().position(|&byte| byte == b'=')?);
+                    (key == name).then_some(&value[1..])
+                })
+            };
+            assert_eq!(value(b"TERM"), Some(b"screen-256color".as_slice()));
+            assert_eq!(value(b"TERM_PROGRAM"), Some(b"rmux".as_slice()));
+            assert_eq!(
+                value(b"TERM_PROGRAM_VERSION"),
+                Some(crate::options::environment::RMUX_VERSION)
+            );
+            assert_eq!(value(b"RMUX_TSP"), enabled.then_some(b"1".as_slice()));
+            assert_eq!(value(b"PI_TUI_NATIVE"), Some(b"0".as_slice()));
+        }
+    }
 }

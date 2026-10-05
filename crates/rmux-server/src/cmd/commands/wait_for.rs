@@ -71,6 +71,7 @@ impl WaitChannels {
             && wc.waiters.is_empty()
             && wc.woken
         {
+            rmux_util::log_debug!("remove wait channel {}", String::from_utf8_lossy(name));
             self.channels.remove(name);
         }
     }
@@ -82,6 +83,10 @@ impl WaitChannels {
             && wc.waiters.is_empty()
             && wc.lockers.is_empty()
         {
+            rmux_util::log_debug!(
+                "remove empty wait channel {}",
+                String::from_utf8_lossy(name)
+            );
             self.channels.remove(name);
         }
     }

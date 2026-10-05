@@ -28,6 +28,8 @@ pub(super) fn draw_into(
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         ctx.cursormove(ocx as i32, 0, false);
         draw(
@@ -55,7 +57,13 @@ pub(super) fn draw_into(
         cells.push(cell);
     }
     let cursor = (screen.cx, screen.cy);
-    screen.release(&mut registry).unwrap();
+    screen
+        .release(
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
     Drawn {
         text,
         cells,
@@ -145,6 +153,8 @@ fn utf8_and_control_bytes() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     draw(&mut ctx, &DEFAULT_CELL, 4, b"a\xe2\x82b\xffc", None, false);
     ctx.finish();

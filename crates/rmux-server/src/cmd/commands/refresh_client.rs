@@ -390,6 +390,7 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
     if args.has(b'S') != 0 {
         server_status_client(server, tc);
     } else {
+        crate::tsp::broker::refresh_client(server, tc);
         server_redraw_client(server, tc);
     }
     CmdReturn::Normal

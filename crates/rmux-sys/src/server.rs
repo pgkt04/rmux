@@ -17,7 +17,7 @@ use crate::{GroupId, ProcessId, UserId};
 use signal_hook::iterator::{backend::SignalDelivery, exfiltrator::SignalOnly};
 use std::ffi::{CStr, CString};
 use std::io::{self, IoSlice};
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
+use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 
 /// A thread-affine mask guard; every parent return restores the previous mask.
@@ -40,6 +40,19 @@ impl SignalMask {
             old,
             _thread: std::marker::PhantomData,
         })
+    }
+    /// A re-executed server owns its signal policy, not the launcher's mask.
+    /// Keep signals blocked until the server registers its wake descriptor.
+    pub fn for_server() -> io::Result<Self> {
+        let mut mask = Self::block()?;
+        for signal in RUNTIME_SIGNALS {
+            crate::client::set_signal_disposition(signal, crate::client::Disposition::Default)?;
+        }
+        // SAFETY: old is initialized storage; dropping this guard installs an empty mask.
+        if unsafe { libc::sigemptyset(&mut mask.old) } == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(mask)
     }
 }
 impl Drop for SignalMask {
@@ -592,7 +605,7 @@ impl PreparedJob {
                         libc::_exit(1);
                     }
                 }
-                close_child_fds(self.max_fd);
+                crate::proc::close_child_fds(self.max_fd);
                 for executable in &self.executables {
                     libc::execve(
                         executable.as_ptr(),
@@ -659,30 +672,73 @@ fn above_standard_fds(fd: OwnedFd) -> io::Result<OwnedFd> {
     // SAFETY: fcntl created a new descriptor owned only here.
     Ok(unsafe { OwnedFd::from_raw_fd(raw) })
 }
-unsafe fn close_child_fds(max_fd: i32) {
-    #[cfg(target_os = "linux")]
-    {
-        // SAFETY: invoked only in the fork child, which will not run fd destructors.
-        if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } == 0 {
-            return;
-        }
-    }
-    for fd in 3..max_fd {
-        // SAFETY: close accepts arbitrary descriptor numbers in this child.
-        unsafe {
-            libc::close(fd);
-        }
-    }
-}
 
 pub fn descriptor_is_regular(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    descriptor_is_type(fd, libc::S_IFREG)
+}
+
+pub fn descriptor_is_fifo(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    descriptor_is_type(fd, libc::S_IFIFO)
+}
+
+fn descriptor_is_type(fd: BorrowedFd<'_>, kind: libc::mode_t) -> io::Result<bool> {
     // SAFETY: stat is plain C storage initialized by fstat.
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     // SAFETY: descriptor stays open and stat is a live writable out pointer.
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut stat) } == -1 {
         return Err(io::Error::last_os_error());
     }
-    Ok(stat.st_mode & libc::S_IFMT == libc::S_IFREG)
+    Ok(stat.st_mode & libc::S_IFMT == kind)
+}
+
+/// Zero-timeout select(2) read readiness: `ready[i]` is set for `fds[i]`.
+/// macOS kqueue and poll never post EOF for a named FIFO whose writers have
+/// closed; only select does (why osdep-darwin.c:98-107 forces libevent to
+/// select). Descriptors at or above FD_SETSIZE are reported not ready.
+pub fn select_readable(fds: &[RawFd], ready: &mut [bool]) -> io::Result<()> {
+    // SAFETY: fd_set is plain C storage initialized by FD_ZERO.
+    let mut set: libc::fd_set = unsafe { std::mem::zeroed() };
+    let mut max = -1;
+    // SAFETY: FD_ZERO/FD_SET only touch the local set; fds are bounds-checked.
+    unsafe {
+        libc::FD_ZERO(&mut set);
+        for &fd in fds {
+            if fd >= 0 && fd < libc::FD_SETSIZE as RawFd {
+                libc::FD_SET(fd, &mut set);
+                max = max.max(fd);
+            }
+        }
+    }
+    ready.fill(false);
+    if max < 0 {
+        return Ok(());
+    }
+    let mut timeout = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    // SAFETY: set and timeout are live locals; select retains no pointers.
+    let n = unsafe {
+        libc::select(
+            max + 1,
+            &mut set,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut timeout,
+        )
+    };
+    if n == -1 {
+        let error = io::Error::last_os_error();
+        if error.kind() == io::ErrorKind::Interrupted {
+            return Ok(());
+        }
+        return Err(error);
+    }
+    for (fd, slot) in fds.iter().zip(ready.iter_mut()) {
+        // SAFETY: FD_ISSET reads the local set; fd was range-checked above.
+        *slot = *fd >= 0 && *fd < libc::FD_SETSIZE as RawFd && unsafe { libc::FD_ISSET(*fd, &set) };
+    }
+    Ok(())
 }
 
 pub fn uppercase(byte: u8) -> u8 {
@@ -926,7 +982,7 @@ pub fn spawn_pipe_child(
             {
                 libc::_exit(1);
             }
-            close_child_fds(max_fd);
+            crate::proc::close_child_fds(max_fd);
             let arguments = [
                 c"sh".as_ptr(),
                 c"-c".as_ptr(),
@@ -1273,6 +1329,10 @@ mod tests {
         assert_eq!(&reply, b"reply");
         assert_eq!(pending_bytes(left.as_fd()).unwrap(), 0);
         assert!(!descriptor_is_regular(left.as_fd()).unwrap());
+        assert!(!descriptor_is_fifo(left.as_fd()).unwrap());
+        let (pipe, _writer) = crate::fd::pipe().unwrap();
+        assert!(descriptor_is_fifo(pipe.as_fd()).unwrap());
+        assert!(!descriptor_is_regular(pipe.as_fd()).unwrap());
         assert!(
             descriptor_is_regular(
                 std::fs::File::open(std::env::current_exe().unwrap())

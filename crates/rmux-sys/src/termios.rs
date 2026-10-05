@@ -124,6 +124,12 @@ impl TermiosState {
         self.0.c_cc[libc::VTIME]
     }
 
+    /// `c_cc[VERASE]` unless `_POSIX_VDISABLE` (`tty-keys.c` backspace lookup).
+    pub fn erase(&self) -> Option<u8> {
+        let erase = self.0.c_cc[libc::VERASE];
+        (erase != 0xff).then_some(erase)
+    }
+
     /// Mutable `c_cc` for `VMIN`/`VTIME` (`client.c:356-357`).
     pub fn cc_mut(&mut self) -> &mut [libc::cc_t] {
         &mut self.0.c_cc

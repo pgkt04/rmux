@@ -28,6 +28,7 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
                 }
             }
         }
+        crate::tsp::broker::drain_anchors(server, pane);
         if let Some(window) = server.panes.get(pane).map(|pane| pane.window) {
             operations::server_redraw_window(server, window);
         }
@@ -59,7 +60,10 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         }
     } else {
         let screen = if args.has(b'a') == 0 && args.has(b'M') != 0 {
-            p.screen()
+            p.modes
+                .first()
+                .and_then(|mode| crate::modes::copy::backing_screen(server, mode.id))
+                .unwrap_or_else(|| p.screen())
         } else {
             &p.base
         };

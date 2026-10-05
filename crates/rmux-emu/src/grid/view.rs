@@ -53,6 +53,7 @@ impl Grid {
 
     /// `grid_view_clear_history` (`grid-view.c:65-91`).
     pub fn view_clear_history(&mut self, bg: Colour) {
+        self.remove_surface_anchors_in(self.hsize() as usize..(self.hsize() + self.sy()) as usize);
         let mut last = 0;
         for yy in 0..self.sy() {
             if self.get_line(self.view_y(yy)).cellused() != 0 {
@@ -91,6 +92,7 @@ impl Grid {
             }
         } else {
             let (u, l) = (self.view_y(rupper), self.view_y(rlower));
+            self.remove_surface_anchors_in(u as usize..u as usize + 1);
             self.move_lines(u, u.wrapping_add(1), l.wrapping_sub(u), bg);
         }
     }
@@ -98,6 +100,7 @@ impl Grid {
     /// `grid_view_scroll_region_down` (`grid-view.c:126-134`).
     pub fn view_scroll_region_down(&mut self, rupper: u32, rlower: u32, bg: Colour) {
         let (u, l) = (self.view_y(rupper), self.view_y(rlower));
+        self.remove_surface_anchors_in(l as usize..l as usize + 1);
         self.move_lines(u.wrapping_add(1), u, l.wrapping_sub(u), bg);
     }
 

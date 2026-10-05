@@ -96,18 +96,6 @@ pub fn inject_string<T: Copy>(
     after
 }
 
-/// The `struct mouse_event` fields the queue event keeps (`cmd-send-keys.c:170`).
-fn mouse_event(server: &Server, item: QueueItemId) -> MouseEvent {
-    let m = item_event(server, item).mouse;
-    MouseEvent {
-        x: m.x,
-        y: m.y,
-        lx: m.last_x,
-        ly: m.last_y,
-        ..MouseEvent::default()
-    }
-}
-
 /// `cmd_send_keys_inject_key` (`cmd-send-keys.c:60-109`).
 fn inject_key(
     server: &mut Server,
@@ -187,6 +175,7 @@ fn reset_pane(server: &mut Server, wp: PaneId) {
     };
     let options = p.options;
     let global = server.options.global;
+    let extended_keys = server.options.get_number(global, b"extended-keys");
     let policy = ScreenWritePolicy {
         pane_backed: p.modes.is_empty(),
         alternate_screen: server.options.get_number(options, b"alternate-screen") != 0,
@@ -195,18 +184,27 @@ fn reset_pane(server: &mut Server, wp: PaneId) {
             .options
             .get_number(global, b"variation-selector-always-wide")
             != 0,
-        extended_keys: server.options.get_number(global, b"extended-keys") != 0,
+        extended_keys: extended_keys != 0,
     };
-    let Server {
-        panes, hyperlinks, ..
-    } = server;
+    #[cfg(feature = "sixel")]
+    let images = &mut server.images;
+    let panes = &mut server.panes;
+    let hyperlinks = &mut server.hyperlinks;
     let Some(p) = panes.get_mut(wp) else {
         return;
     };
     p.palette.clear_runtime();
+    p.base.reset_policy.extended_keys = extended_keys == 2;
     let mut tty_sink = ScreenOnlySink;
     let mut sink = ResetSink::default();
-    let mut writer = ScreenWriteCtx::start(&mut p.base, &mut tty_sink, policy, hyperlinks);
+    let mut writer = ScreenWriteCtx::start(
+        &mut p.base,
+        &mut tty_sink,
+        policy,
+        hyperlinks,
+        #[cfg(feature = "sixel")]
+        Some(images),
+    );
     p.parser.reset(Some(&mut writer), &mut sink);
     writer.finish();
     p.flags
@@ -271,8 +269,8 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         if !has_mode || !pane_mode_has_command(server, wp) {
             return fail(server, item, b"not in a mode");
         }
-        let m = event.mouse.valid.then(|| mouse_event(server, item));
-        pane_mode_command(server, wp, tc, target.s, target.wl, args, m.as_ref());
+        let m = event.mouse.valid.then_some(&event);
+        pane_mode_command(server, wp, tc, target.s, target.wl, args, m);
         return CmdReturn::Normal;
     }
 
@@ -280,7 +278,31 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         let Some((_, _, mwp)) = mouse_pane(server, &event.mouse) else {
             return fail(server, item, b"no mouse target");
         };
-        let m = mouse_event(server, item);
+        let input = event.mouse;
+        let m = crate::client::ResolvedMouseEvent {
+            event: MouseEvent {
+                x: input.x,
+                y: input.y,
+                lx: input.last_x,
+                ly: input.last_y,
+                b: input.b,
+                lb: input.lb,
+                sgr_type: input.sgr_type,
+                sgr_b: input.sgr_b,
+            },
+            target: crate::client::MouseTarget {
+                valid: input.valid,
+                session: input.session,
+                window: input.window,
+                pane: input.pane,
+                ox: input.offset_x,
+                oy: input.offset_y,
+                status_at: input.status_at,
+                status_lines: input.status_lines,
+                key: event.key,
+                ..crate::client::MouseTarget::default()
+            },
+        };
         let policy = crate::client::keys::key_policy(server);
         let _ = pane_key(server, mwp, tc, event.key, Some(&m), &policy);
         return CmdReturn::Normal;
@@ -337,6 +359,61 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reset_uses_current_extended_keys_option_for_modified_tab() {
+        use super::super::break_pane::tests::{
+            command, create_session, create_window, item, source,
+        };
+        use crate::cmd::metadata;
+        use rmux_emu::input::keys::encode_key;
+        use rmux_emu::screen::ScreenMode;
+        use rmux_util::key::KeyModifiers;
+
+        let mut server = Server::default();
+        let session = create_session(&mut server, b"keys");
+        let (_, link, pane) = create_window(&mut server, session, 0);
+        let target = source(&server, link, pane);
+        let item = item(&mut server, target, target);
+        let command = command(&metadata::CMD_SEND_KEYS, &[(b'R', None)]);
+        let global = server.options.global;
+        for extended_keys in [2, 1, 0, 2] {
+            server
+                .options
+                .set_number_value(global, b"extended-keys", extended_keys);
+            server
+                .panes
+                .get_mut(pane)
+                .unwrap()
+                .base
+                .mode
+                .insert(ScreenMode::KEYS_EXTENDED_2);
+            assert_eq!(execute(&mut server, &command, item), CmdReturn::Normal);
+            let mode = server.panes.get(pane).unwrap().base.mode;
+            assert_eq!(
+                mode & ScreenMode::EXTENDED_KEY_MODES,
+                if extended_keys == 2 {
+                    ScreenMode::KEYS_EXTENDED
+                } else {
+                    ScreenMode::default()
+                }
+            );
+            let policy = crate::client::keys::key_policy(&server);
+            for (name, expected) in [
+                (&b"C-Tab"[..], &b"\x1b[27;5;9~"[..]),
+                (&b"C-S-Tab"[..], &b"\x1b[27;6;9~"[..]),
+            ] {
+                let mut bytes = Vec::new();
+                inject_string(item, None, name, false, false, &mut |_, key| {
+                    assert_ne!(key.0 & KeyModifiers::CTRL.0, 0);
+                    encode_key(mode, key, &policy, &mut bytes).unwrap();
+                    Some(item)
+                });
+                let expected = if extended_keys == 2 { expected } else { b"\t" };
+                assert_eq!(bytes, expected);
+            }
+        }
+    }
 
     #[test]
     fn hex_bounds_and_forms() {

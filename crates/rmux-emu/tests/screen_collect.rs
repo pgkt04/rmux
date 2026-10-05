@@ -58,6 +58,8 @@ fn collection_commits_only_at_boundary_and_survives_invisible_transactions() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         w.collect_add(&ascii(b'a'));
         w.collect_add(&ascii(b'b'));
@@ -70,13 +72,31 @@ fn collection_commits_only_at_boundary_and_survives_invisible_transactions() {
     // screen_reinit leaves the write list alone; only a resize frees and
     // remakes it (screen.c:359-360,398-399).
     screen
-        .reinit(false, ScreenResetPolicy::default(), &mut reg)
+        .reinit(
+            false,
+            ScreenResetPolicy::default(),
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
         .unwrap();
     assert_eq!(screen.write_list[0].items.len(), 1);
-    screen.resize(8, 4, false);
+    screen.resize(
+        8,
+        4,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     assert_eq!(screen.write_list.len(), 4);
     assert!(screen.write_list.iter().all(|row| row.items.is_empty()));
-    screen.resize(8, 3, false);
+    screen.resize(
+        8,
+        3,
+        false,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     screen.cx = 0;
     screen.cy = 0;
     {
@@ -85,6 +105,8 @@ fn collection_commits_only_at_boundary_and_survives_invisible_transactions() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         w.collect_add(&ascii(b'a'));
         w.collect_add(&ascii(b'b'));
@@ -96,11 +118,19 @@ fn collection_commits_only_at_boundary_and_survives_invisible_transactions() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut reg,
+        #[cfg(feature = "sixel")]
+        None,
     )
     .finish();
     assert!(screen.write_list[0].items.is_empty());
     assert!(sink.calls.iter().any(|(s, _)| s == "ab"));
-    screen.release(&mut reg).unwrap();
+    screen
+        .release(
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 #[test]
 fn overlap_split_keeps_order_attributes_and_exact_bytes() {
@@ -113,6 +143,8 @@ fn overlap_split_keeps_order_attributes_and_exact_bytes() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         for ch in b"abcdefghij" {
             w.collect_add(&ascii(*ch));
@@ -129,7 +161,13 @@ fn overlap_split_keeps_order_attributes_and_exact_bytes() {
     assert_eq!((items[0].x, items[0].used), (0, 3));
     assert_eq!((items[1].x, items[1].used), (3, 2));
     assert_eq!((items[2].x, items[2].used), (5, 5));
-    screen.release(&mut reg).unwrap();
+    screen
+        .release(
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 #[test]
 fn scrolling_rotates_row_buffers_and_draws_scroll_first() {
@@ -145,6 +183,8 @@ fn scrolling_rotates_row_buffers_and_draws_scroll_first() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         w.scrollregion(1, 2);
         w.cursormove(0, 2, false);
@@ -162,7 +202,13 @@ fn scrolling_rotates_row_buffers_and_draws_scroll_first() {
     let text = sink.calls.iter().position(|(s, _)| s == "X").unwrap();
     assert!(scroll < text);
     assert_eq!(screen.grid.view_get_cell(0, 1).data.data[0], b'X');
-    screen.release(&mut reg).unwrap();
+    screen
+        .release(
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 #[test]
 fn transaction_splits_preserve_plain_print_grid() {
@@ -180,6 +226,8 @@ fn transaction_splits_preserve_plain_print_grid() {
                 &mut sink,
                 ScreenWritePolicy::default(),
                 &mut reg,
+                #[cfg(feature = "sixel")]
+                None,
             );
             for ch in part {
                 w.collect_add(&ascii(*ch));
@@ -188,7 +236,13 @@ fn transaction_splits_preserve_plain_print_grid() {
         }
         assert_eq!((screen.cx, screen.cy), (2, 2));
         assert_eq!(screen.grid.view_get_cell(0, 2).data.data[0], b'C');
-        screen.release(&mut reg).unwrap();
+        screen
+            .release(
+                &mut reg,
+                #[cfg(feature = "sixel")]
+                None,
+            )
+            .unwrap();
     }
 }
 #[test]
@@ -209,6 +263,8 @@ fn raw_and_clipboard_bypass_application_sync_without_grid_changes() {
                 ..ScreenWritePolicy::default()
             },
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         w.rawstring(b"\0\x1braw", true);
         w.setselection(b"cp", b"\0clip");
@@ -216,7 +272,13 @@ fn raw_and_clipboard_bypass_application_sync_without_grid_changes() {
     }
     assert_eq!(sink.calls.iter().filter(|(s, _)| s == "other").count(), 2);
     assert_eq!(screen.grid.view_get_cell(0, 0), DEFAULT_CELL);
-    screen.release(&mut reg).unwrap();
+    screen
+        .release(
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -236,6 +298,8 @@ fn sync_start_retains_collection_and_end_records_dirty_before_stop() {
                 ..ScreenWritePolicy::default()
             },
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         w.collect_add(&ascii(b'X'));
         w.collect_end();
@@ -280,7 +344,13 @@ fn sync_start_retains_collection_and_end_records_dirty_before_stop() {
             .any(|e| matches!(e, ScreenRenderEffects::DirtyRows { .. }))
     );
     assert!(sink.calls.iter().all(|(name, _)| name == "sync"));
-    screen.release(&mut reg).unwrap();
+    screen
+        .release(
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }
 
 #[test]
@@ -297,6 +367,8 @@ fn sync_controls_are_noops_for_screen_only_routing() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
         );
         w.collect_add(&ascii(b'X'));
         w.collect_end();
@@ -308,5 +380,11 @@ fn sync_controls_are_noops_for_screen_only_routing() {
     }
     assert!(sink.calls.iter().any(|(s, _)| s == "X"));
     assert!(sink.effects.is_empty());
-    screen.release(&mut reg).unwrap();
+    screen
+        .release(
+            &mut reg,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }

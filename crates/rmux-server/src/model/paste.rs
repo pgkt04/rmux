@@ -1,5 +1,6 @@
 // Ported from tmux paste.c @ 8f25579c
 use std::collections::BTreeMap;
+use std::rc::Rc;
 
 use super::state::{ModelError, Server, clean_name};
 use crate::ids::{Arena, PasteBufferId};
@@ -17,7 +18,7 @@ pub struct PasteEvent {
 
 pub struct PasteBuffer {
     pub name: ByteString,
-    pub data: Vec<u8>,
+    pub data: Rc<Vec<u8>>,
     pub created: i64,
     pub order: u32,
     pub automatic: bool,
@@ -77,7 +78,7 @@ impl PasteStore {
         self.next_order = self.next_order.wrapping_add(1);
         let id = self.buffers.insert(PasteBuffer {
             name: name.clone(),
-            data,
+            data: Rc::new(data),
             created,
             order,
             automatic,
@@ -273,7 +274,7 @@ pub fn paste_replace(
         .buffers
         .get_mut(id)
         .ok_or(ModelError::StaleId)?;
-    buffer.data = data;
+    buffer.data = Rc::new(data);
     let name = buffer.name.clone();
     server.fire_paste_event("paste-buffer-changed", &name);
     Ok(())
@@ -375,7 +376,7 @@ mod tests {
             assert!(output.status.success());
             let buffer = PasteBuffer {
                 name: "sample".into(),
-                data,
+                data: Rc::new(data),
                 created: 0,
                 order: 0,
                 automatic: false,
@@ -481,7 +482,7 @@ mod tests {
             server.paste.get(automatic).unwrap().name,
             b"buffer1".as_slice()
         );
-        assert_eq!(server.paste.get(named).unwrap().data, [0, 1, 0]);
+        assert_eq!(server.paste.get(named).unwrap().data.as_slice(), [0, 1, 0]);
         paste_remove(&mut server, automatic).unwrap();
         assert!(paste_get_top(&server).is_none());
         assert!(!paste_is_empty(&server));
@@ -490,7 +491,7 @@ mod tests {
     fn binary_sample_and_boundary() {
         let mut buffer = PasteBuffer {
             name: "x".into(),
-            data: b"a\0b\t\n".to_vec(),
+            data: Rc::new(b"a\0b\t\n".to_vec()),
             created: 1,
             order: 0,
             automatic: false,
@@ -498,16 +499,16 @@ mod tests {
         let mut sample = Vec::new();
         paste_make_sample(&buffer, &mut sample);
         assert_eq!(sample, b"a\\0b\\t\\n");
-        buffer.data = vec![b'x'; 200];
+        buffer.data = Rc::new(vec![b'x'; 200]);
         paste_make_sample(&buffer, &mut sample);
         assert_eq!(sample.len(), 200);
-        buffer.data.push(b'x');
+        Rc::make_mut(&mut buffer.data).push(b'x');
         paste_make_sample(&buffer, &mut sample);
         assert_eq!(sample, [vec![b'x'; 200], b"...".to_vec()].concat());
-        buffer.data = vec![0; 100];
+        buffer.data = Rc::new(vec![0; 100]);
         paste_make_sample(&buffer, &mut sample);
         assert_eq!(sample.len(), 200);
-        buffer.data.push(0);
+        Rc::make_mut(&mut buffer.data).push(0);
         paste_make_sample(&buffer, &mut sample);
         assert_eq!(&sample[200..], b"...");
     }

@@ -122,7 +122,12 @@ fn rust_run(input: &str) -> String {
             "new" => {
                 let w = number(&mut t);
                 let h = number(&mut t);
-                s.release(&mut registry).unwrap();
+                s.release(
+                    &mut registry,
+                    #[cfg(feature = "sixel")]
+                    None,
+                )
+                .unwrap();
                 s = Screen::new(w, h, 0, ScreenResetPolicy::default(), &mut registry).unwrap();
                 tty = fixture(w, h, &mut state);
             }
@@ -612,3 +617,7 @@ fn draw_line_default_style_resolves_screen_hyperlinks() {
             .any(|w| w == b"https://example.test")
     );
 }
+
+#[cfg(feature = "sixel")]
+#[path = "image_tests.rs"]
+mod image_tests;

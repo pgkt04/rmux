@@ -408,8 +408,13 @@ impl CfgRuntime for Server {
     fn pane_top_is_view(&self, pane: PaneId) -> bool {
         CfgModelRuntime::pane_top_is_view(self, pane)
     }
-    fn enter_view_mode(&mut self, _pane: PaneId) -> Result<(), CfgViewError> {
-        Err(CfgViewError::Unavailable)
+    fn enter_view_mode(&mut self, pane: PaneId) -> Result<(), CfgViewError> {
+        let driver = Rc::new(crate::modes::copy::CopyModeDriver {
+            kind: crate::modes::copy::CopyModeKind::View,
+        });
+        CfgModelRuntime::enter_view_mode(self, pane, driver)
+            .map(|_| ())
+            .map_err(CfgViewError::Model)
     }
     fn append_view_line(&mut self, pane: PaneId, line: &[u8]) -> Result<(), CfgViewError> {
         CfgModelRuntime::append_view_line(self, pane, line).map_err(CfgViewError::Model)
@@ -914,18 +919,20 @@ mod tests {
     }
 
     #[test]
-    fn config_view_unavailable_is_explicit_and_append_reaches_model() {
+    fn config_view_enters_real_mode_and_appends_to_owned_backing() {
         let mut server = Server::new();
         let window = crate::model::window::window_create(&mut server, 80, 24, 0, 0).unwrap();
         let pane = crate::model::pane::pane_create(&mut server, window, 80, 24, 10).unwrap();
-        assert!(matches!(
-            CfgRuntime::enter_view_mode(&mut server, pane),
-            Err(CfgViewError::Unavailable)
-        ));
-        assert!(matches!(
-            CfgRuntime::append_view_line(&mut server, pane, b"cause"),
-            Err(CfgViewError::Model(_))
-        ));
+        CfgRuntime::enter_view_mode(&mut server, pane).unwrap();
+        assert!(CfgRuntime::pane_top_is_view(&server, pane));
+        CfgRuntime::append_view_line(&mut server, pane, b"cause").unwrap();
+        CfgRuntime::append_view_line(&mut server, pane, b"second").unwrap();
+        let mode = server.panes.get(pane).unwrap().modes[0].id;
+        let backing = crate::modes::copy::backing_screen(&server, mode).unwrap();
+        assert_eq!((backing.cx, backing.cy), (6, 1));
+        assert_eq!(backing.grid.get_cell(0, 0).data.data[0], b'c');
+        assert_eq!(backing.grid.get_cell(0, 1).data.data[0], b's');
+        crate::model::pane::pane_reset_mode(&mut server, pane).unwrap();
         assert!(!CfgRuntime::pane_top_is_view(&server, pane));
     }
 

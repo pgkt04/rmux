@@ -52,6 +52,14 @@ pub enum PaneEffect {
         current: Option<Vec<u8>>,
         entered: bool,
     },
+    PromptChanged {
+        pane: PaneId,
+        kind: PromptType,
+    },
+    TitleChanged {
+        pane: PaneId,
+        new: Vec<u8>,
+    },
 }
 fn effect(server: &mut Server, value: PaneEffect) {
     server.effects.push_back(ModelEffect::Pane(value));
@@ -67,7 +75,7 @@ pub trait PaneModeDriver {
         id: ModeId,
         client: ClientId,
         key: KeyCode,
-        mouse: Option<&MouseEvent>,
+        mouse: Option<&crate::client::ResolvedMouseEvent>,
     );
     fn append_output(
         &self,
@@ -99,7 +107,7 @@ pub trait PaneModeDriver {
         _session: Option<crate::ids::SessionId>,
         _winlink: Option<crate::ids::WinlinkId>,
         _args: &crate::cmd::arguments::Args,
-        _mouse: Option<&MouseEvent>,
+        _event: Option<&crate::cmd::queue::QueueEvent>,
     ) {
     }
     /// `wme->mode->update` (`tmux.h:1314`).
@@ -181,10 +189,10 @@ pub fn pane_mode_command(
     session: Option<crate::ids::SessionId>,
     winlink: Option<crate::ids::WinlinkId>,
     args: &crate::cmd::arguments::Args,
-    mouse: Option<&MouseEvent>,
+    event: Option<&crate::cmd::queue::QueueEvent>,
 ) {
     if let Some((driver, id)) = first_mode(server, wp) {
-        driver.command(server, id, client, session, winlink, args, mouse);
+        driver.command(server, id, client, session, winlink, args, event);
     }
 }
 /// `wme->mode->update(wme)` for the first mode (`server-client.c`).
@@ -310,6 +318,8 @@ pub fn pane_create(
     };
     let mut base = Screen::new(sx, sy, hlimit, policy, &mut server.hyperlinks)
         .map_err(|e| ModelError::Sys(e.to_string()))?;
+    #[cfg(feature = "sixel")]
+    base.bind_images(&mut server.images);
     let status_screen = Screen::new(1, 1, 0, policy, &mut server.hyperlinks)
         .map_err(|e| ModelError::Sys(e.to_string()))?;
     let mut cursor_cell = rmux_emu::cell::DEFAULT_CELL;
@@ -435,6 +445,7 @@ pub fn pane_create(
         output_generation: 0,
         cmd_status: -1,
         searchstr: None,
+        searchregex: false,
         palette,
         resizes: VecDeque::new(),
         wait_item: None,
@@ -443,6 +454,7 @@ pub fn pane_create(
         prompt: None,
         prompt_generation: 0,
         input_state: super::pane_input::PaneInputState::default(),
+        tsp: None,
         pipe: None,
         control_fg: -1,
         control_bg: -1,
@@ -508,12 +520,20 @@ pub fn pane_release(server: &mut Server, id: PaneId) -> Result<(), ModelError> {
     }
     if let Some(mut pane) = server.panes.release(id)? {
         pane.base
-            .release(&mut server.hyperlinks)
+            .release(
+                &mut server.hyperlinks,
+                #[cfg(feature = "sixel")]
+                Some(&mut server.images),
+            )
             .map_err(|e| ModelError::Sys(e.to_string()))?;
         pane.status_screen
-            .release(&mut server.hyperlinks)
+            .release(
+                &mut server.hyperlinks,
+                #[cfg(feature = "sixel")]
+                None,
+            )
             .map_err(|e| ModelError::Sys(e.to_string()))?;
-        server.options.free(pane.options);
+        server.free_options(pane.options);
     }
     Ok(())
 }
@@ -565,6 +585,7 @@ pub fn pane_destroy(server: &mut Server, id: PaneId) -> Result<(), ModelError> {
     {
         return Ok(());
     }
+    crate::tsp::broker::pane_reset(server, id);
     crate::server::run::close_pane_io(server, id);
     pane_wait_finish(server, id);
     super::spawn::spawn_editor_finish(server, id);
@@ -631,9 +652,16 @@ pub fn pane_resize(server: &mut Server, id: PaneId, sx: u32, sy: u32) -> Result<
     p.resizes.push_back(size);
     p.sx = sx;
     p.sy = sy;
-    p.base.resize(sx, sy, p.base.saved_grid.is_none());
+    p.base.resize(
+        sx,
+        sy,
+        p.base.saved_grid.is_none(),
+        #[cfg(feature = "sixel")]
+        Some(&mut server.images),
+    );
     let window = p.window;
     let mode = p.modes.first().map(|m| (m.id, Rc::clone(&m.driver)));
+    crate::tsp::broker::drain_anchors(server, id);
     if let Some((mode, driver)) = mode {
         driver.resize(server, mode, sx, sy);
     }
@@ -1031,6 +1059,25 @@ pub fn pane_set_mode(
     if p.modes.first().is_some_and(|m| m.name == name) {
         return Ok(None);
     }
+    if !crate::tsp::broker::pane_cell_ready(server, id) {
+        let name = name.to_vec();
+        crate::tsp::broker::defer_cell_ui(
+            server,
+            id,
+            Box::new(move |server| {
+                if server.panes.get(id).is_some_and(|pane| {
+                    !pane
+                        .tsp
+                        .as_ref()
+                        .and_then(|state| state.switch.as_ref())
+                        .is_some_and(|switch| switch.failed)
+                }) {
+                    let _ = pane_set_mode(server, id, &name, flags, driver, kill);
+                }
+            }),
+        );
+        return Ok(None);
+    }
     if p.modes
         .first()
         .is_some_and(|m| m.flags.contains(WindowModeFlags::NO_STACK))
@@ -1070,7 +1117,11 @@ pub fn pane_set_mode(
         let Some(p) = server.panes.get_mut(id) else {
             if let Some(screen) = &mut screen {
                 screen
-                    .release(&mut server.hyperlinks)
+                    .release(
+                        &mut server.hyperlinks,
+                        #[cfg(feature = "sixel")]
+                        Some(&mut server.images),
+                    )
                     .map_err(|e| ModelError::Sys(e.to_string()))?;
             }
             return Ok(None);
@@ -1078,7 +1129,11 @@ pub fn pane_set_mode(
         let Some(position) = p.modes.iter().position(|m| m.id == mode_id) else {
             if let Some(screen) = &mut screen {
                 screen
-                    .release(&mut server.hyperlinks)
+                    .release(
+                        &mut server.hyperlinks,
+                        #[cfg(feature = "sixel")]
+                        Some(&mut server.images),
+                    )
                     .map_err(|e| ModelError::Sys(e.to_string()))?;
             }
             return Ok(None);
@@ -1146,8 +1201,10 @@ pub fn pane_set_prompt(
         prompt.engine.free(server);
         return Ok(());
     }
+    let kind = prompt.kind;
     p.prompt = Some(prompt);
     p.flags.insert(PaneFlags::REDRAW);
+    effect(server, PaneEffect::PromptChanged { pane: id, kind });
     server.emit(b"pane-prompt-opened", None, Some(window), Some(id));
     Ok(())
 }
@@ -1160,8 +1217,10 @@ pub fn pane_clear_prompt(server: &mut Server, id: PaneId) -> Result<(), ModelErr
     let notify = !p.flags.contains(PaneFlags::DESTROYED);
     let window = p.window;
     p.flags.insert(PaneFlags::REDRAW);
+    let kind = prompt.kind;
     prompt.engine.free(server);
     if notify && server.panes.get(id).is_some() {
+        effect(server, PaneEffect::PromptChanged { pane: id, kind });
         server.emit(b"pane-prompt-closed", None, Some(window), Some(id));
     }
     Ok(())
@@ -1252,12 +1311,14 @@ pub fn pane_prompt_key(
     });
     if close || !valid {
         let window = server.panes.get(id).map(|p| p.window);
+        let kind = prompt.kind;
         prompt.engine.free(server);
         if valid {
             if let Some(p) = server.panes.get_mut(id) {
                 p.prompt_generation = p.prompt_generation.wrapping_add(1);
                 p.flags.insert(PaneFlags::REDRAW);
             }
+            effect(server, PaneEffect::PromptChanged { pane: id, kind });
             server.emit(b"pane-prompt-closed", None, window, Some(id));
         }
     } else if let Some(p) = server.panes.get_mut(id) {
@@ -1282,7 +1343,7 @@ pub fn pane_key(
     id: PaneId,
     client: Option<ClientId>,
     key: KeyCode,
-    mouse: Option<&MouseEvent>,
+    mouse: Option<&crate::client::ResolvedMouseEvent>,
     policy: &KeyPolicy,
 ) -> Result<(), ModelError> {
     if key.is_mouse() && mouse.is_none() {
@@ -1308,7 +1369,7 @@ pub fn pane_key(
     if p.fd.is_none() || p.flags.contains(PaneFlags::INPUTOFF) {
         return Ok(());
     }
-    encode_pane_key(server, id, key, mouse, policy)?;
+    encode_pane_key(server, id, client, key, mouse.map(|m| &m.event), policy)?;
     let p = server.panes.get(id).ok_or(ModelError::StaleId)?;
     if !key.is_mouse() && option_number(server, p.options, b"synchronize-panes", 0) != 0 {
         let window = p.window;
@@ -1321,21 +1382,85 @@ pub fn pane_key(
         for index in 0..count {
             let target = server.windows.get(window).ok_or(ModelError::StaleId)?.panes[index];
             if synchronized_target(server, id, target) {
-                let _ = encode_pane_key(server, target, key, None, policy);
+                let _ = encode_pane_key(server, target, client, key, None, policy);
             }
         }
     }
     Ok(())
 }
+/// Preview the exact pane encoding without retaining a second key buffer.
+pub(crate) fn pane_key_len(
+    server: &mut Server,
+    id: PaneId,
+    key: KeyCode,
+    mouse: Option<&MouseEvent>,
+    policy: &KeyPolicy,
+) -> usize {
+    let Some(p) = server.panes.get_mut(id) else {
+        return 0;
+    };
+    if !p.modes.is_empty() || p.fd.is_none() || p.flags.contains(PaneFlags::INPUTOFF) {
+        return 0;
+    }
+    let start = p.output.len();
+    if let Some(mouse) = mouse.filter(|_| key.is_mouse()) {
+        let x = mouse.x.wrapping_sub(p.xoff as u32);
+        let y = mouse.y.wrapping_sub(p.yoff as u32);
+        if x < p.sx && y < p.sy {
+            if let Some(bytes) = encode_mouse(p.base.mode, mouse, x, y) {
+                return bytes.as_ref().len();
+            }
+        }
+        return 0;
+    }
+    let _ = encode_key(p.base.mode, key, policy, &mut p.output);
+    let len = p.output.len() - start;
+    p.output.truncate(start);
+    len
+}
+
+/// Admit only the bounded prefix while switching; retain the remaining source
+/// for the renderer commit rather than leaking it to the PTY or dropping it.
+pub(crate) fn pane_input_bytes(
+    server: &mut Server,
+    id: PaneId,
+    client: Option<ClientId>,
+    bytes: &[u8],
+) -> Result<(), ModelError> {
+    let available = crate::tsp::input::input_available(server, id);
+    let count = bytes.len().min(available);
+    if count != 0 && !crate::tsp::broker::hold_bytes(server, id, client, &bytes[..count]) {
+        server
+            .panes
+            .get_mut(id)
+            .ok_or(ModelError::StaleId)?
+            .output
+            .extend_from_slice(&bytes[..count]);
+    }
+    if count < bytes.len() {
+        let remaining = bytes[count..].to_vec();
+        crate::tsp::input::defer_input(
+            server,
+            id,
+            Box::new(move |server| {
+                let _ = pane_input_bytes(server, id, client, &remaining);
+            }),
+        );
+    }
+    Ok(())
+}
+
 fn encode_pane_key(
     server: &mut Server,
     id: PaneId,
+    client: Option<ClientId>,
     key: KeyCode,
     mouse: Option<&MouseEvent>,
     policy: &KeyPolicy,
 ) -> Result<(), ModelError> {
     let p = server.panes.get_mut(id).ok_or(ModelError::StaleId)?;
     let mode = p.base.mode;
+    let start = p.output.len();
     if let Some(mouse) = mouse.filter(|_| key.is_mouse()) {
         let x = mouse.x.wrapping_sub(p.xoff as u32);
         let y = mouse.y.wrapping_sub(p.yoff as u32);
@@ -1348,11 +1473,46 @@ fn encode_pane_key(
     } else {
         encode_key(mode, key, policy, &mut p.output)
             .map_err(|e| ModelError::Sys(format!("key encoding: {e:?}")))
+    }?;
+    hold_encoded_input(server, id, client, start);
+    Ok(())
+}
+pub(crate) fn hold_encoded_input(
+    server: &mut Server,
+    id: PaneId,
+    client: Option<ClientId>,
+    start: usize,
+) {
+    let Some(pane) = server.panes.get_mut(id).filter(|pane| pane.tsp.is_some()) else {
+        return;
+    };
+    if start == pane.output.len() {
+        return;
+    }
+    let mut output = std::mem::take(&mut pane.output);
+    let available = crate::tsp::input::input_available(server, id);
+    let end = output.len().min(start.saturating_add(available));
+    if crate::tsp::broker::hold_bytes(server, id, client, &output[start..end]) {
+        if end < output.len() {
+            let remaining = output[end..].to_vec();
+            crate::tsp::input::defer_input(
+                server,
+                id,
+                Box::new(move |server| {
+                    let _ = pane_input_bytes(server, id, client, &remaining);
+                }),
+            );
+        }
+        output.truncate(start);
+    }
+    if let Some(pane) = server.panes.get_mut(id) {
+        pane.output = output;
     }
 }
 pub fn pane_paste(
     server: &mut Server,
     id: PaneId,
+    client: Option<ClientId>,
     key: KeyCode,
     bytes: &[u8],
 ) -> Result<(), ModelError> {
@@ -1366,12 +1526,7 @@ pub fn pane_paste(
     }
     let synchronize = option_number(server, p.options, b"synchronize-panes", 0) != 0;
     let window = p.window;
-    server
-        .panes
-        .get_mut(id)
-        .ok_or(ModelError::StaleId)?
-        .output
-        .extend_from_slice(bytes);
+    pane_input_bytes(server, id, client, bytes)?;
     if synchronize {
         let count = server
             .windows
@@ -1382,12 +1537,7 @@ pub fn pane_paste(
         for index in 0..count {
             let target = server.windows.get(window).ok_or(ModelError::StaleId)?.panes[index];
             if synchronized_target(server, id, target) {
-                server
-                    .panes
-                    .get_mut(target)
-                    .ok_or(ModelError::StaleId)?
-                    .output
-                    .extend_from_slice(bytes);
+                pane_input_bytes(server, target, client, bytes)?;
             }
         }
     }
@@ -1622,7 +1772,13 @@ mod tests {
         }
         fn free(&self, server: &mut Server, mut mode: PaneMode) {
             if let Some(screen) = &mut mode.screen {
-                screen.release(&mut server.hyperlinks).unwrap();
+                screen
+                    .release(
+                        &mut server.hyperlinks,
+                        #[cfg(feature = "sixel")]
+                        None,
+                    )
+                    .unwrap();
             }
         }
         fn resize(&self, server: &mut Server, id: ModeId, sx: u32, sy: u32) {
@@ -1632,7 +1788,13 @@ mod tests {
                 .and_then(|p| p.modes.iter_mut().find(|m| m.id == id))
             {
                 if let Some(screen) = &mut mode.screen {
-                    screen.resize(sx, sy, false);
+                    screen.resize(
+                        sx,
+                        sy,
+                        false,
+                        #[cfg(feature = "sixel")]
+                        None,
+                    );
                 }
             }
         }
@@ -1642,7 +1804,7 @@ mod tests {
             id: ModeId,
             _: ClientId,
             _: KeyCode,
-            _: Option<&MouseEvent>,
+            _: Option<&crate::client::ResolvedMouseEvent>,
         ) {
             pane_destroy(server, id.owner).unwrap();
         }

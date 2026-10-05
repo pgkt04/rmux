@@ -137,7 +137,14 @@ fn relative_cursors_retain_pinned_pending_wrap_arithmetic() {
     let mut registry = HyperlinkRegistry::default();
     let mut screen = screen(5, 6, &mut registry);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.scrollregion(2, 4);
     for (x, count, expected) in [(5, 0, 4), (5, 1, 4), (5, u32::MAX, 4), (4, 0, 4), (0, 0, 1)] {
         ctx.screen.cx = x;
@@ -172,7 +179,14 @@ fn absolute_origin_and_region_rejection_keep_distinct_clamps() {
     let mut registry = HyperlinkRegistry::default();
     let mut screen = screen(5, 6, &mut registry);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.scrollregion(2, 4);
     ctx.screen.mode.insert(ScreenMode::ORIGIN);
     ctx.cursormove(5, 1, true);
@@ -200,7 +214,14 @@ fn backspace_crosses_only_wrapped_visible_rows() {
         .get_line_mut(screen.grid.hsize())
         .flags
         .insert(GridLineFlags::WRAPPED);
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(0, 2, false);
     ctx.backspace();
     assert_eq!((ctx.screen.cx, ctx.screen.cy), (0, 2));
@@ -223,8 +244,14 @@ fn writer_reset_drops_crlf_and_uses_only_requested_extended_mode() {
             screen.tabs.fill(true);
             screen.mode = ScreenMode::CRLF | ScreenMode::INSERT | ScreenMode::KEYS_EXTENDED_2;
             let mut sink = Recorder::default();
-            let mut ctx =
-                ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+            let mut ctx = ScreenWriteCtx::start(
+                &mut screen,
+                &mut sink,
+                pane_policy(),
+                &mut registry,
+                #[cfg(feature = "sixel")]
+                None,
+            );
             ctx.cursormove(16, height as i32 - 1, false);
             ctx.reset(ScreenResetPolicy { extended_keys });
             let expected = ScreenMode::CURSOR
@@ -263,7 +290,14 @@ fn character_edits_capture_old_cursor_and_borrow_new_grid() {
         screen.grid.view_set_cell(x as u32, 1, &cell(*byte));
     }
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.scrollregion(1, 2);
     ctx.cursormove(2, 1, false);
     ctx.insertcharacter(0, Colour(4));
@@ -298,7 +332,14 @@ fn line_edits_respect_region_and_keep_outside_dirty_span_asymmetry() {
     let mut screen = screen(3, 6, &mut registry);
     fill_rows(&mut screen);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.scrollregion(1, 3);
     ctx.cursormove(2, 2, false);
     ctx.insertline(1, Colour::DEFAULT);
@@ -329,7 +370,14 @@ fn linefeed_batches_scrolls_and_splits_on_background_change() {
     let mut screen = screen(4, 5, &mut registry);
     fill_rows(&mut screen);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.scrollregion(1, 3);
     ctx.cursormove(2, 2, false);
     ctx.linefeed(true, Colour(1));
@@ -365,7 +413,14 @@ fn reverse_index_and_scroll_down_preserve_old_structural_coordinates() {
     let mut screen = screen(4, 5, &mut registry);
     fill_rows(&mut screen);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.scrollregion(1, 3);
     ctx.cursormove(2, 2, false);
     ctx.reverseindex(Colour(4));
@@ -408,7 +463,14 @@ fn whole_line_clear_preserves_osc133_and_suffix_clear_skips_implicit_blanks() {
     line.flags = flags;
     line.osc133 = metadata;
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(3, 1, false);
     ctx.clearline(Colour::DEFAULT);
     let line = ctx.screen.grid.get_line(ctx.screen.grid.hsize() + 1);
@@ -451,7 +513,14 @@ fn partial_screen_erases_flush_but_whole_screen_discards_without_flush() {
         let mut screen = screen(5, 3, &mut registry);
         fill_rows(&mut screen);
         let mut sink = Recorder::default();
-        let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+        let mut ctx = ScreenWriteCtx::start(
+            &mut screen,
+            &mut sink,
+            pane_policy(),
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         ctx.cursormove(2, 1, false);
         for row in &mut ctx.screen.write_list {
             row.items.push(clear_item(0, 1, Colour(7)));
@@ -502,7 +571,14 @@ fn scroll_on_clear_requires_history_pane_policy_and_end_erase_home() {
                 scroll_on_clear: true,
                 ..ScreenWritePolicy::default()
             };
-            let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+            let mut ctx = ScreenWriteCtx::start(
+                &mut screen,
+                &mut sink,
+                policy,
+                &mut registry,
+                #[cfg(feature = "sixel")]
+                None,
+            );
             if full {
                 ctx.cursormove(2, 1, false);
                 ctx.clearscreen(Colour::DEFAULT);
@@ -523,7 +599,14 @@ fn scroll_on_clear_requires_history_pane_policy_and_end_erase_home() {
         scroll_on_clear: true,
         ..pane_policy()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        policy,
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(1, 0, false);
     ctx.clearendofscreen(Colour::DEFAULT);
     assert_eq!(ctx.screen.grid.hsize(), 0);
@@ -540,7 +623,14 @@ fn obscured_erases_collect_visible_spans_and_restore_cursor() {
         visible_end: Some(3),
         ..Recorder::default()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(2, 1, false);
     ctx.clearendofscreen(Colour(6));
     assert_eq!((ctx.screen.cx, ctx.screen.cy), (2, 1));
@@ -581,7 +671,14 @@ fn obscured_start_erase_preserves_pinned_mutable_loop_and_final_span() {
         obscured: true,
         ..Recorder::default()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(3, 3, false);
     ctx.clearstartofscreen(Colour(6));
     assert_eq!((ctx.screen.cx, ctx.screen.cy), (3, 3));
@@ -614,7 +711,14 @@ fn obscured_structural_redraw_preserves_direct_old_cursor() {
         obscured: true,
         ..Recorder::default()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(3, 1, false);
     ctx.insertcharacter(1, Colour::DEFAULT);
     ctx.insertline(1, Colour::DEFAULT);
@@ -637,7 +741,14 @@ fn alignment_keeps_last_collected_row_and_fullredraw_flushes_before_damage() {
     let mut registry = HyperlinkRegistry::default();
     let mut screen = screen(4, 3, &mut registry);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     for row in &mut ctx.screen.write_list {
         row.items.push(clear_item(0, 1, Colour(7)));
     }
@@ -691,7 +802,14 @@ fn application_sync_and_redraw_drop_suppress_structural_output() {
             redraw_pending,
             ..Recorder::default()
         };
-        let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+        let mut ctx = ScreenWriteCtx::start(
+            &mut screen,
+            &mut sink,
+            pane_policy(),
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         ctx.cursormove(1, 1, false);
         ctx.clearcharacter(1, Colour::DEFAULT);
         ctx.clearscreen(Colour::DEFAULT);
@@ -718,7 +836,14 @@ fn alternate_exit_inside_a_transaction_remakes_the_write_list() {
     let mut registry = HyperlinkRegistry::default();
     let mut screen = screen(5, 3, &mut registry);
     let mut sink = Recorder::default();
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     for byte in b"abc" {
         ctx.collect_add(&cell(*byte));
     }
@@ -752,7 +877,14 @@ fn scroll_flush_with_overlay_scrollbar_requires_pane_redraw_and_discards() {
         scrollbar: true,
         ..Recorder::default()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        pane_policy(),
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cursormove(0, 2, false);
     ctx.collect_add(&cell(b'q'));
     ctx.collect_end();
@@ -785,7 +917,14 @@ fn obscured_single_column_redraw_uses_cell_only_for_plain_ascii() {
             visible_end: Some(1),
             ..Recorder::default()
         };
-        let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, pane_policy(), &mut registry);
+        let mut ctx = ScreenWriteCtx::start(
+            &mut screen,
+            &mut sink,
+            pane_policy(),
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         ctx.cursormove(2, 0, false);
         ctx.deletecharacter(1, Colour::DEFAULT);
         ctx.finish();

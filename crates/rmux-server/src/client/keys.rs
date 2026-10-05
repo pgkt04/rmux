@@ -418,6 +418,10 @@ pub fn mouse_input(ev: &KeyEvent) -> MouseInput {
         y: m.y,
         last_x: m.lx,
         last_y: m.ly,
+        b: m.b,
+        lb: m.lb,
+        sgr_type: m.sgr_type,
+        sgr_b: m.sgr_b,
         offset_x: t.ox,
         offset_y: t.oy,
         status_at: t.status_at,
@@ -696,14 +700,11 @@ fn step_forward(server: &mut Server, run: &mut KeyRun) -> KeyStep {
     }
     if let Some(wp) = run.wp {
         let policy = key_policy(server);
-        let _ = pane_key(
-            server,
-            wp,
-            Some(run.id),
-            run.key,
-            Some(&run.ev.mouse),
-            &policy,
-        );
+        let mouse = crate::client::ResolvedMouseEvent {
+            event: run.ev.mouse,
+            target: run.ev.target,
+        };
+        let _ = pane_key(server, wp, Some(run.id), run.key, Some(&mouse), &policy);
     }
     KeyStep::Done
 }
@@ -714,7 +715,7 @@ fn step_paste(server: &mut Server, run: &mut KeyRun) -> KeyStep {
         return KeyStep::Done;
     }
     if let (Some(wp), Some(buf)) = (run.wp, run.ev.paste.as_deref()) {
-        let _ = pane_paste(server, wp, run.key, buf);
+        let _ = pane_paste(server, wp, Some(run.id), run.key, buf);
     }
     run.key = KeyCode(SpecialKey::NONE);
     KeyStep::Done
@@ -939,14 +940,85 @@ fn pane_has_prompt(server: &Server, wp: PaneId) -> bool {
     server.panes.get(wp).is_some_and(|p| p.prompt.is_some())
 }
 
+pub(crate) struct InputReservation {
+    pane: PaneId,
+    generation: u64,
+    bytes: usize,
+}
+
+fn release_key_input(server: &mut Server, reservation: Option<InputReservation>) {
+    if let Some(reservation) = reservation {
+        if server
+            .panes
+            .get(reservation.pane)
+            .and_then(|p| p.tsp.as_ref())
+            .is_some_and(|state| state.generation == reservation.generation)
+        {
+            crate::tsp::input::release_reservation(server, reservation.pane, reservation.bytes);
+        }
+    }
+}
+
+/// Replace undecoded tty bytes with a conservative key/paste reservation.
+/// The callback may take either path after preceding prefix commands run.
+pub(crate) fn reserve_key_input(
+    server: &mut Server,
+    id: ClientId,
+    key: KeyCode,
+    mouse: Option<&rmux_util::key::MouseEvent>,
+    raw_len: usize,
+    consumed: usize,
+) -> Result<Option<InputReservation>, ()> {
+    let Some(pane) = active_pane(server, id) else {
+        return Ok(None);
+    };
+    let Some(generation) = server
+        .panes
+        .get(pane)
+        .and_then(|p| p.tsp.as_ref())
+        .filter(|state| state.renderer == crate::tsp::broker::Renderer::Switching)
+        .map(|state| state.generation)
+    else {
+        return Ok(None);
+    };
+    let bytes = if client_flags(server, id).intersects(ClientFlags::READONLY) {
+        0
+    } else {
+        let policy = key_policy(server);
+        crate::model::pane::pane_key_len(server, pane, key, mouse, &policy).max(raw_len)
+    };
+    if !crate::tsp::input::reserve_decoded_input(server, pane, id, consumed, bytes) {
+        return Err(());
+    }
+    Ok(Some(InputReservation {
+        pane,
+        generation,
+        bytes,
+    }))
+}
+
 /// `server_client_handle_key0` (`server-client.c:1627-1735`). Returns the
 /// queued item (`*next`) when the event was queued, else `None` and the
 /// event is dropped.
 fn handle_key0(
     server: &mut Server,
     id: ClientId,
+    ev: KeyEvent,
+    after: Option<QueueItemId>,
+    reservation: Option<InputReservation>,
+) -> Option<QueueItemId> {
+    let mut reservation = reservation;
+    let result = handle_key0_inner(server, id, ev, after, &mut reservation);
+    release_key_input(server, reservation);
+    result
+}
+
+fn handle_key0_inner(
+    server: &mut Server,
+    id: ClientId,
     mut ev: KeyEvent,
     after: Option<QueueItemId>,
+    reservation: &mut Option<InputReservation>,
 ) -> Option<QueueItemId> {
     // Check the client is good to accept input (server-client.c:1636-1638).
     let c = server.clients.get(id)?;
@@ -1001,8 +1073,13 @@ fn handle_key0(
                 && !ev.key.is_mouse()
                 && !flags.contains(PaneFlags::EXITED)
             {
+                release_key_input(server, reservation.take());
                 let policy = key_policy(server);
-                let _ = pane_key(server, wp, Some(id), ev.key, Some(&ev.mouse), &policy);
+                let mouse = crate::client::ResolvedMouseEvent {
+                    event: ev.mouse,
+                    target: ev.target,
+                };
+                let _ = pane_key(server, wp, Some(id), ev.key, Some(&mouse), &policy);
                 return None;
             }
         }
@@ -1052,25 +1129,38 @@ fn handle_key0(
     if let Some(after) = after {
         ev.client = Some(id);
         lifecycle::retain(server, id).ok()?;
-        let queued = key_callback_batch(server, ev)
+        let queued = key_callback_batch(server, ev, reservation.take())
             .and_then(|batch| queue::insert_after(server, after, batch).ok());
         if queued.is_none() {
             let _ = lifecycle::release(server, id);
         }
         return queued;
     }
-    let batch = key_callback_batch(server, ev)?;
+    let batch = key_callback_batch(server, ev, reservation.take())?;
     queue::append(server, Some(id), batch).ok()
 }
 
 /// `cmdq_get_callback(server_client_key_callback, event)`.
-fn key_callback_batch(server: &mut Server, ev: KeyEvent) -> Option<QueueBatch> {
+fn key_callback_batch(
+    server: &mut Server,
+    ev: KeyEvent,
+    reservation: Option<InputReservation>,
+) -> Option<QueueBatch> {
     server
         .queue
         .get_callback(
             "server_client_key_callback",
             queue::callback_for::<Server>(move |server, item| {
+                release_key_input(server, reservation);
                 key_callback(server, item, ev);
+                let clients: Vec<_> = server.client_order.iter().copied().collect();
+                for client in clients {
+                    crate::server::event_loop::schedule_deferred(
+                        server,
+                        Duration::ZERO,
+                        Box::new(move |server| crate::client::tty_io::drain_input(server, client)),
+                    );
+                }
                 CmdReturn::Normal
             }),
         )
@@ -1080,7 +1170,38 @@ fn key_callback_batch(server: &mut Server, ev: KeyEvent) -> Option<QueueBatch> {
 /// `server_client_handle_key` (`server-client.c:1737-1742`): true when the
 /// event was queued.
 pub fn handle_key(server: &mut Server, id: ClientId, ev: KeyEvent) -> bool {
-    handle_key0(server, id, ev, None).is_some()
+    let reservation = reserve_key_input(
+        server,
+        id,
+        ev.key,
+        Some(&ev.mouse),
+        ev.paste.as_ref().map_or(0, Vec::len),
+        0,
+    );
+    match reservation {
+        Ok(reservation) => handle_key0(server, id, ev, None, reservation).is_some(),
+        Err(()) => {
+            if let Some(pane) = active_pane(server, id) {
+                crate::tsp::input::defer_input(
+                    server,
+                    pane,
+                    Box::new(move |server| {
+                        handle_key(server, id, ev);
+                    }),
+                );
+            }
+            false
+        }
+    }
+}
+
+pub(crate) fn handle_reserved_key(
+    server: &mut Server,
+    id: ClientId,
+    ev: KeyEvent,
+    reservation: Option<InputReservation>,
+) {
+    handle_key0(server, id, ev, None, reservation);
 }
 
 /// `server_client_handle_key_after` (`server-client.c:1744-1750`): the item
@@ -1091,7 +1212,29 @@ pub fn handle_key_after(
     ev: KeyEvent,
     after: QueueItemId,
 ) -> Option<QueueItemId> {
-    handle_key0(server, id, ev, Some(after))
+    let reservation = reserve_key_input(
+        server,
+        id,
+        ev.key,
+        Some(&ev.mouse),
+        ev.paste.as_ref().map_or(0, Vec::len),
+        0,
+    );
+    match reservation {
+        Ok(reservation) => handle_key0(server, id, ev, Some(after), reservation),
+        Err(()) => {
+            if let Some(pane) = active_pane(server, id) {
+                crate::tsp::input::defer_input(
+                    server,
+                    pane,
+                    Box::new(move |server| {
+                        handle_key_after(server, id, ev, after);
+                    }),
+                );
+            }
+            None
+        }
+    }
 }
 
 /// `server_client_repeat_timer` (`server-client.c:2180-2191`).
@@ -1533,6 +1676,10 @@ mod tests {
         ev.mouse.y = 4;
         ev.mouse.lx = 1;
         ev.mouse.ly = 2;
+        ev.mouse.b = 65;
+        ev.mouse.lb = 1;
+        ev.mouse.sgr_type = b'M';
+        ev.mouse.sgr_b = 64;
         ev.target.valid = true;
         ev.target.ox = 10;
         ev.target.oy = 20;
@@ -1540,6 +1687,7 @@ mod tests {
         ev.target.status_lines = 1;
         let m = mouse_input(&ev);
         assert_eq!((m.x, m.y, m.last_x, m.last_y), (3, 4, 1, 2));
+        assert_eq!((m.b, m.lb, m.sgr_type, m.sgr_b), (65, 1, b'M', 64));
         assert_eq!(
             (m.offset_x, m.offset_y, m.status_at, m.status_lines),
             (10, 20, -1, 1)

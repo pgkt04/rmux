@@ -34,6 +34,28 @@ impl ScreenWriteCtx<'_> {
         self.set_cursor(Some(0), Some(0));
     }
 
+    /// Insert the one-row inline surface anchor and leave the cursor below it.
+    pub fn insert_surface_anchor(&mut self, id: crate::grid::SurfaceAnchorId) -> bool {
+        if self.screen.is_alternate() || self.screen.surface_anchor_row(id).is_some() {
+            return false;
+        }
+        self.collect_end();
+        let y = self.screen.grid.hsize() + self.screen.cy;
+        let line = self.screen.grid.get_line(y);
+        if self.screen.cx != 0 || line.cellused() != 0 || line.surface_anchor().is_some() {
+            self.carriagereturn();
+            self.linefeed(false, Colour::DEFAULT);
+        }
+        let y = self.screen.grid.hsize() + self.screen.cy;
+        if !self.screen.grid.attach_surface_anchor(y, id) {
+            return false;
+        }
+        self.carriagereturn();
+        self.linefeed(false, Colour::DEFAULT);
+        self.fullredraw();
+        true
+    }
+
     pub fn cursorup(&mut self, count: u32) {
         let mut x = self.screen.cx;
         let y = self.screen.cy;
@@ -146,11 +168,10 @@ impl ScreenWriteCtx<'_> {
     pub fn linefeed(&mut self, wrapped: bool, bg: Colour) {
         if wrapped {
             let y = self.screen.grid.hsize() + self.screen.cy;
-            self.screen
-                .grid
-                .get_line_mut(y)
-                .flags
-                .insert(GridLineFlags::WRAPPED);
+            let line = self.screen.grid.get_line_mut(y);
+            if line.surface_anchor().is_none() {
+                line.flags.insert(GridLineFlags::WRAPPED);
+            }
         }
         self.prepare_scroll(bg);
         if self.screen.cy != self.screen.rlower {
@@ -340,6 +361,8 @@ impl ScreenWriteCtx<'_> {
     pub fn insertline(&mut self, count: u32, bg: Colour) {
         let y = self.screen.cy;
         let height = self.screen.grid.sy();
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, height - y);
         let in_region = y >= self.screen.rupper && y <= self.screen.rlower;
         let affected = if in_region {
             self.screen.rlower + 1 - y
@@ -350,8 +373,6 @@ impl ScreenWriteCtx<'_> {
         if count == 0 {
             return;
         }
-        #[cfg(feature = "sixel")]
-        self.image_check_line(y, height - y);
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
         if in_region {
@@ -375,6 +396,8 @@ impl ScreenWriteCtx<'_> {
     pub fn deleteline(&mut self, count: u32, bg: Colour) {
         let y = self.screen.cy;
         let height = self.screen.grid.sy();
+        #[cfg(feature = "sixel")]
+        self.image_check_line(y, height - y);
         let in_region = y >= self.screen.rupper && y <= self.screen.rlower;
         let affected = if in_region {
             self.screen.rlower + 1 - y
@@ -385,8 +408,6 @@ impl ScreenWriteCtx<'_> {
         if count == 0 {
             return;
         }
-        #[cfg(feature = "sixel")]
-        self.image_check_line(y, height - y);
         let snapshot = self.snapshot(true);
         let obscured = self.obscured();
         if in_region {
@@ -421,7 +442,7 @@ impl ScreenWriteCtx<'_> {
         let y = self.screen.cy;
         let absolute_y = self.screen.grid.hsize() + y;
         let line = self.screen.grid.get_line(absolute_y);
-        if line.cellsize() == 0 && bg.is_default() {
+        if line.cellsize() == 0 && bg.is_default() && line.surface_anchor().is_none() {
             return;
         }
         let flags = line.flags & GridLineFlags::OSC133_FLAGS;
@@ -445,7 +466,9 @@ impl ScreenWriteCtx<'_> {
         let width = self.screen.grid.sx();
         let y = self.screen.cy;
         let line = self.screen.grid.get_line(self.screen.grid.hsize() + y);
-        if x >= width || (x >= line.cellsize() && bg.is_default()) {
+        if x >= width
+            || (x >= line.cellsize() && bg.is_default() && line.surface_anchor().is_none())
+        {
             return;
         }
         #[cfg(feature = "sixel")]
@@ -490,10 +513,10 @@ impl ScreenWriteCtx<'_> {
         let height = self.screen.grid.sy();
         let x = self.screen.cx;
         let y = self.screen.cy;
-        let snapshot = self.snapshot(true);
-        let obscured = self.obscured();
         #[cfg(feature = "sixel")]
         self.image_check_line(y, height - y);
+        let snapshot = self.snapshot(true);
+        let obscured = self.obscured();
         if x == 0 && y == 0 && self.scroll_on_clear() {
             self.screen.grid.view_clear_history(bg);
         } else {
@@ -527,10 +550,10 @@ impl ScreenWriteCtx<'_> {
         let width = self.screen.grid.sx();
         let x = self.screen.cx;
         let y = self.screen.cy;
-        let snapshot = self.snapshot(true);
-        let obscured = self.obscured();
         #[cfg(feature = "sixel")]
         self.image_check_line(0, y.wrapping_sub(1));
+        let snapshot = self.snapshot(true);
+        let obscured = self.obscured();
         if y > 0 {
             self.screen.grid.view_clear(0, 0, width, y, bg);
         }
@@ -560,10 +583,10 @@ impl ScreenWriteCtx<'_> {
     pub fn clearscreen(&mut self, bg: Colour) {
         let width = self.screen.grid.sx();
         let height = self.screen.grid.sy();
-        let snapshot = self.snapshot(true);
-        let obscured = self.obscured();
         #[cfg(feature = "sixel")]
         self.image_free_all();
+        let snapshot = self.snapshot(true);
+        let obscured = self.obscured();
         if self.scroll_on_clear() {
             self.screen.grid.view_clear_history(bg);
         } else {

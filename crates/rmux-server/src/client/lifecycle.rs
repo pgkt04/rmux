@@ -164,6 +164,7 @@ pub fn open(server: &mut Server, id: ClientId) -> Result<(), Vec<u8>> {
         .map_err(ByteString::into_vec)?;
 
     crate::client::theme::update_theme_colours(server, id);
+    crate::client::tty_io::sync(server, id);
     Ok(())
 }
 
@@ -367,6 +368,7 @@ pub fn lost(server: &mut Server, id: ClientId) {
         return;
     };
     c.flags.insert(ClientFlags::DEAD);
+    crate::tsp::broker::client_sync(server, id);
 
     crate::ui::status::status_prompt_clear(server, id);
     crate::ui::status::status_message_clear(server, id);
@@ -404,10 +406,20 @@ pub fn lost(server: &mut Server, id: ClientId) {
         crate::control::stop(server, id);
     }
     {
-        let Server { clients, tparm, .. } = server;
+        let Server {
+            clients,
+            tparm,
+            event_loop,
+            ..
+        } = server;
         let Some(c) = clients.get_mut(id) else {
             return;
         };
+        // tty_free: event_del on the fd and the four timers before close.
+        if let Some(token) = c.tty_token.take() {
+            event_loop.deregister(token);
+        }
+        c.tty_timers.cancel_all(event_loop);
         if c.flags.intersects(ClientFlags::TERMINAL)
             && let Some(mut tty) = c.tty.take()
         {
@@ -422,6 +434,7 @@ pub fn lost(server: &mut Server, id: ClientId) {
         c.term_caps = Vec::new();
         c.status = Default::default();
     }
+    crate::tsp::broker::client_sync(server, id);
     crate::client::input_requests::cancel_all(server, id);
 
     let Some(c) = server.clients.get_mut(id) else {
@@ -497,10 +510,7 @@ pub fn retain(server: &mut Server, id: ClientId) -> Result<(), ArenaError> {
 /// here, like the final `free(c)` at `server-client.c:481`.
 pub fn release(server: &mut Server, id: ClientId) -> Result<(), ArenaError> {
     if let Some(client) = server.clients.release(id)? {
-        log_debug!(
-            "free client {} (0 references)",
-            String::from_utf8_lossy(client.name_bytes())
-        );
+        log_debug!("free client {} (0 references)", client_label_from(&client));
         drop(client);
     }
     Ok(())
@@ -509,9 +519,19 @@ pub fn release(server: &mut Server, id: ClientId) -> Result<(), ArenaError> {
 /// `%p` of the C logs is the client name in rmux logs (the harness greps
 /// `lost client <name>`), with the id for unnamed clients.
 fn client_label(server: &Server, id: ClientId) -> String {
-    match server.clients.get(id).and_then(|c| c.name.as_deref()) {
-        Some(name) => String::from_utf8_lossy(name).into_owned(),
-        None => format!("{id:?}"),
+    server
+        .clients
+        .get(id)
+        .map_or_else(|| format!("{id:?}"), client_label_from)
+}
+
+fn client_label_from(client: &Client) -> String {
+    if let Some(name) = client.name.as_deref() {
+        String::from_utf8_lossy(name).into_owned()
+    } else if let Some(pid) = client.pid {
+        format!("client-{}", pid.0)
+    } else {
+        String::new()
     }
 }
 
@@ -558,6 +578,7 @@ pub fn suspend(server: &mut Server, id: ClientId) {
             ProtocolMessage::new(ProtocolMessageKind::Suspend, Vec::new()),
         );
     }
+    crate::client::tty_io::sync(server, id);
 }
 
 /// `server_client_detach` (`server-client.c:500-513`): `kill_parent` picks

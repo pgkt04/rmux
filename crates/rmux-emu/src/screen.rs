@@ -225,6 +225,7 @@ impl TryFrom<i32> for BorderCell {
     }
 }
 
+mod anchors;
 pub mod borders;
 mod cell_write;
 mod collect;
@@ -295,9 +296,9 @@ pub struct Screen {
     pub write_list: Vec<write::ScreenWriteLine>,
     pub reset_policy: ScreenResetPolicy,
     #[cfg(feature = "sixel")]
-    images: ImageOwnerId,
+    images: Option<ImageOwnerId>,
     #[cfg(feature = "sixel")]
-    saved_images: ImageOwnerId,
+    saved_images: Option<ImageOwnerId>,
 }
 
 impl Screen {
@@ -307,7 +308,6 @@ impl Screen {
         hlimit: u32,
         policy: ScreenResetPolicy,
         registry: &mut HyperlinkRegistry,
-        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
     ) -> Result<Self, HyperlinkError> {
         let mut screen = Self {
             grid: Grid::new(sx, sy, hlimit),
@@ -338,16 +338,16 @@ impl Screen {
             write_list: Vec::new(),
             reset_policy: policy,
             #[cfg(feature = "sixel")]
-            images: images.create_owner(),
+            images: None,
             #[cfg(feature = "sixel")]
-            saved_images: images.create_owner(),
+            saved_images: None,
         };
         screen.reinit(
             true,
             policy,
             registry,
             #[cfg(feature = "sixel")]
-            images,
+            None,
         )?;
         Ok(screen)
     }
@@ -355,15 +355,23 @@ impl Screen {
     pub fn release(
         &mut self,
         registry: &mut HyperlinkRegistry,
-        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+        #[cfg(feature = "sixel")] images: Option<&mut ImageRegistry>,
     ) -> Result<(), HyperlinkError> {
         #[cfg(feature = "sixel")]
-        {
-            images.release_owner(self.images);
-            images.release_owner(self.saved_images);
+        if let Some(owner) = self.images {
+            let images = images.expect("image-owned screen requires its registry");
+            images.release_owner(owner);
+            images.release_owner(self.saved_images.expect("saved image owner"));
+            self.images = None;
+            self.saved_images = None;
         }
         if let Some(links) = self.hyperlinks.take() {
             registry.release(links)?;
+        }
+        self.clear_surface_anchors();
+        if let Some(saved) = &mut self.saved_grid {
+            self.grid
+                .record_surface_anchor_removals(saved.drain_surface_anchor_removals());
         }
         self.saved_grid = None;
         self.selection = None;
@@ -380,9 +388,10 @@ impl Screen {
         check: bool,
         policy: ScreenResetPolicy,
         registry: &mut HyperlinkRegistry,
-        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+        #[cfg(feature = "sixel")] mut images: Option<&mut ImageRegistry>,
     ) -> Result<(), HyperlinkError> {
         self.reset_policy = policy;
+        self.clear_surface_anchors();
         self.cx = 0;
         self.cy = 0;
         self.rupper = 0;
@@ -396,11 +405,9 @@ impl Screen {
                 None,
                 false,
                 #[cfg(feature = "sixel")]
-                images,
+                images.as_deref_mut(),
             );
         }
-        #[cfg(feature = "sixel")]
-        images.free_all(self.images);
         self.saved_cursor = None;
         self.reset_tabs();
         if check {
@@ -410,6 +417,8 @@ impl Screen {
             .clear_lines(self.grid.hsize(), self.grid.sy(), Colour(8));
         self.clear_selection();
         self.titles.0.clear();
+        #[cfg(feature = "sixel")]
+        self.clear_images(images);
         self.set_progress_bar(ProgressBarState::Hidden, 0);
         self.reset_hyperlinks(registry)
     }
@@ -480,7 +489,7 @@ impl Screen {
         sx: u32,
         sy: u32,
         reflow: bool,
-        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+        #[cfg(feature = "sixel")] images: Option<&mut ImageRegistry>,
     ) {
         self.resize_cursor(
             sx,
@@ -499,13 +508,11 @@ impl Screen {
         mut reflow: bool,
         eat_empty: bool,
         cursor: bool,
-        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+        #[cfg(feature = "sixel")] images: Option<&mut ImageRegistry>,
     ) {
         let (mut cx, mut cy) = (self.cx, self.grid.hsize() + self.cy);
         let had_write_list = !self.write_list.is_empty();
         self.write_list.clear();
-        #[cfg(feature = "sixel")]
-        images.free_all(self.images);
         let (sx, sy) = (sx.max(1), sy.max(1));
         if sx != self.grid.sx() {
             self.grid.set_sx(sx);
@@ -516,6 +523,8 @@ impl Screen {
         if sy != self.grid.sy() {
             self.resize_y(sy, eat_empty, &mut cy);
         }
+        #[cfg(feature = "sixel")]
+        self.clear_images(images);
         if reflow {
             let position = cursor.then(|| self.grid.wrap_position(cx, cy));
             self.grid.reflow(sx);
@@ -540,7 +549,17 @@ impl Screen {
         if sy < oldy {
             let mut needed = oldy - sy;
             if eat_empty {
-                let available = (oldy - 1 - self.cy).min(needed);
+                let mut available = (oldy - 1 - self.cy).min(needed);
+                for row in oldy - available..oldy {
+                    if self
+                        .grid
+                        .get_line(self.grid.hsize() + row)
+                        .surface_anchor()
+                        .is_some()
+                    {
+                        available = available.min(oldy - 1 - row);
+                    }
+                }
                 if available > 0 {
                     self.grid
                         .view_delete_lines(oldy - available, available, Colour(8));
@@ -579,8 +598,25 @@ impl Screen {
     }
 
     #[cfg(feature = "sixel")]
-    pub fn image_owner(&self) -> ImageOwnerId {
+    pub fn bind_images(&mut self, images: &mut ImageRegistry) {
+        assert!(
+            self.images.is_none() && !self.is_alternate(),
+            "screen already bound or alternate"
+        );
+        self.images = Some(images.create_owner());
+        self.saved_images = Some(images.create_owner());
+    }
+    #[cfg(feature = "sixel")]
+    pub fn image_owner(&self) -> Option<ImageOwnerId> {
         self.images
+    }
+    #[cfg(feature = "sixel")]
+    fn clear_images(&mut self, images: Option<&mut ImageRegistry>) {
+        if let Some(owner) = self.images {
+            images
+                .expect("image-owned screen requires its registry")
+                .free_all(owner);
+        }
     }
 
     pub fn is_alternate(&self) -> bool {
@@ -590,13 +626,21 @@ impl Screen {
         &mut self,
         cell: &GridCell,
         cursor: bool,
-        #[cfg(feature = "sixel")] _images: &mut ImageRegistry,
+        #[cfg(feature = "sixel")] images: Option<&mut ImageRegistry>,
     ) -> bool {
         if self.is_alternate() {
             return false;
         }
+        #[cfg(feature = "sixel")]
+        assert!(
+            self.images.is_none() || images.is_some(),
+            "image-owned screen requires its registry"
+        );
         let mut saved = Grid::new(self.grid.sx(), self.grid.sy(), 0);
         saved.duplicate_lines(0, &self.grid, self.grid.hsize(), self.grid.sy());
+        let first = self.grid.hsize();
+        let count = self.grid.sy();
+        saved.transfer_surface_anchors(0, &mut self.grid, first, count);
         self.saved_grid = Some(saved);
         if cursor {
             self.saved_cursor = Some((self.cx, self.cy));
@@ -614,8 +658,13 @@ impl Screen {
         &mut self,
         cell: Option<&mut GridCell>,
         cursor: bool,
-        #[cfg(feature = "sixel")] images: &mut ImageRegistry,
+        #[cfg(feature = "sixel")] mut images: Option<&mut ImageRegistry>,
     ) -> bool {
+        #[cfg(feature = "sixel")]
+        assert!(
+            self.images.is_none() || images.is_some(),
+            "image-owned screen requires its registry"
+        );
         let (sx, sy) = (self.grid.sx(), self.grid.sy());
         if let Some(saved) = &self.saved_grid {
             let size = (saved.sx(), saved.sy());
@@ -624,7 +673,7 @@ impl Screen {
                 size.1,
                 false,
                 #[cfg(feature = "sixel")]
-                images,
+                images.as_deref_mut(),
             );
         }
         if cursor && let Some((cx, cy)) = self.saved_cursor {
@@ -635,9 +684,13 @@ impl Screen {
             }
         }
         let alternate = self.is_alternate();
-        if let Some(saved) = &self.saved_grid {
+        if let Some(mut saved) = self.saved_grid.take() {
             self.grid
-                .duplicate_lines(self.grid.hsize(), saved, 0, saved.sy());
+                .duplicate_lines(self.grid.hsize(), &saved, 0, saved.sy());
+            let first = self.grid.hsize();
+            let count = saved.sy();
+            self.grid
+                .transfer_surface_anchors(first, &mut saved, 0, count);
             if self.saved_flags.contains(GridFlags::HISTORY) {
                 self.grid.flags.insert(GridFlags::HISTORY);
             }
@@ -646,12 +699,11 @@ impl Screen {
                 sy,
                 true,
                 #[cfg(feature = "sixel")]
-                images,
+                images.as_deref_mut(),
             );
-            self.saved_grid = None;
             #[cfg(feature = "sixel")]
             {
-                images.free_all(self.images);
+                self.clear_images(images);
                 std::mem::swap(&mut self.images, &mut self.saved_images);
             }
         }

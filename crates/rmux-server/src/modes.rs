@@ -79,5 +79,14 @@ impl TryFrom<i32> for PaneModeKind {
     }
 }
 
+pub mod buffer;
+pub mod client;
+pub mod clock;
 pub mod command;
+pub mod copy;
+pub mod customize;
+pub mod panes;
+pub mod switch;
+pub mod tree;
+pub mod window_tree;
 pub use command::{CommandModeRequest, run_mode_command};

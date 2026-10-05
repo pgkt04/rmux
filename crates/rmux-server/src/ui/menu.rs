@@ -338,7 +338,14 @@ pub fn menu_update(srv: &mut Server, w: WindowId) {
         ..
     } = md;
     let mut sink = ScreenOnlySink;
-    let mut ctx = ScreenWriteCtx::start(screen, &mut sink, ScreenWritePolicy::default(), registry);
+    let mut ctx = ScreenWriteCtx::start(
+        screen,
+        &mut sink,
+        ScreenWritePolicy::default(),
+        registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.clearscreen(Colour::DEFAULT);
     if *border_lines != BoxLines::None {
         draw_box(
@@ -367,7 +374,11 @@ fn menu_free_data(srv: &mut Server, mut md: MenuData) {
     if let Some(cb) = md.cb.take() {
         cb(srv, &md.menu, None, KeyCode(SpecialKey::NONE));
     }
-    let _ = md.screen.release(&mut md.registry);
+    let _ = md.screen.release(
+        &mut md.registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
 }
 
 pub fn menu_close(srv: &mut Server, w: WindowId) {

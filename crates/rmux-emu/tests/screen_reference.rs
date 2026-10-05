@@ -66,6 +66,10 @@ impl TtySink for DrawLog {
             DrawCommand::SetSelection { .. } | DrawCommand::RawString { .. } => {
                 panic!("unexpected draw in the reference corpus")
             }
+            #[cfg(feature = "sixel")]
+            DrawCommand::SixelImage { .. } => {
+                panic!("unexpected image draw in text-only reference corpus")
+            }
         };
         writeln!(
             self.0.borrow_mut(),
@@ -359,7 +363,13 @@ fn rust_script(script: &str) -> String {
                 let (width, height, limit) = (tokens.number(), tokens.number(), tokens.number());
                 policy.extended_keys = tokens.boolean();
                 policy.variation_selector_always_wide = tokens.boolean();
-                screen.release(&mut registry).unwrap();
+                screen
+                    .release(
+                        &mut registry,
+                        #[cfg(feature = "sixel")]
+                        None,
+                    )
+                    .unwrap();
                 screen = Screen::new(
                     width,
                     height,
@@ -373,8 +383,14 @@ fn rust_script(script: &str) -> String {
                 rendition = DEFAULT_CELL;
             }
             "begin" => {
-                let mut writer =
-                    ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+                let mut writer = ScreenWriteCtx::start(
+                    &mut screen,
+                    &mut sink,
+                    policy,
+                    &mut registry,
+                    #[cfg(feature = "sixel")]
+                    None,
+                );
                 writer_script(&mut writer, &mut lines, &mut rendition, &output, &mut step);
                 writer.finish();
                 dump(&mut output.borrow_mut(), &screen, &mut step);
@@ -386,6 +402,8 @@ fn rust_script(script: &str) -> String {
                 tokens.boolean(),
                 tokens.boolean(),
                 tokens.boolean(),
+                #[cfg(feature = "sixel")]
+                None,
             ),
             "reinit" => screen
                 .reinit(
@@ -394,13 +412,25 @@ fn rust_script(script: &str) -> String {
                         extended_keys: policy.extended_keys,
                     },
                     &mut registry,
+                    #[cfg(feature = "sixel")]
+                    None,
                 )
                 .unwrap(),
             "on" => {
-                screen.alternate_on(&rendition, tokens.boolean());
+                screen.alternate_on(
+                    &rendition,
+                    tokens.boolean(),
+                    #[cfg(feature = "sixel")]
+                    None,
+                );
             }
             "off" => {
-                screen.alternate_off(Some(&mut rendition), tokens.boolean());
+                screen.alternate_off(
+                    Some(&mut rendition),
+                    tokens.boolean(),
+                    #[cfg(feature = "sixel")]
+                    None,
+                );
             }
             "rendition" => rendition = tokens.cell(),
             "history" => {
@@ -425,7 +455,13 @@ fn rust_script(script: &str) -> String {
             _ => panic!("unknown screen operation: {line}"),
         }
     }
-    screen.release(&mut registry).unwrap();
+    screen
+        .release(
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
     output.take()
 }
 
@@ -812,6 +848,8 @@ fn structural_draws_borrow_new_grid_and_keep_old_cursor_snapshot() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     let mut cell = DEFAULT_CELL;
     cell.data = Utf8Data::set(b'A');
@@ -839,5 +877,11 @@ fn structural_draws_borrow_new_grid_and_keep_old_cursor_snapshot() {
         sink.draws.iter().filter(|draw| draw.name == "sync").count(),
         1
     );
-    screen.release(&mut registry).unwrap();
+    screen
+        .release(
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        )
+        .unwrap();
 }

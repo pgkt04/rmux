@@ -34,6 +34,8 @@ pub enum LoopAction {
     FilePush(ClientFileId),
     ControlRead(ClientId),
     ControlWrite(ClientId),
+    ClientTty(ClientId),
+    ClientTtyTimer(ClientId, rmux_tty::tty::TtyTimer),
     ClientRepeatTimer(ClientId),
     ClientClickTimer(ClientId),
     ClientExitTimer(ClientId),
@@ -45,6 +47,7 @@ pub enum LoopAction {
     WindowSilence(WindowId),
     PaneInputTimer(PaneId, crate::model::pane_input::InputTimer),
     PaneScrollbar(PaneId),
+    CopyTimer(crate::modes::copy::CopyTimerAction),
     AlertsCheck,
     PaneResizeTimer(PaneId),
     RedrawTimer,
@@ -68,6 +71,7 @@ struct Registration {
     write: bool,
     registered: bool,
     null: bool,
+    fifo: bool,
 }
 struct Timer {
     action: LoopAction,
@@ -81,6 +85,22 @@ pub struct EventLoop {
     deadlines: BinaryHeap<Reverse<(Instant, u64, TimerId)>>,
     sequence: u64,
     immediate: Vec<EventToken>,
+    fifos: Vec<EventToken>,
+    fifo_fds: Vec<RawFd>,
+    fifo_ready: Vec<bool>,
+}
+/// macOS kqueue never posts EV_EOF for a named FIFO whose writers closed
+/// (poll(2) is silent too; osdep-darwin.c:98-107 forces libevent to select
+/// for this reason), so FIFO readers are also checked with select(2) at
+/// this interval while any is registered for reading.
+const FIFO_EOF_INTERVAL: Duration = Duration::from_millis(50);
+/// Descriptors needing the select(2) supplement on this platform.
+fn needs_fifo_supplement(fd: BorrowedFd<'_>) -> io::Result<bool> {
+    if cfg!(target_os = "macos") {
+        rmux_sys::server::descriptor_is_fifo(fd)
+    } else {
+        Ok(false)
+    }
 }
 fn interest(read: bool, write: bool) -> Option<Interest> {
     match (read, write) {
@@ -108,6 +128,9 @@ impl EventLoop {
             deadlines: BinaryHeap::new(),
             sequence: 0,
             immediate: Vec::new(),
+            fifos: Vec::new(),
+            fifo_fds: Vec::new(),
+            fifo_ready: Vec::new(),
         })
     }
     pub fn register(
@@ -124,6 +147,7 @@ impl EventLoop {
                 "regular files require direct bounded I/O",
             ));
         }
+        let fifo = needs_fifo_supplement(fd)?;
         let id = self
             .registrations
             .insert(Registration {
@@ -133,8 +157,12 @@ impl EventLoop {
                 write,
                 registered: false,
                 null: false,
+                fifo,
             })
             .map_err(arena_error)?;
+        if fifo {
+            self.fifos.push(id);
+        }
         let key = token(id);
         if let Some(interest) = interest(read, write) {
             match self
@@ -217,6 +245,9 @@ impl EventLoop {
             }
         }
         self.tokens.remove(&token(id));
+        if self.registrations.get(id).is_some_and(|r| r.fifo) {
+            self.fifos.retain(|f| *f != id);
+        }
         let _ = self.registrations.request_remove(id);
     }
     pub fn schedule(&mut self, delay: Duration, action: LoopAction) -> TimerId {
@@ -284,10 +315,13 @@ impl EventLoop {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),
         };
-        let timeout = if self.immediate.is_empty() {
+        self.scan_fifos();
+        let timeout = if !self.immediate.is_empty() {
+            Some(Duration::ZERO)
+        } else if self.fifo_fds.is_empty() {
             timeout
         } else {
-            Some(Duration::ZERO)
+            Some(timeout.map_or(FIFO_EOF_INTERVAL, |t| t.min(FIFO_EOF_INTERVAL)))
         };
         if let Err(e) = self.poll.poll(&mut self.events, timeout) {
             if e.kind() != io::ErrorKind::Interrupted {
@@ -318,7 +352,55 @@ impl EventLoop {
                 });
             }
         }
+        self.fifo_readable(out)?;
         self.expired(Instant::now(), out);
+        Ok(())
+    }
+    /// Collect FIFO readers kqueue watches for data but not for EOF.
+    fn scan_fifos(&mut self) {
+        self.fifo_fds.clear();
+        let registrations = &self.registrations;
+        self.fifos.retain(|id| {
+            let Some(r) = registrations.get(*id) else {
+                return false;
+            };
+            if r.read && r.registered {
+                self.fifo_fds.push(r.fd);
+            }
+            true
+        });
+    }
+    /// select(2) readiness for FIFO readers; adds entries kqueue missed.
+    fn fifo_readable(&mut self, out: &mut Vec<LoopReady>) -> io::Result<()> {
+        if self.fifo_fds.is_empty() {
+            return Ok(());
+        }
+        self.fifo_ready.resize(self.fifo_fds.len(), false);
+        rmux_sys::server::select_readable(&self.fifo_fds, &mut self.fifo_ready)?;
+        for (fd, ready) in self.fifo_fds.iter().zip(&self.fifo_ready) {
+            if !ready {
+                continue;
+            }
+            let Some(r) = self
+                .fifos
+                .iter()
+                .filter_map(|id| self.registrations.get(*id))
+                .find(|r| r.fd == *fd)
+            else {
+                continue;
+            };
+            if out
+                .iter()
+                .any(|ready| ready.readable && ready.action == r.action)
+            {
+                continue;
+            }
+            out.push(LoopReady {
+                action: r.action.clone(),
+                readable: true,
+                writable: false,
+            });
+        }
         Ok(())
     }
 }
@@ -421,5 +503,38 @@ mod tests {
             assert!(ready[0].readable && ready[0].writable);
         }
         e.deregister(id);
+    }
+    #[test]
+    fn named_fifo_writer_close_is_reported_readable() {
+        use std::os::{fd::AsFd, unix::fs::OpenOptionsExt};
+        let dir = std::env::temp_dir().join(format!("rmux-fifo-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("fifo");
+        rmux_sys::server::make_fifo(path.as_os_str().as_encoded_bytes(), 0o600).unwrap();
+        let reader = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(&path)
+            .unwrap();
+        let writer = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let mut e = EventLoop::new().unwrap();
+        let id = e
+            .register(reader.as_fd(), true, false, LoopAction::Deferred(1))
+            .unwrap();
+        // Nothing pending: the bounded wait returns without readiness.
+        let ready = e.poll(Some(Duration::from_millis(10))).unwrap();
+        assert!(ready.iter().all(|r| !r.readable));
+        drop(writer);
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut seen = false;
+        while Instant::now() < deadline && !seen {
+            let ready = e.poll(Some(Duration::from_millis(100))).unwrap();
+            seen = ready
+                .iter()
+                .any(|r| r.readable && r.action == LoopAction::Deferred(1));
+        }
+        assert!(seen, "FIFO EOF never became readable");
+        e.deregister(id);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -111,7 +111,7 @@ const fn hook(name: &'static [u8], scope: OptionsScope, text: &'static [u8]) -> 
     }
 }
 
-/// `options_table[]` without the NULL sentinel: 269 live entries in source order.
+/// `options_table[]` without the NULL sentinel.
 pub static OPTIONS_TABLE: &[OptionsTableEntry] = &[
     OptionsTableEntry {
         name: b"backspace",

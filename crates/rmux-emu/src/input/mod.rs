@@ -19,9 +19,10 @@
 //!
 //! Pinned quirks kept on purpose: an open UTF-8 sequence survives escape
 //! sequences until print or C0 stops it (2.6); `0x7f-0xff` is ignored in ESC,
-//! CSI and DCS prefix states; `since_ground` grows without limit while a
-//! sequence is unterminated (2.4); reset and the ground timeout keep pending
-//! bytes and the partial UTF-8 state.
+//! CSI and DCS prefix states; legacy `since_ground` grows without limit while
+//! unterminated (2.4); reset and timeout keep pending bytes and partial UTF-8.
+//! TSP APC has its own bounded collection, commits only at 7-bit ST and drains
+//! cancelled/overlong payloads without feeding them into titles or grid cells.
 
 mod c0_esc;
 mod csi;
@@ -48,6 +49,8 @@ use states::{Enter, Exit, Handler, StateId, Transition};
 
 /// `INPUT_BUF_START` (`input.c:117`).
 const STRING_START: usize = 32;
+/// Standard TSP payload limit, independent of `input-buffer-size`.
+pub const TSP_APC_LIMIT: usize = 262_144;
 const FLAG_DISCARD: u8 = 0x1;
 const FLAG_LAST: u8 = 0x2;
 
@@ -111,6 +114,8 @@ impl Default for InputCell {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Pending {
     Reply,
+    TspMessage,
+    TerminalReset,
     Request(InputRequestKind, InputEnd),
     ClipboardQuery(u8, InputEnd),
     ClipboardReceived,
@@ -204,6 +209,7 @@ pub struct InputCtx {
     string: Vec<u8>,
     string_space: usize,
     string_end: InputEnd,
+    apc_prefix: Option<u8>,
     utf8: Utf8Data,
     utf8_started: bool,
     ch: u8,
@@ -239,6 +245,7 @@ impl InputCtx {
             string: Vec::with_capacity(STRING_START),
             string_space: STRING_START,
             string_end: InputEnd::St,
+            apc_prefix: None,
             utf8: Utf8Data::default(),
             utf8_started: false,
             ch: 0,
@@ -258,6 +265,7 @@ impl InputCtx {
     /// `input_reset` (`input.c:927-947`): `Some` performs the writer reset.
     /// Pending bytes, partial UTF-8 state and the saved mode stay intact.
     pub fn reset(&mut self, sw: Option<&mut ScreenWriteCtx<'_>>, sink: &mut dyn InputSink) {
+        let tsp_incomplete = self.state.is_tsp().then_some(self.state);
         self.reset_cell();
         if let Some(sw) = sw {
             let policy = sw.screen.reset_policy;
@@ -269,15 +277,30 @@ impl InputCtx {
         self.state = StateId::Ground;
         self.flags = 0;
         self.resume = None;
+        if let Some(state) = tsp_incomplete {
+            self.state = if matches!(state, StateId::TspEscape | StateId::TspDiscardEscape) {
+                StateId::TspDiscardEscape
+            } else {
+                StateId::TspDiscard
+            };
+        }
     }
-    /// `input_ground_timer_callback` resets state without clearing the screen.
+    /// Ground timeout drops an incomplete string; recognized TSP drains to ST.
     pub fn ground_timeout(&mut self) {
+        let tsp_incomplete = self.state.is_tsp().then_some(self.state);
         self.reset_cell();
         self.clear();
         self.timer_armed = false;
         self.state = StateId::Ground;
         self.flags = 0;
         self.resume = None;
+        if let Some(state) = tsp_incomplete {
+            self.state = if matches!(state, StateId::TspEscape | StateId::TspDiscardEscape) {
+                StateId::TspDiscardEscape
+            } else {
+                StateId::TspDiscard
+            };
+        }
     }
 
     /// `input_pending` (`input.c:951-954`).
@@ -337,6 +360,11 @@ impl InputCtx {
             }
             self.ch = bytes[consumed];
             consumed += 1;
+            if self.state == StateId::ApcString {
+                self.apc_prefix = self.apc_prefix.and_then(|index| {
+                    (b"tsp;"[usize::from(index)] == self.ch).then_some(index + 1)
+                });
+            }
             let transition = states::transition(self.state, self.ch);
             if transition.handler != Some(Handler::Print) {
                 env.sw.collect_end();
@@ -355,6 +383,10 @@ impl InputCtx {
     fn materialize(&self, pending: Pending) -> InputEffect<'_> {
         match pending {
             Pending::Reply => InputEffect::Reply(&self.scratch),
+            Pending::TspMessage => InputEffect::TspMessage {
+                payload: &self.string,
+            },
+            Pending::TerminalReset => InputEffect::TerminalReset,
             Pending::Request(kind, end) => InputEffect::Request { kind, end },
             Pending::ClipboardQuery(clip, end) => InputEffect::ClipboardQuery { clip, end },
             Pending::ClipboardReceived => InputEffect::ClipboardReceived {
@@ -419,7 +451,9 @@ impl InputCtx {
                     continue;
                 }
                 Phase::Append => {
-                    if self.state != StateId::Ground {
+                    if self.state != StateId::Ground
+                        && (!self.state.is_tsp() || self.since_ground.len() < TSP_APC_LIMIT + 6)
+                    {
                         self.since_ground.push(self.ch);
                     }
                     self.resume = None;
@@ -471,10 +505,8 @@ impl InputCtx {
                 Flow::Done
             }
             Some(Handler::C0Dispatch) => self.c0_dispatch(env),
-            Some(Handler::EscDispatch) => {
-                self.esc_dispatch(env);
-                Flow::Done
-            }
+            Some(Handler::EscDispatch) => self.esc_dispatch(env),
+            Some(Handler::TspDispatch) => Flow::Yield(Pending::TspMessage, Sub::Done),
             Some(Handler::CsiDispatch) => self.csi_dispatch(sub, env),
             Some(Handler::DcsDispatch) => self.dcs_dispatch(env),
         }
@@ -509,6 +541,9 @@ impl InputCtx {
             }
             Some(Enter::Dcs | Enter::Osc | Enter::Apc | Enter::Rename) => {
                 self.clear();
+                if enter == Some(Enter::Apc) {
+                    self.apc_prefix = Some(0);
+                }
                 self.flags &= !FLAG_LAST;
                 self.timer_armed = true;
                 Some(Pending::GroundTimer(true))
@@ -540,6 +575,7 @@ impl InputCtx {
         self.param_buf.clear();
         self.string.clear();
         self.string_end = InputEnd::St;
+        self.apc_prefix = None;
         self.flags &= !FLAG_DISCARD;
     }
 
@@ -609,6 +645,15 @@ impl InputCtx {
     /// `input_input` (`input.c:1281-1299`): logical capacity doubles until
     /// `buffer_limit`.
     fn input(&mut self, buffer_limit: usize) {
+        if self.state == StateId::TspString {
+            if self.string.len() == TSP_APC_LIMIT {
+                self.string.clear();
+                self.state = StateId::TspDiscard;
+            } else {
+                self.string.push(self.ch);
+            }
+            return;
+        }
         let mut available = self.string_space;
         while self.string.len() + 1 >= available {
             available *= 2;
@@ -619,6 +664,9 @@ impl InputCtx {
             self.string_space = available;
         }
         self.string.push(self.ch);
+        if self.state == StateId::ApcString && self.apc_prefix == Some(4) {
+            self.state = StateId::TspString;
+        }
     }
 
     /// `input_top_bit_set` (`input.c:2857-2892`).

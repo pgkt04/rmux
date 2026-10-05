@@ -24,11 +24,13 @@
 
 mod keyboard;
 mod mouse;
+mod protocol;
 mod reply;
 pub(crate) mod scan;
 pub mod tables;
 mod tree;
 
+use std::collections::VecDeque;
 use std::time::Duration;
 
 use crate::term::{TtyCodeCode, TtyTerm};
@@ -40,6 +42,7 @@ use rmux_util::key::{KeyCode, KeyFlags, KeyMasks, KeyModifiers, MouseEvent, Spec
 use rmux_util::utf8::{self, Utf8Data, Utf8State};
 
 pub use mouse::MouseLast;
+pub use protocol::{Da1Owner, MAX_TSP_INPUT_BODY, ProtocolFault};
 pub use tree::{TtyKey, UNKNOWN};
 
 /// `KEYC_MOUSE`: the unclassified mouse key the decoder emits.
@@ -52,6 +55,9 @@ pub struct TtyKeyDecoder {
     bracket_paste: bool,
     mouse_last: MouseLast,
     timer: TimerPhase,
+    protocol: protocol::ProtocolInput,
+    sentinel: protocol::SentinelInput,
+    da1_owners: VecDeque<Da1Owner>,
 }
 
 /// `TTY_TIMER` and the libevent pending state (`tty-keys.c:983-989`).
@@ -232,6 +238,14 @@ pub enum TtyInput<'a> {
     Colour(ColourReply),
     Discovery(Discovery),
     Size(SizeReply),
+    Tsp {
+        verb: u8,
+        body: &'a [u8],
+    },
+    Da1Sentinel {
+        raw: &'a [u8],
+    },
+    ProtocolFault(ProtocolFault),
 }
 
 /// The result of one `tty_keys_next` call.
@@ -335,6 +349,7 @@ impl TtyKeyDecoder {
     pub fn clear(&mut self) {
         self.tree = tree::KeyTree::default();
         self.timer = TimerPhase::Idle;
+        self.reset_protocol();
     }
 
     pub fn nodes(&self) -> &[TtyKey] {
@@ -372,6 +387,39 @@ impl TtyKeyDecoder {
     /// Cancel the key timer (`evtimer_del` plus clearing `TTY_TIMER`).
     pub fn reset_timer(&mut self) {
         self.timer = TimerPhase::Idle;
+    }
+
+    pub fn protocol_timer_fired(&mut self) {
+        self.protocol.expire();
+        self.sentinel.expire();
+    }
+
+    pub fn protocol_partial(&self) -> bool {
+        self.protocol.active()
+    }
+
+    pub fn reset_protocol(&mut self) {
+        self.protocol = protocol::ProtocolInput::default();
+        self.sentinel = protocol::SentinelInput::default();
+        self.da1_owners.clear();
+    }
+
+    pub(crate) fn own_da1(&mut self, owner: Da1Owner) {
+        self.da1_owners.push_back(owner);
+    }
+
+    pub fn resolve_da1(&mut self) -> Option<Da1Owner> {
+        self.da1_owners.pop_front()
+    }
+
+    pub(crate) fn cancel_da1(&mut self, owner: Da1Owner) {
+        if let Some(index) = self.da1_owners.iter().position(|&pending| pending == owner) {
+            self.da1_owners.remove(index);
+        }
+    }
+
+    pub fn pending_da1(&self) -> impl Iterator<Item = Da1Owner> + '_ {
+        self.da1_owners.iter().copied()
     }
 
     /// `tty_keys_next1` (`tty-keys.c:618-673`): tree lookup, then UTF-8.
@@ -539,12 +587,39 @@ impl TtyKeyDecoder {
             return DecodeStep::Empty;
         }
 
+        if let Some(step) = self.protocol.next(buf) {
+            if !matches!(step, DecodeStep::Partial { .. }) {
+                self.timer = TimerPhase::Idle;
+            }
+            return step;
+        }
+        if !self.da1_owners.is_empty() || ctx.flags.contains(TtyFlags::HAVEDA) {
+            if let Some(step) = self.sentinel.next(buf) {
+                if !matches!(step, DecodeStep::Partial { .. }) {
+                    self.timer = TimerPhase::Idle;
+                }
+                return step;
+            }
+            if let Recognition::Complete(size, _) = protocol::da1(buf) {
+                return self.complete(size, TtyInput::Da1Sentinel { raw: &buf[..size] });
+            }
+        }
         // With no session there is nowhere to send input.
         if !ctx.has_session {
+            if buf == b"\x1b" && self.timer != TimerPhase::Fired {
+                return self.partial(buf, ctx, false);
+            }
             let cancel_timer = self.timer != TimerPhase::Idle;
             self.timer = TimerPhase::Idle;
             return DecodeStep::Discard {
-                consumed: buf.len(),
+                consumed: (1..buf.len())
+                    .find(|&index| {
+                        let remaining = &buf[index..];
+                        let prefix = b"\x1b_tsp;";
+                        let n = remaining.len().min(prefix.len());
+                        remaining[..n] == prefix[..n]
+                    })
+                    .unwrap_or(buf.len()),
                 cancel_timer,
             };
         }
@@ -625,6 +700,12 @@ pub fn parse_colour_response(buf: &[u8]) -> Recognition<ColourReply> {
         return Recognition::NoMatch;
     }
     reply::colours(buf)
+}
+
+/// Decode discovery features from an owned DA1 without changing HAVEDA.
+pub fn parse_primary_da(buf: &[u8]) -> Recognition<Discovery> {
+    let ctx = KeyDecodeContext::default();
+    reply::device_attributes(buf, &ctx)
 }
 
 /// The `TimerRequest` that cancels the key timer, for adapters applying

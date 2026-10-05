@@ -205,6 +205,8 @@ fn render(bytes: &[u8]) -> Vec<String> {
                 ..ScreenWritePolicy::default()
             },
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         let policy = InputPolicy {
             has_pane: false,

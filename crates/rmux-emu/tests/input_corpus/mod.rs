@@ -6,6 +6,8 @@
 
 use rmux_emu::colour::ColourPalette;
 use rmux_emu::hyperlinks::HyperlinkRegistry;
+#[cfg(feature = "sixel")]
+use rmux_emu::image::ImageRegistry;
 use rmux_emu::input::dump;
 use rmux_emu::input::{InputCtx, InputPolicy, NullSink};
 use rmux_emu::screen::write::{ScreenOnlySink, ScreenWriteCtx, ScreenWritePolicy};
@@ -18,6 +20,8 @@ use super::common::Rng;
 /// `scroll-on-clear on` (`options-table.c:1693-1696`), `extended-keys off`.
 pub struct Emu {
     pub registry: HyperlinkRegistry,
+    #[cfg(feature = "sixel")]
+    pub images: ImageRegistry,
     pub screen: Screen,
     pub palette: ColourPalette,
     pub ictx: InputCtx,
@@ -29,8 +33,17 @@ impl Emu {
         let mut registry = HyperlinkRegistry::new();
         let screen = Screen::new(sx, sy, hlimit, ScreenResetPolicy::default(), &mut registry)
             .expect("screen");
+        #[cfg(feature = "sixel")]
+        let (screen, images) = {
+            let mut screen = screen;
+            let mut images = ImageRegistry::default();
+            screen.bind_images(&mut images);
+            (screen, images)
+        };
         Emu {
             registry,
+            #[cfg(feature = "sixel")]
+            images,
             screen,
             palette: ColourPalette::new(),
             ictx: InputCtx::new(),
@@ -53,6 +66,8 @@ impl Emu {
             &mut tty,
             Self::write_policy(),
             &mut self.registry,
+            #[cfg(feature = "sixel")]
+            Some(&mut self.images),
         );
         self.ictx.parse(
             &mut sw,

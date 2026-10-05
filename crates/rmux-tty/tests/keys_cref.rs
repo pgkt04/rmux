@@ -439,6 +439,9 @@ impl Sim {
                     self.flags.remove(TtyFlags::WINSIZEQUERY);
                 }
             }
+            TtyInput::Tsp { .. } | TtyInput::Da1Sentinel { .. } | TtyInput::ProtocolFault(_) => {
+                panic!("TSP and owned/late DA1 use dedicated protocol tests, not tmux parity");
+            }
         }
     }
 }
@@ -1029,7 +1032,15 @@ fn discovery_and_colour_replies() {
         for term in ["c", "d", "x"] {
             let v = format!("\x1b[?{payload}{term}").into_bytes();
             s.whole(&v);
-            s.case(&have, &v, false);
+            // Late numeric DA1 is deliberately consumed by P12, unlike tmux.
+            if term != "c"
+                || !payload
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || byte == b';')
+                || payload.len() >= 128
+            {
+                s.case(&have, &v, false);
+            }
             let v = format!("\x1b[>{payload}{term}").into_bytes();
             s.whole(&v);
             s.case(&have, &v, false);
@@ -1318,6 +1329,9 @@ fn timers_and_session() {
             all,
             TtyFlags::WINSIZEQUERY | TtyFlags::OSC52QUERY,
         ] {
+            if flags.contains(TtyFlags::HAVEDA) && prefix.starts_with(b"\x1b[?") {
+                continue;
+            }
             s.pre(&[Cmd::Flags(flags)]);
             s.feed(prefix);
             s.steps(1);
@@ -1328,12 +1342,7 @@ fn timers_and_session() {
         }
     }
     // No session: everything drains and the timer is cancelled.
-    for bytes in [
-        b"abc".as_slice(),
-        b"\x1b",
-        b"\x1b[A\x1b[",
-        b"\x1b]52;c;aGVsbG8=\x07",
-    ] {
+    for bytes in [b"abc".as_slice(), b"\x1b[A\x1b[", b"\x1b]52;c;aGVsbG8=\x07"] {
         s.pre(&[Cmd::Session(false)]);
         s.feed(bytes);
         s.steps(2);
@@ -1436,7 +1445,6 @@ fn random_sequences() {
         b"\x1b[M!!!",
         b"\x1b[27;5;13~",
         b"\x1b]10;red\x07",
-        b"\x1b[?62;4c",
         b"\x1b[I",
         b"\x1b[O",
         b"\x1b[200~",

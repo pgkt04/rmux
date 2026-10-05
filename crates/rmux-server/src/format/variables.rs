@@ -77,6 +77,7 @@ pub const REGISTRY: &[&[u8]] = &[
     b"client_termname",
     b"client_termtype",
     b"client_theme",
+    b"client_tsp",
     b"client_tty",
     b"client_uid",
     b"client_user",
@@ -174,6 +175,8 @@ pub const REGISTRY: &[&[u8]] = &[
     b"pane_tabs",
     b"pane_title",
     b"pane_top",
+    b"pane_tsp",
+    b"pane_tsp_epoch",
     b"pane_tty",
     b"pane_unseen_changes",
     b"pane_unzoomed_height",
@@ -388,6 +391,10 @@ pub const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         key: b"client_theme",
+        kind: ValueKind::String,
+    },
+    Builtin {
+        key: b"client_tsp",
         kind: ValueKind::String,
     },
     Builtin {
@@ -779,6 +786,14 @@ pub const BUILTINS: &[Builtin] = &[
         kind: ValueKind::String,
     },
     Builtin {
+        key: b"pane_tsp",
+        kind: ValueKind::String,
+    },
+    Builtin {
+        key: b"pane_tsp_epoch",
+        kind: ValueKind::String,
+    },
+    Builtin {
         key: b"pane_tty",
         kind: ValueKind::String,
     },
@@ -1138,7 +1153,7 @@ pub fn find_owned(
     match key {
         b"pid" => Some(FormatValue::Unsigned(u64::from(std::process::id()))),
         b"uid" => Some(FormatValue::Unsigned(u64::from(rmux_sys::proc::getuid().0))),
-        b"sixel_support" => Some(boolean(false)),
+        b"sixel_support" => Some(boolean(cfg!(feature = "sixel"))),
         b"pane_format" => Some(boolean(context.kind == FormatKind::Pane)),
         b"window_format" => Some(boolean(context.kind == FormatKind::Window)),
         b"session_format" => Some(boolean(context.kind == FormatKind::Session)),
@@ -2140,6 +2155,22 @@ pub fn model_value(
             }
             FormatValue::Unsigned(u64::from(sx))
         }
+        b"client_tsp" => bytes(
+            server
+                .clients
+                .get(context.evaluated_client?)?
+                .tsp
+                .format()
+                .as_bytes(),
+        ),
+        b"pane_tsp" => bytes(
+            pane?
+                .tsp
+                .as_ref()
+                .map_or("ansi", |tsp| tsp.format())
+                .as_bytes(),
+        ),
+        b"pane_tsp_epoch" => FormatValue::Unsigned(pane?.tsp.as_ref().map_or(0, |tsp| tsp.epoch)),
         b"pane_in_mode" => FormatValue::Unsigned(pane?.modes.len() as u64),
         b"pane_mode" => bytes(&pane?.modes.first()?.name),
         b"pane_floating_flag" => {
@@ -2429,6 +2460,16 @@ mod tests {
     use rmux_emu::{cell::GridCell, screen::ScreenResetPolicy};
     use rmux_util::utf8::Utf8Data;
 
+    #[test]
+    fn sixel_support_reports_build_feature_not_client_capability() {
+        let mut server = crate::model::Server::new();
+        let value = find(&mut server, &FormatContext::default(), b"sixel_support").unwrap();
+        assert_eq!(
+            value.bytes(),
+            if cfg!(feature = "sixel") { b"1" } else { b"0" }
+        );
+    }
+
     fn screen() -> Screen {
         Screen::new(
             12,
@@ -2442,7 +2483,7 @@ mod tests {
 
     #[test]
     fn registry_matches_all_pinned_names_and_types() {
-        assert_eq!(REGISTRY.len(), 214);
+        assert_eq!(REGISTRY.len(), 217);
         assert!(REGISTRY.windows(2).all(|keys| keys[0] < keys[1]));
         assert!(
             REGISTRY
@@ -2484,10 +2525,32 @@ mod tests {
                 ))
             })
             .collect();
-        assert_eq!(parsed.len(), BUILTINS.len());
-        for ((name, kind), builtin) in parsed.into_iter().zip(BUILTINS) {
+        let pinned: Vec<_> = BUILTINS
+            .iter()
+            .filter(|builtin| {
+                !matches!(builtin.key, b"client_tsp" | b"pane_tsp" | b"pane_tsp_epoch")
+            })
+            .collect();
+        assert_eq!(parsed.len(), pinned.len());
+        for ((name, kind), builtin) in parsed.into_iter().zip(pinned) {
             assert_eq!(name, builtin.key);
             assert_eq!(kind, builtin.kind);
+        }
+    }
+
+    #[test]
+    fn broker_formats_are_read_only_string_builtins() {
+        for key in [b"client_tsp".as_slice(), b"pane_tsp", b"pane_tsp_epoch"] {
+            assert!(REGISTRY.contains(&key));
+            assert_eq!(
+                BUILTINS
+                    .iter()
+                    .find(|builtin| builtin.key == key)
+                    .unwrap()
+                    .kind,
+                ValueKind::String
+            );
+            assert!(crate::options::search(key).is_none());
         }
     }
 
@@ -3293,6 +3356,49 @@ int main(int argc,char **argv) {
         std::fs::remove_dir_all(directory).unwrap();
     }
     #[test]
+    fn pane_tsp_reports_renderer_and_epoch_from_live_state() {
+        use crate::tsp::broker::{PaneTspState, Renderer};
+        let mut server = crate::model::Server::new();
+        let window = crate::model::window::window_create(&mut server, 12, 4, 0, 0).unwrap();
+        let pane = crate::model::pane::pane_create(&mut server, window, 12, 4, 0).unwrap();
+        let context = FormatContext {
+            pane: Some(pane),
+            ..FormatContext::default()
+        };
+        assert_eq!(
+            model_value(&server, &context, b"pane_tsp").unwrap().bytes(),
+            b"ansi"
+        );
+        assert_eq!(
+            model_value(&server, &context, b"pane_tsp_epoch")
+                .unwrap()
+                .bytes(),
+            b"0"
+        );
+        server.panes.get_mut(pane).unwrap().tsp = Some(PaneTspState::default());
+        for (renderer, expected) in [
+            (Renderer::Ansi, b"ansi".as_slice()),
+            (Renderer::Switching, b"switching"),
+            (Renderer::Native, b"native"),
+            (Renderer::Detached, b"detached"),
+        ] {
+            let tsp = server.panes.get_mut(pane).unwrap().tsp.as_mut().unwrap();
+            tsp.renderer = renderer;
+            tsp.epoch = 17;
+            assert_eq!(
+                model_value(&server, &context, b"pane_tsp").unwrap().bytes(),
+                expected
+            );
+            assert_eq!(
+                model_value(&server, &context, b"pane_tsp_epoch")
+                    .unwrap()
+                    .bytes(),
+                b"17"
+            );
+        }
+    }
+
+    #[test]
     fn model_pane_geometry_command_state_and_wait_status() {
         let mut server = crate::model::Server::new();
         let window = crate::model::window::window_create(&mut server, 12, 4, 8, 16).unwrap();
@@ -3355,14 +3461,21 @@ int main(int argc,char **argv) {
 
         let mut server = crate::model::Server::new();
         let w = window::window_create(&mut server, 80, 24, 0, 0).unwrap();
-        let tiled = window::window_add_pane(&mut server, w, None, 10, SpawnFlags::default()).unwrap();
+        let tiled =
+            window::window_add_pane(&mut server, w, None, 10, SpawnFlags::default()).unwrap();
         window::window_set_active_pane(&mut server, w, tiled, false).unwrap();
         layout::init(&mut server, w, tiled);
-        let g = LayoutGeometry { sx: 20, sy: 6, xoff: 4, yoff: 4 };
+        let g = LayoutGeometry {
+            sx: 20,
+            sy: 6,
+            xoff: 4,
+            yoff: 4,
+        };
         let mut floats = Vec::new();
         for _ in 0..3 {
             let lc = layout::floating_pane(&mut server, w, Some(tiled), &g);
-            let p = window::window_add_pane(&mut server, w, Some(tiled), 10, SpawnFlags::FLOATING).unwrap();
+            let p = window::window_add_pane(&mut server, w, Some(tiled), 10, SpawnFlags::FLOATING)
+                .unwrap();
             layout::assign_pane(&mut server, lc, p, false);
             floats.push(p);
         }
@@ -3371,15 +3484,29 @@ int main(int argc,char **argv) {
         let p = server.panes.get_mut(hidden).unwrap();
         p.saved_layout_cell = p.layout_cell.take();
         for (p, expected) in [(back, b"0".as_slice()), (front, b"1"), (tiled, b"3")] {
-            let context = FormatContext { pane: Some(p), window: Some(w), ..FormatContext::default() };
-            assert_eq!(model_value(&server, &context, b"pane_z").unwrap().bytes(), expected);
+            let context = FormatContext {
+                pane: Some(p),
+                window: Some(w),
+                ..FormatContext::default()
+            };
+            assert_eq!(
+                model_value(&server, &context, b"pane_z").unwrap().bytes(),
+                expected
+            );
         }
         let p = server.panes.get_mut(hidden).unwrap();
         p.layout_cell = p.saved_layout_cell.take();
         assert!(pane::pane_is_floating(&server, hidden));
         for (p, expected) in [(hidden, b"1".as_slice()), (front, b"2"), (tiled, b"4")] {
-            let context = FormatContext { pane: Some(p), window: Some(w), ..FormatContext::default() };
-            assert_eq!(model_value(&server, &context, b"pane_z").unwrap().bytes(), expected);
+            let context = FormatContext {
+                pane: Some(p),
+                window: Some(w),
+                ..FormatContext::default()
+            };
+            assert_eq!(
+                model_value(&server, &context, b"pane_z").unwrap().bytes(),
+                expected
+            );
         }
     }
 }

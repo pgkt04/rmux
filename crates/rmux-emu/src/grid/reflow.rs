@@ -80,6 +80,10 @@ fn join(
             break;
         }
         let line = yy + 1 + lines;
+        if src[line].surface_anchor.is_some() {
+            target.lines[to].flags.remove(GridLineFlags::WRAPPED);
+            break;
+        }
 
         if !src[line].flags.intersects(GridLineFlags::WRAPPED) {
             wrapped = false;
@@ -230,6 +234,11 @@ impl Grid {
         for yy in 0..src.len() {
             let gl = &src[yy];
             if gl.flags.intersects(GridLineFlags::DEAD) {
+                continue;
+            }
+            if gl.surface_anchor.is_some() {
+                let to = target.mv(&mut src[yy]);
+                target.lines[to].flags.remove(GridLineFlags::WRAPPED);
                 continue;
             }
 

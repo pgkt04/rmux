@@ -150,6 +150,9 @@ pub const PROMPT_NTYPES: usize = 2;
 pub trait PromptHost {
     fn fire(&mut self, srv: &mut Server, text: Option<&[u8]>, key: PromptKeyResult)
     -> PromptResult;
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        None
+    }
     /// prompt_free_cb: called exactly once before the host drops.
     fn free(&mut self, _srv: &mut Server) {}
 }
@@ -465,6 +468,9 @@ fn prompt_fire_callback(
     if result == PromptResult::Close {
         pr.closed = true;
         return true;
+    }
+    if let Some((message, input)) = pr.host.as_mut().and_then(|host| host.take_update()) {
+        prompt_update(pr, srv, &message, Some(&input));
     }
     if let Some(r) = redraw {
         *r = true;
@@ -1590,10 +1596,12 @@ pub fn prompt_key(
             }
             t
         } else if key.is_unicode() {
-            match Utf8Data::from_wc((key.0 & KeyMasks::KEY) as u32) {
-                Some(t) if t.size != 0 => t,
-                _ => return PromptKeyResult::Handled,
+            // Keys above 0x7f are packed utf8_char values (prompt.c:1496-1499).
+            let t = utf8::to_data(utf8::Utf8Char((key.0 & KeyMasks::KEY) as u32));
+            if t.size == 0 {
+                return PromptKeyResult::Handled;
             }
+            t
         } else {
             return PromptKeyResult::Handled;
         };
@@ -1751,6 +1759,9 @@ pub trait PanePromptInput {
         text: Option<&[u8]>,
         key: PromptKeyResult,
     ) -> PromptResult;
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        None
+    }
     /// prompt_free_cb: called exactly once before the continuation drops.
     fn free(&mut self, _srv: &mut Server) {}
 }
@@ -1790,6 +1801,9 @@ impl PromptHost for PanePromptHost {
             Some(input) => input.fire(srv, self.wp, self.client, text, key),
             None => PromptResult::Close,
         }
+    }
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        self.input.as_mut().and_then(|input| input.take_update())
     }
     fn free(&mut self, srv: &mut Server) {
         if let Some(mut input) = self.input.take() {
@@ -1955,6 +1969,63 @@ mod tests {
             complete_display: None,
             complete_display_ud: None,
         }
+    }
+
+    #[test]
+    fn callback_updates_the_in_flight_prompt_for_next_input() {
+        struct NextPrompt(Option<(ByteString, ByteString)>);
+        impl PromptHost for NextPrompt {
+            fn fire(
+                &mut self,
+                _: &mut Server,
+                text: Option<&[u8]>,
+                key: PromptKeyResult,
+            ) -> PromptResult {
+                assert_eq!(text, Some(b"one".as_slice()));
+                assert_eq!(key, PromptKeyResult::Close);
+                self.0 = Some((b"second ".as_slice().into(), b"seed".as_slice().into()));
+                PromptResult::Continue
+            }
+            fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+                self.0.take()
+            }
+        }
+        let mut server = Server::new();
+        let mut pr = prompt(b"one", PromptFlags::default());
+        pr.host = Some(Box::new(NextPrompt(None)));
+        let mut redraw = false;
+        assert_eq!(
+            prompt_key(&mut server, &mut pr, KeyCode(CR), &mut redraw),
+            PromptKeyResult::Handled
+        );
+        assert_eq!(pr.string, b"second ");
+        assert_eq!(pr.input(), b"seed");
+        assert_eq!(pr.index(), 4);
+        assert!(!prompt_closed(&pr));
+        assert!(redraw);
+    }
+
+    #[test]
+    fn unicode_keys_are_packed_utf8_chars_not_code_points() {
+        // "中" arrives as the utf8_char tty-keys/send-keys build
+        // (prompt.c:1496 utf8_to_data), not as U+4E2D.
+        let ud = utf8::from_cstr("中".as_bytes()).0.remove(0);
+        let (uc, state) = utf8::from_data(&ud);
+        assert_eq!(state, utf8::Utf8State::Done);
+        let mut server = Server::new();
+        let mut pr = prompt(b"a", PromptFlags::default());
+        let mut redraw = false;
+        assert_eq!(
+            prompt_key(&mut server, &mut pr, KeyCode(u64::from(uc.0)), &mut redraw),
+            PromptKeyResult::Handled
+        );
+        assert_eq!(pr.input(), "a中".as_bytes());
+        assert_eq!(pr.buffer.0[1].width, 2);
+        assert_eq!(pr.index(), 2);
+        // Quote-next takes the same packed form (prompt.c:1256-1260).
+        pr.flags.insert(PromptFlags::QUOTENEXT);
+        prompt_key(&mut server, &mut pr, KeyCode(u64::from(uc.0)), &mut redraw);
+        assert_eq!(pr.input(), "a中中".as_bytes());
     }
 
     #[test]

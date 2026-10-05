@@ -262,7 +262,7 @@ pub struct ScreenWriteCtx<'a> {
     pub policy: ScreenWritePolicy,
     pub registry: &'a mut HyperlinkRegistry,
     #[cfg(feature = "sixel")]
-    pub images: &'a mut ImageRegistry,
+    pub images: Option<&'a mut ImageRegistry>,
     pub flags: ScreenWriteFlags,
     pub(crate) spans: Vec<Range<u32>>,
     pub(crate) scrolled: u32,
@@ -275,8 +275,13 @@ impl<'a> ScreenWriteCtx<'a> {
         sink: &'a mut dyn TtySink,
         policy: ScreenWritePolicy,
         registry: &'a mut HyperlinkRegistry,
-        #[cfg(feature = "sixel")] images: &'a mut ImageRegistry,
+        #[cfg(feature = "sixel")] images: Option<&'a mut ImageRegistry>,
     ) -> Self {
+        #[cfg(feature = "sixel")]
+        assert!(
+            screen.image_owner().is_none() || images.is_some(),
+            "image-owned screen requires its registry"
+        );
         sink.begin_write();
         screen
             .write_list
@@ -310,8 +315,13 @@ impl<'a> ScreenWriteCtx<'a> {
         policy: ScreenWritePolicy,
         registry: &'a mut HyperlinkRegistry,
         state: ScreenWriteState,
-        #[cfg(feature = "sixel")] images: &'a mut ImageRegistry,
+        #[cfg(feature = "sixel")] images: Option<&'a mut ImageRegistry>,
     ) -> Self {
+        #[cfg(feature = "sixel")]
+        assert!(
+            screen.image_owner().is_none() || images.is_some(),
+            "image-owned screen requires its registry"
+        );
         Self {
             screen,
             sink,
@@ -503,18 +513,36 @@ impl<'a> ScreenWriteCtx<'a> {
     }
     #[cfg(feature = "sixel")]
     pub(crate) fn image_check_line(&mut self, y: u32, height: u32) {
-        let changed = self.images.check_line(self.screen.image_owner(), y, height);
-        self.image_redraw(changed);
+        if let Some(owner) = self.screen.image_owner() {
+            let changed = self
+                .images
+                .as_deref_mut()
+                .expect("image registry")
+                .check_line(owner, y, height);
+            self.image_redraw(changed);
+        }
     }
     #[cfg(feature = "sixel")]
     pub(crate) fn image_free_all(&mut self) {
-        let changed = self.images.free_all(self.screen.image_owner());
-        self.image_redraw(changed);
+        if let Some(owner) = self.screen.image_owner() {
+            let changed = self
+                .images
+                .as_deref_mut()
+                .expect("image registry")
+                .free_all(owner);
+            self.image_redraw(changed);
+        }
     }
     #[cfg(feature = "sixel")]
     pub(crate) fn image_scroll_up(&mut self, lines: u32) {
-        let changed = self.images.scroll_up(self.screen.image_owner(), lines);
-        self.image_redraw(changed);
+        if let Some(owner) = self.screen.image_owner() {
+            let changed = self
+                .images
+                .as_deref_mut()
+                .expect("image registry")
+                .scroll_up(owner, lines);
+            self.image_redraw(changed);
+        }
     }
     #[cfg(feature = "sixel")]
     pub fn sixelimage(&mut self, mut data: SixelImage, bg: Colour) {
@@ -523,8 +551,12 @@ impl<'a> ScreenWriteCtx<'a> {
         if height == 1 {
             return;
         }
+        let owner = self
+            .screen
+            .image_owner()
+            .expect("SIXEL write requires an image-owned screen");
         let (cx, cy) = (self.screen.cx, self.screen.cy);
-        let (mut x, mut y) = data.size_in_cells();
+        let (x, mut y) = data.size_in_cells();
         if x > width || y > height - 1 {
             let sx = x.min(width - cx);
             let sy = y.min(height - 1);
@@ -532,7 +564,7 @@ impl<'a> ScreenWriteCtx<'a> {
                 return;
             };
             data = cropped;
-            (x, y) = data.size_in_cells();
+            y = data.size_in_cells().1;
         }
         let remaining = height - cy;
         if remaining <= y {
@@ -547,11 +579,9 @@ impl<'a> ScreenWriteCtx<'a> {
         }
         self.flush(false);
         let snapshot = self.snapshot(false);
-        let owner = self.screen.image_owner();
-        let id = self
-            .images
-            .store(owner, data, self.screen.cx, self.screen.cy);
-        let image = self.images.get(owner, id).expect("stored image is live");
+        let images = self.images.as_deref_mut().expect("image registry");
+        let id = images.store(owner, data, self.screen.cx, self.screen.cy);
+        let image = images.get(owner, id).expect("stored image is live");
         self.sink.draw(
             DrawOp {
                 command: DrawCommand::SixelImage { image },
@@ -571,7 +601,7 @@ impl<'a> ScreenWriteCtx<'a> {
             cell,
             save_cursor,
             #[cfg(feature = "sixel")]
-            self.images,
+            self.images.as_deref_mut(),
         );
         if changed {
             let _ = self.snapshot(true);
@@ -594,7 +624,7 @@ impl<'a> ScreenWriteCtx<'a> {
             cell,
             restore_cursor,
             #[cfg(feature = "sixel")]
-            self.images,
+            self.images.as_deref_mut(),
         );
         if changed {
             let _ = self.snapshot(true);

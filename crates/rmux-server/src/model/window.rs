@@ -120,6 +120,7 @@ pub fn window_create(
     let id = server.windows.insert(w)?;
     server.windows.retain(id)?;
     server.window_ids.insert(public_id, id);
+    window_update_activity(server, id);
     Ok(id)
 }
 
@@ -196,7 +197,7 @@ pub fn window_destroy(server: &mut Server, id: WindowId) -> Result<(), ModelErro
     window_destroy_panes(server, id)?;
     effect(server, WindowEffect::CancelTimers(id));
     let options = server.windows.get(id).ok_or(ModelError::StaleId)?.options;
-    server.options.free(options);
+    server.free_options(options);
     server.windows.request_remove(id)?;
     server.windows.release(id)?;
     Ok(())
@@ -228,6 +229,7 @@ pub fn window_set_name(
 pub fn window_update_activity(server: &mut Server, id: WindowId) {
     if let Some(w) = server.windows.get_mut(id) {
         w.activity = server.current_time;
+        super::alerts::alerts_queue(server, id, WindowFlags::ACTIVITY);
     }
 }
 

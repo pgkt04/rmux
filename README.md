@@ -25,12 +25,18 @@ launch path. The child still tries requested cwd, home and `/`, and sets PWD to
 the selected directory. Model tests cover lifecycle/selection ordering, store
 semantics, monitor cache identity, resize and alerts, plus pinned C/oracle
 comparisons and a real pty command parsed into a pane screen.
+Spawned pane, job and pipe children share allocation-free descriptor cleanup:
+macOS enumerates open descriptors in fixed stack batches instead of closing
+every number below `OPEN_MAX`; Linux uses `close_range`. Both retain the
+bounded-descriptor fallback if the native operation fails.
 `PaneInputHost` supplies synchronous pipe/control delivery, draw and geometry
 repair. `PaneModeDriver` and `PanePromptEngine` delegate to the owning mode and
 prompt engines rather than installing parallel engines in the model. Server
 `model_event` and `option_monitor_removed` dispatch callbacks run synchronously;
 in particular, a window-closed callback may retain the window before its final
-release. Hook-monitor subscriptions require an installed dispatch callback.
+release. Hook payloads preserve pane/window transitions and prompt types;
+activity updates queue alerts, and option-owner destruction releases scoped
+hook monitors. Hook-monitor subscriptions require an installed dispatch callback.
 `ModelWithClients` lends live G15 client views to G11 target lookup without
 creating a second client arena. `rmux_sys::pty::{LaunchOptions, PreparedLaunch,
 LaunchedProcess}` is the owned launch boundary.
@@ -48,6 +54,8 @@ actions rather than claiming an unstarted child exists. Cached jobs reject
 stale callbacks and preserve the pinned update/completion line distinction;
 animation uses one generation-checked 100-ms owner timer. G11 argument,
 configuration-condition and hook expansion use this same engine.
+Mouse word, line and hyperlink formats use copy/view-mode content while those
+modes are active rather than the live pane grid.
 Format tests include a private-socket pinned-oracle corpus and extracted-C
 registry, quoting and time comparisons. Full command-driven regression tests
 remain dependent on the P7 server and later client/redraw/mode consumers.
@@ -84,8 +92,9 @@ Regular identified input/output descriptors use bounded direct I/O scheduled on
 the server loop, rather than mio registration; pipe/socket/tty endpoints retain
 normal readiness ownership. The differential also attaches to an existing
 session with regular-file stdout to cover that startup path.
-Run the private-socket command-stream differential after building the binary:
-`RMUX_CONTROL_BINARY=target/debug/rmux cargo test -p rmux-server --test control_oracle`.
+Run `cargo test -p rmux-server --test control_oracle` for the private-socket
+command-stream differential. It builds rmux in the running test's Cargo target
+directory; `RMUX_CONTROL_BINARY` explicitly selects another binary.
 Only guard timestamps and command sequence numbers are normalized; protocol
 bytes and notification ordering remain exact.
 
@@ -94,8 +103,57 @@ pane capture, prompts, menus and modal popups to the model and UI owners. Initia
 are passed explicitly to window spawning; repeated environment overrides apply
 after client environment updates. Prompt cancellation and failed asynchronous
 conditions release prepared command state and resume waiting queue items.
+Multi-input prompts update the in-flight engine before accepting the next
+answer, preserving independent indexed template values and input prefills.
+Selecting a pane with `attach-session` invalidates the target and former active
+pane contents when their active/inactive styles differ, before switching panes;
+unchanged styles and unrelated pane contents do not need a redraw.
 Run the private-socket G20 creation/capture/pane-transfer comparison with
 `RMUX_COMMANDS_A_BINARY=target/debug/rmux cargo test -p rmux-server --test commands_a_oracle`.
+
+G06 SIXEL support is off by default; build `rmux` with `--features sixel`.
+The server owns one image registry, including saved alternate-screen images,
+with the pinned nineteen-image global FIFO limit. Pane screens explicitly bind
+image owners; text-only status, menu and format screens remain image-free.
+The codec preserves sparse rows, exact compression and full cached fallback
+bytes for clients without SIXEL or known pixel metrics. `#{sixel_support}` and
+graphics replies report the compile-time feature, not outer-client capability.
+Direct pinned C tests compare codec state, registry orders and screen hooks;
+`images_oracle` compares graphics replies and outer-terminal image/control bytes
+using `RMUX_BIN` and a separate `RMUX_SIXEL_ORACLE` built with `--enable-sixel`.
+The ordinary `oracle/bin/tmux` stays feature-disabled. Bounded randomized codec
+pipelines supplement these exact-byte comparisons.
+
+Linux `--features systemd` enables socket activation without libsystemd.
+The process-start boundary harvests inherited descriptors exactly once before
+other descriptor opens, clears activation environment variables, and passes an
+owned listener into the `-D` foreground server. It adopts the listener's actual
+pathname without unlinking or rebinding. Normal daemon startup drops activation
+and binds normally, matching the pin's changed-PID behavior after fork.
+Activation has no effect on macOS.
+
+G18 copy/view modes (`rmux-server::modes::copy`) own snapshot or parser-backed
+history, absolute selection anchors and a separate visible screen. Snapshot
+refresh reconciles monotonic scroll counters in place and falls back to cloning
+only for changed geometry, generation or invalid balance. Character/word/line
+and rectangular extraction preserve tmux's vi/emacs endpoints, raw UTF-8 bytes,
+tabs, ACS translation, soft wraps and final-newline rules. Search uses libc
+POSIX regex, byte smart-case and viewport generation marks with row-level
+200-ms/10-s deadlines. Styles, line-number gutters, position indicators, marks,
+selection and lazy cursor/search formats share the existing format/UI engines.
+Refresh, drag and command-view parser recovery timers resolve exact ModeIds;
+mode teardown cancels registrations and releases both screens and hyperlink
+leases. Run `cargo test -p rmux-server modes::copy`; pinned-C differentials
+include failure switches `RMUX_COPY_SNAPSHOT_MUTATE`, `RMUX_COPY_RENDER_MUTATE`
+and `RMUX_COPY_SEARCH_MUTATE` (setting any switch must fail its comparison).
+The CLI differentials `copy_core_oracle` and `copy_commands_oracle` require a
+built binary (`RMUX_COPY_BINARY`) and the pinned oracle (`RMUX_ORACLE`). Core
+cases compare parsed PTY cells/styles/cursor and exact clipboard payload/order,
+not renderer packetization. Command cases use two private key-mode lanes,
+retaining all 99 commands in both modes and distributing prefixes 1, 2 and 5.
+The ignored `exhaustive_copy_commands_modes_prefixes_match_pinned_oracle` test
+runs every command/mode/prefix combination on demand with `--ignored`.
+Generic argument errors and read-only checks share representative dispatch probes.
 
 ## Build
 
@@ -110,6 +168,11 @@ cargo test --workspace
 ```
 
 Only `rmux-sys` permits unsafe code. Workspace clippy warnings are errors.
+
+The re-executed server installs its own handled signal dispositions and unblocks
+signals only after its wake descriptor is registered. A client's inherited blocked
+or ignored `SIGTERM` cannot leave an idle server immune to shutdown; the CLI
+regression exercises that process boundary in an isolated child.
 
 The G00 header-value test extracts `8f25579c` into a temporary directory and
 compiles a C reference to compare all enum, key, flag and composite-mask values.
@@ -164,7 +227,9 @@ to `oracle/bin/tmux` (`cat` in an 80x24 pane) and to the emulator and requires
 exact dumps (three extra byte-split runs compare used cells because storage
 rounding depends on writer boundaries). `tests/input_random.rs` runs 2000 random streams for panics,
 invariants and whole-versus-split agreement, and `tests/input_parser.rs` and
-`tests/input_keys.rs` hold the spec unit cases.
+`tests/input_keys.rs` hold the spec unit cases. `send-keys -R` reads the current
+`extended-keys` option on each reset: `always` restores mode 1, including extended
+Ctrl-Tab and Ctrl-Shift-Tab sequences; `on` and `off` restore standard mode.
 
 The G07 outer-terminal port (`rmux-tty`) replaces the ncurses runtime with a
 compiled terminfo reader and typed parameter interpreter, then applies the pinned
@@ -216,10 +281,41 @@ an oracle configured with `--with-TERM`. Linux selects `vlock` when present in
 the build PATH, otherwise `lock -np`; `RMUX_LOCK_COMMAND` explicitly overrides
 that configured default. Mouse defaults to on on both platforms, as in
 `Makefile.am`. The `systemd` feature clears activation variables in child
-environments. Generated pane identity uses `RMUX` and `RMUX_PANE`, while
-`TERM_PROGRAM=tmux` and the pinned version remain shared terminal-detection
-identifiers. Changes expose an ordered `OptionsChange` plan for the G14 host;
+environments. Generated pane identity uses `RMUX` and `RMUX_PANE`. The P12 TSP
+broker starts enabled; `RMUX_TSP_BROKER=0` in the server process disables it
+for that process, and there is no live option to change it afterward. An
+explicit `refresh-client` still re-probes. Pane programs
+receive `TERM_PROGRAM=rmux`, the actual rmux package version in
+`TERM_PROGRAM_VERSION`, and `RMUX_TSP=1` only while the broker is enabled at
+spawn; configured `TERM` and `PI_TUI_NATIVE=0` are preserved. The marker permits
+a broker-aware probe, not optimistic native rendering. Read-only formats
+`client_tsp` (`unknown`, `no`, `v1`), `pane_tsp` (`ansi`, `switching`, `native`,
+`detached`), and `pane_tsp_epoch` report broker state, not terminal-environment
+guesses. Changes expose an ordered `OptionsChange` plan for the G14 host;
 monitor removal releases values before monitor cleanup and option unlink.
+TSP replay holds one immutable revision across tty queue-full retries; subsequent
+frames and latest palette/sheet updates stay pending until that revision is
+admitted. Source-op coverage becomes visible only at frame admission, and blob
+base64/APC bodies are generated as the tty drains rather than eagerly buffered.
+
+The rmux-specific `rmux-reprobe`/epoch/`rmux-ready` contract selects one renderer
+for every viewer of a pane: a plain or read-only plain attachment forces all
+viewers to ANSI; a client on another window does not. Native rendering requires
+only eligible TSP viewers and a sole visible or zoomed pane, without cropping,
+panning, floating panes, popups, pane modes, menus, or command prompts. Its one
+outer screen surface covers the tty, temporarily hiding rmux status, borders,
+titles, and scrollbars without changing saved options or layout. Prefix keys
+remain rmux input. UI entry first requests a complete ANSI paint; leaving the
+ineligible view can return the same live program to a fresh native document.
+This is not simultaneous native/ANSI rendering or a TSP-to-cells converter.
+
+Transitions hold pane input until matching ready, with a 64 KiB admission bound
+and tty backpressure. A missing completion after five seconds closes projections
+and shows a diagnostic plus the last real grid, not a fabricated usable program
+view. Detached native documents remain retained; frame credits require actual
+draws from every current native viewer and are never acknowledged without viewers.
+`capture-pane` still captures the grid, not a semantic transcript. Replay and
+automated fake-terminal checks do not replace the real omp/Tern smoke acceptance.
 
 The G11 command framework (`rmux-server::cmd`) ports the handwritten configuration
 lexer and grammar, argument parsing and printing, the 92-command metadata registry,
@@ -275,6 +371,20 @@ primary GID), and jobs complete only after both child status and output closure.
 Freeing a live job and killing all jobs signal owned child PIDs with SIGTERM;
 transferring a job moves its PID and descriptor without signaling or closing them.
 
+Attached client terminals participate in the same event loop: `ClientTty`
+readiness drains queued tty output and decodes outer-terminal keys and replies;
+`ClientTtyTimer` delivers start, clipboard, flow-control and escape timers.
+Read/write interests are rearmed from the tty state, and client teardown cancels
+registrations and timers. The UI oracle compares the scene before detach restores
+the outer screen, so border/status/prompt/menu rendering—not the detach message—
+must match the pinned binary.
+Applied terminal features (including UTF-8) synchronize back to the client flags
+and format snapshot. Control reads deliver data before a later EOF callback, so
+queued size changes take effect before the client enters its exiting state.
+On macOS, FIFO read readiness supplements kqueue with bounded select checks,
+so writer closure removes control clients from format loops even without input.
+
+
 Client/server transport uses RMUX version 1 frames: a 16-byte little-endian
 header, a 32768-byte physical maximum, explicit string lengths and owned
 SCM_RIGHTS descriptors. Legacy command and file size budgets remain separate
@@ -292,10 +402,11 @@ only prebuilt child actions and never return to arbitrary Rust in the child.
 
 Live format expansion reads client, command-item and mouse snapshots, retains
 owners synchronously, and uses the same job registry for asynchronous output,
-cycle timers, cancellation and hourly cleanup. The G18 configuration viewer is
-not duplicated in G14: until wave C supplies its driver, a typed unavailable
-result follows the documented no-view cause-printing path. The fallback is
-covered by a configuration test and must be replaced by the G18 integration.
+cycle timers, cancellation and hourly cleanup. Configuration errors and shell
+command output enter the G18 view-mode driver: owned unlimited-history backing,
+plain or VT-parsed appends, CRLF between appends and anchored viewport scrolling.
+Copy/view mouse drags use resolved pane geometry and cancellable 50 ms edge
+timers; mode commands retain their queue event, including raw mouse fields.
 
 ## Pinned oracle
 
@@ -349,7 +460,9 @@ its equivalent RMUX identify-then-malformed-command fixture from
 `harness/fixtures/`; the original causal log assertions remain unchanged.
 Namespace mapping is applied
 only with `--rmux` and printed per test. It preserves `TEST_TMUX`, terminfo names
-and command behavior. Oracle failures/timeouts from `--baseline` are reported as
+and command behavior. Anchored `-V` program-name stripping maps `^tmux ` to
+`^rmux `; the shared `#{version}` value remains `next-3.9`. Oracle
+failures/timeouts from `--baseline` are reported as
 `oracle-fail`, not rmux failures. `cargo test` validates exact manifest coverage
 against a fresh pinned archive; set `TMUX_SRC` to your checkout.
 
@@ -382,5 +495,18 @@ cargo run -p rmux-sys --example readiness
 
 Measured readiness and pinned C grid layouts, reproduction commands and the
 macOS EventLoop decision are in [docs/p0-probes.md](docs/p0-probes.md).
+
+G19 chooser modes share the pinned tree engine: styled/aligned prefix columns,
+boxed help and previews, live menu continuations, libc byte search, preserved
+tags and scroll position, and top/bottom mode prompts. Window trees squash
+session groups unless `-G`, preserve hidden-pane filter matches with `-h`, and
+dispatch swaps and destructive prompt actions only after restoring mode state.
+Customize filters apply at initialization; option reset walks the displayed
+owner and its parents. Buffer and customize editors likewise spawn with their
+mode state restored before modal zoom or resize.
+`RMUX_BINARY=target/debug/rmux cargo test -p rmux-harness --test g19_modes_rest`
+compares actual attached inner-client screens against the oracle, including
+styles, rather than detached panes' backing screens. Clock captures reject
+witnessed second rollovers; fixed wall-time oracle fixtures are not bundled.
 
 ISC licensed; the tmux notice is retained in `LICENSE`.

@@ -752,9 +752,31 @@ fn new_emu(title: &[u8]) -> Emu {
     emu
 }
 
+fn parser_oracle() -> Option<PathBuf> {
+    #[cfg(not(feature = "sixel"))]
+    {
+        common::oracle()
+    }
+    #[cfg(feature = "sixel")]
+    {
+        let path = std::env::var_os("RMUX_SIXEL_ORACLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp/swarm-rmux-build/oracle-sixel/tmux"));
+        if path.is_file() {
+            Some(path)
+        } else {
+            eprintln!(
+                "input oracle test skipped: SIXEL-enabled pinned oracle missing at {}; set RMUX_SIXEL_ORACLE",
+                path.display()
+            );
+            None
+        }
+    }
+}
+
 #[test]
 fn streams_match_oracle() {
-    let Some(tmux) = common::oracle() else {
+    let Some(tmux) = parser_oracle() else {
         eprintln!("input oracle test skipped: oracle tmux missing");
         return;
     };

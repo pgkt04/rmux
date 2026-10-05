@@ -106,6 +106,7 @@ pub fn map_namespace(text: &str) -> String {
             ("tmux-client-", "rmux-client-"),
             ("tmux-out-", "rmux-out-"),
             ("tmux-$(id -u)", "rmux-$(id -u)"),
+            ("^tmux ", "^rmux "),
         ] {
             if text[i..].starts_with(from) {
                 output.push_str(to);
@@ -324,6 +325,14 @@ mod tests {
             ),
             "TEST_TMUX $RMUX ${RMUX_PANE} RMUX_TMPDIR rmux-$(id -u) rmux-server-*.log tmux-256color"
         );
+    }
+    #[test]
+    fn mapping_version_prefix_preserves_version_and_terminal_names() {
+        assert_eq!(
+            map_namespace("VER=$($TMUX -V | sed 's/^tmux //')\n#{version} tmux-256color TEST_TMUX"),
+            "VER=$($RMUX -V | sed 's/^rmux //')\n#{version} tmux-256color TEST_TMUX"
+        );
+        assert_eq!(map_namespace("tmux next-3.9"), "tmux next-3.9");
     }
     #[test]
     fn timeout_is_reported_and_unknown_fixture_is_rejected() {

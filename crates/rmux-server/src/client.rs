@@ -14,7 +14,6 @@
  * IN AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING
  * OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-
 pub mod dispatch;
 pub mod exit;
 pub mod flags;
@@ -26,6 +25,7 @@ pub mod print;
 pub mod registry;
 pub mod theme;
 pub mod tick;
+pub mod tty_io;
 
 use crate::ids::*;
 use crate::options::environment::Environment;
@@ -243,6 +243,11 @@ pub struct Client {
     /// `tty.sx`/`tty.sy` before a tty exists (`server-client.c:188-189`).
     pub tty_sx: u32,
     pub tty_sy: u32,
+    /// `tty->event_in`/`event_out` registration (`tty.c:tty_start_tty`).
+    pub tty_token: Option<EventToken>,
+    /// `tty->timer`, `start_timer`, `clipboard_timer`, `key_timer`.
+    pub tty_timers: tty_io::TtyTimers,
+    pub tsp: crate::tsp::client::ClientTspState,
     pub written: usize,
     pub discarded: usize,
     pub redraw: usize,
@@ -314,6 +319,9 @@ impl Client {
             written: 0,
             discarded: 0,
             redraw: 0,
+            tty_token: None,
+            tty_timers: tty_io::TtyTimers::default(),
+            tsp: crate::tsp::client::ClientTspState::default(),
             redraw_scene: None,
             repeat_timer: None,
             click: ClickState::default(),

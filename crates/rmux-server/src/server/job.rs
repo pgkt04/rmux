@@ -611,9 +611,11 @@ mod tests {
                 assert!(server.jobs.get(id).unwrap().pid.is_none());
                 assert!(!still_running(&server));
                 assert_eq!(calls.get(), 0);
+                right.shutdown(std::net::Shutdown::Both).unwrap();
                 drop(right);
                 on_ready(&mut server, id, true, false).unwrap();
             } else {
+                right.shutdown(std::net::Shutdown::Both).unwrap();
                 drop(right);
                 on_ready(&mut server, id, true, false).unwrap();
                 assert_eq!(server.jobs.get(id).unwrap().state, JobState::Closed);

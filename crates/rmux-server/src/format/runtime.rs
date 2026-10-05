@@ -81,6 +81,7 @@ pub trait FormatRuntime {
     fn defaults(&mut self, context: FormatContext) -> FormatContext {
         context
     }
+    fn add_mode_formats(&mut self, _: &mut FormatTree) {}
     fn option(&mut self, _: &FormatContext, _: OptionScope, _: &[u8]) -> Option<ByteString> {
         None
     }
@@ -192,6 +193,9 @@ impl FormatRuntime for Server {
             context.buffer = self.paste.top();
         }
         context
+    }
+    fn add_mode_formats(&mut self, tree: &mut FormatTree) {
+        crate::server::format_live::add_mode_formats(self, tree);
     }
     fn option(
         &mut self,
@@ -467,11 +471,15 @@ impl<E: FormatExternal> FormatRuntime for ServerFormatRuntime<'_, E> {
         }
         self.server.defaults(context)
     }
+    fn add_mode_formats(&mut self, tree: &mut FormatTree) {
+        self.server.add_mode_formats(tree);
+    }
     fn option(&mut self, c: &FormatContext, s: OptionScope, k: &[u8]) -> Option<ByteString> {
         self.server.option(c, s, k)
     }
     fn builtin(&mut self, c: &FormatContext, k: &[u8]) -> Option<FormatValue> {
         super::variables::model_value(self.server, c, k)
+            .or_else(|| crate::server::format_live::copy_value(self.server, c, k))
             .or_else(|| {
                 c.evaluated_client
                     .and_then(|id| self.external.client_facts(id))

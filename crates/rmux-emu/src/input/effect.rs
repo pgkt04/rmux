@@ -201,6 +201,12 @@ impl InputPolicy {
 /// bytes live in parser scratch and stay valid until the parser resumes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InputEffect<'a> {
+    /// Complete TSP APC payload, borrowed until the synchronous parser resumes.
+    TspMessage {
+        payload: &'a [u8],
+    },
+    /// RIS, not an incomplete-string timeout or parser repair.
+    TerminalReset,
     /// `input_reply(ictx, 1, ...)`: queue behind pending requests, else write.
     Reply(&'a [u8]),
     /// `input_add_request` (`input.c:3576-3622`).

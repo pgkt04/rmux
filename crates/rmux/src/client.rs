@@ -199,6 +199,7 @@ fn start_server(
     flags: ClientFlags,
     lock: Option<OwnedFd>,
     cfg_files: &[Vec<u8>],
+    activation_listener: Option<OwnedFd>,
 ) -> io::Result<OwnedFd> {
     if flags.contains(ClientFlags::NOFORK) {
         let code = server_start(Startup {
@@ -206,10 +207,13 @@ fn start_server(
             flags,
             initial_peer: None,
             lock,
+            activation_listener,
             config_files: cfg_files.to_vec(),
         })?;
         std::process::exit(code);
     }
+    // sd_listen_fds(0) sees a different PID after forking: only -D adopts activation.
+    drop(activation_listener);
     let (client_end, server_end) = sys::socketpair()?;
     sys::set_inheritable(server_end.as_fd())?;
     if let Some(lock) = &lock {
@@ -298,7 +302,7 @@ pub fn connect(path: &[u8], flags: ClientFlags, cfg_files: &[Vec<u8>]) -> io::Re
                 }
             }
         }
-        let fd = start_server(path, flags, lockfd.take(), cfg_files)?;
+        let fd = start_server(path, flags, lockfd.take(), cfg_files, None)?;
         rmux_sys::fd::set_blocking(fd.as_fd(), false);
         return Ok(fd);
     }
@@ -720,7 +724,11 @@ impl ClientRuntime {
 
 /// `client_main` (`client.c:231-439`). `server` holds the global options and
 /// environment built by `main`; it is dropped where C frees them.
-pub fn run(config: MainConfig, mut server: rmux_server::model::Server) -> i32 {
+pub fn run(
+    config: MainConfig,
+    mut server: rmux_server::model::Server,
+    activation_listener: Option<OwnedFd>,
+) -> i32 {
     let MainConfig {
         mut flags,
         feat,
@@ -798,7 +806,18 @@ pub fn run(config: MainConfig, mut server: rmux_server::model::Server) -> i32 {
     }
 
     // Initialize the client socket and start the server (client.c:282-300).
-    let fd = match connect(&socket_path, runtime.flags, &cfg_files) {
+    let connection = if activation_listener.is_some() {
+        start_server(
+            &socket_path,
+            runtime.flags,
+            None,
+            &cfg_files,
+            activation_listener,
+        )
+    } else {
+        connect(&socket_path, runtime.flags, &cfg_files)
+    };
+    let fd = match connection {
         Ok(fd) => fd,
         Err(e) => {
             if e.kind() == io::ErrorKind::ConnectionRefused {

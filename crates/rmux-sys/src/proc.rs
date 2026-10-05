@@ -241,6 +241,64 @@ pub unsafe fn closefrom(lowfd: i32) {
     closefrom_fallback(lowfd);
 }
 
+/// Close descriptors above stderr without allocating in a fork child.
+///
+/// # Safety
+/// Only a fork child about to exec or _exit may call this; it must not run
+/// destructors for any descriptor closed here.
+pub(crate) unsafe fn close_child_fds(max_fd: i32) {
+    #[cfg(target_os = "macos")]
+    {
+        let mut infos = [libc::proc_fdinfo {
+            proc_fd: 0,
+            proc_fdtype: 0,
+        }; 1024];
+        let bytes = size_of_val(&infos) as libc::c_int;
+        loop {
+            // SAFETY: the stack array holds bytes writable bytes of fd records.
+            let result = unsafe {
+                libc::proc_pidinfo(
+                    libc::getpid(),
+                    libc::PROC_PIDLISTFDS,
+                    0,
+                    infos.as_mut_ptr().cast(),
+                    bytes,
+                )
+            };
+            if result < 0 || result > bytes || result as usize % size_of::<libc::proc_fdinfo>() != 0
+            {
+                break;
+            }
+            let filled = result as usize / size_of::<libc::proc_fdinfo>();
+            for info in &infos[..filled] {
+                if info.proc_fd > libc::STDERR_FILENO {
+                    // SAFETY: this child exclusively owns each listed fd.
+                    unsafe {
+                        libc::close(info.proc_fd);
+                    }
+                }
+            }
+            if result < bytes {
+                return;
+            }
+            // A full buffer may omit descriptors; close successive batches.
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // SAFETY: close_range takes integers and only child descriptors change.
+        if unsafe { libc::syscall(libc::SYS_close_range, 3u32, u32::MAX, 0u32) } == 0 {
+            return;
+        }
+    }
+    for fd in 3..max_fd {
+        // SAFETY: close accepts arbitrary descriptor numbers in this child.
+        unsafe {
+            libc::close(fd);
+        }
+    }
+}
+
 #[cfg(target_os = "macos")]
 mod darwin {
     use libc::{kern_return_t, mach_port_t};
@@ -396,4 +454,72 @@ pub fn temporary_file(template: &[u8]) -> io::Result<(std::fs::File, Vec<u8>)> {
     path.pop();
     // SAFETY: successful mkstemp transfers unique ownership of its new fd.
     Ok((unsafe { std::fs::File::from_raw_fd(fd) }, path))
+}
+
+#[cfg(test)]
+mod child_fd_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    #[test]
+    fn child_closure_covers_sparse_high_descriptors_and_multiple_batches() {
+        // SAFETY: rlimit is plain writable storage initialized by getrlimit.
+        let mut limit: libc::rlimit = unsafe { std::mem::zeroed() };
+        // SAFETY: limit points to one initialized rlimit record.
+        assert_eq!(
+            unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) },
+            0
+        );
+        if limit.rlim_cur < 8192 {
+            eprintln!(
+                "skip descriptor batch closure: RLIMIT_NOFILE={} is below 8192",
+                limit.rlim_cur
+            );
+            return;
+        }
+        let mut descriptors = Vec::<OwnedFd>::new();
+        for _ in 0..1100 {
+            // SAFETY: open returns a new descriptor which is owned below.
+            let raw = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+            assert!(
+                raw >= 0,
+                "open batch descriptor: {}",
+                io::Error::last_os_error()
+            );
+            // SAFETY: raw is newly opened and has no other Rust owner.
+            descriptors.push(unsafe { OwnedFd::from_raw_fd(raw) });
+        }
+        let first = descriptors[0].as_raw_fd();
+        // SAFETY: F_DUPFD duplicates a live descriptor to a sparse high number.
+        let high = unsafe { libc::fcntl(first, libc::F_DUPFD, 4096) };
+        assert!(
+            high >= 4096,
+            "duplicate sparse descriptor: {}",
+            io::Error::last_os_error()
+        );
+        // SAFETY: the duplicate is fresh and uniquely owned.
+        descriptors.push(unsafe { OwnedFd::from_raw_fd(high) });
+        let last = descriptors[descriptors.len() - 2].as_raw_fd();
+        // SAFETY: the fork child only calls descriptor syscalls and _exit.
+        let pid = unsafe { libc::fork() };
+        assert!(
+            pid >= 0,
+            "fork closure check: {}",
+            io::Error::last_os_error()
+        );
+        if pid == 0 {
+            // SAFETY: the child closes its copies only and never runs destructors.
+            unsafe {
+                close_child_fds(1_048_576);
+                let closed = [first, last, high]
+                    .iter()
+                    .all(|&fd| libc::fcntl(fd, libc::F_GETFD) == -1);
+                libc::_exit(if closed { 0 } else { 1 });
+            }
+        }
+        let status = wait_process(ProcessId(pid), false).unwrap().unwrap();
+        assert_eq!(exit_code(status), 0, "fork child retained a descriptor");
+        // SAFETY: the parent's descriptor copies must remain open after child cleanup.
+        assert_ne!(unsafe { libc::fcntl(high, libc::F_GETFD) }, -1);
+    }
 }

@@ -73,11 +73,10 @@ pub fn attach(
         return CmdReturn::Error;
     };
     if let (Some(window), Some(pane)) = (target.w, target.wp) {
-        let previous = server.windows.get(window).and_then(|window| window.active);
-        if crate::model::window::window_redraw_active_switch(server, window, previous).is_err() {
+        if crate::model::window::window_redraw_active_switch(server, window, Some(pane)).is_err() {
             return CmdReturn::Error;
         }
-        let _ = crate::model::window::window_set_active_pane(server, window, pane, false);
+        let _ = crate::model::window::window_set_active_pane(server, window, pane, true);
     }
     if let Some(link) = target.wl {
         crate::model::session::session_set_current(server, session, Some(link));
@@ -203,4 +202,80 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         args.has(b'E') != 0,
         args.get(b'f'),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::break_pane::tests::{
+        command, create_session, create_window, item, source, split,
+    };
+    use super::*;
+    use crate::cmd::metadata;
+    use crate::model::{ModelEffect, PaneFlags, window};
+    use rmux_emu::colour::Colour;
+
+    #[test]
+    fn attached_pane_selection_invalidates_changed_styles_only() {
+        for different_styles in [true, false] {
+            let mut server = Server::default();
+            let session = create_session(&mut server, b"redraw");
+            let (window, link, target) = create_window(&mut server, session, 0);
+            let previous = split(&mut server, window, target);
+            let untouched = split(&mut server, window, previous);
+            window::window_set_active_pane(&mut server, window, previous, false).unwrap();
+            let current = source(&server, link, previous);
+            let item = item(&mut server, current, current);
+            let mut client = client::Client::new(None, (0, 0));
+            client.session = Some(session);
+            let client = server.clients.insert(client).unwrap();
+            server.queue.items.get_mut(item).unwrap().client = Some(client);
+            for pane in [target, previous, untouched] {
+                let pane = server.panes.get_mut(pane).unwrap();
+                pane.cached_gc.bg = Colour::from_raw(1);
+                pane.cached_active_gc = pane.cached_gc;
+                if different_styles {
+                    pane.cached_active_gc.bg = Colour::from_raw(4);
+                }
+                pane.flags.remove(PaneFlags::REDRAW);
+            }
+            server.effects.clear();
+            let command = command(
+                &metadata::CMD_ATTACH_SESSION,
+                &[(b't', Some(b"redraw:0.0"))],
+            );
+
+            assert_eq!(execute(&mut server, &command, item), CmdReturn::Normal);
+            assert_eq!(server.windows.get(window).unwrap().active, Some(target));
+            for pane in [target, previous] {
+                assert_eq!(
+                    server
+                        .panes
+                        .get(pane)
+                        .unwrap()
+                        .flags
+                        .contains(PaneFlags::REDRAW),
+                    different_styles,
+                    "style invalidation for {pane:?}, different styles: {different_styles}"
+                );
+            }
+            assert!(
+                !server
+                    .panes
+                    .get(untouched)
+                    .unwrap()
+                    .flags
+                    .contains(PaneFlags::REDRAW)
+            );
+            assert!(server.effects.iter().any(|effect| matches!(
+                effect,
+                ModelEffect::Window(window::WindowEffect::PaneChanged { window: changed_window, old, new })
+                    if *changed_window == window && *old == Some(previous) && *new == target
+            )));
+            let queued = server.queue.items.get(item).unwrap();
+            assert_eq!(
+                server.queue.states.get(queued.state).unwrap().current.wp,
+                Some(target)
+            );
+        }
+    }
 }

@@ -1,4 +1,4 @@
-// Ported from tmux session.c, window.c, tmux.c, tmux.h @ 8f25579c
+// Ported from tmux session.c, window.c, options.c, tmux.c, tmux.h @ 8f25579c
 use super::{PaneFlags, SessionFlags, WindowFlags, WinlinkFlags};
 use crate::ids::*;
 use crate::options::{OptionsStore, environment::Environment};
@@ -146,6 +146,7 @@ pub struct Pane {
     pub output_generation: u64,
     pub cmd_status: i32,
     pub searchstr: Option<Vec<u8>>,
+    pub searchregex: bool,
     pub palette: rmux_emu::colour::ColourPalette,
     pub resizes: VecDeque<super::pane::PaneResize>,
     pub wait_item: Option<QueueItemId>,
@@ -154,6 +155,7 @@ pub struct Pane {
     pub prompt: Option<super::pane::PanePrompt>,
     pub prompt_generation: u64,
     pub input_state: super::pane_input::PaneInputState,
+    pub tsp: Option<crate::tsp::broker::PaneTspState>,
     pub pipe: Option<crate::cmd::commands::pipe_pane::PipePaneState>,
     pub control_fg: i32,
     pub control_bg: i32,
@@ -229,6 +231,8 @@ pub struct Server {
     pub next_command_group: u32,
     pub options: OptionsStore,
     pub hyperlinks: HyperlinkRegistry,
+    #[cfg(feature = "sixel")]
+    pub images: rmux_emu::image::ImageRegistry,
     pub layout_cells: crate::layout::Cells,
     pub paste: super::paste::PasteStore,
     pub monitors: Arena<super::monitor::MonitorSet, MonitorSetId>,
@@ -278,6 +282,9 @@ pub struct Server {
     pub deferred: BTreeMap<u64, DeferredCallback>,
     pub next_deferred: u64,
     pub format_live: crate::server::format_live::FormatLiveState,
+    /// P12 broker, fixed at server start. `RMUX_TSP_BROKER=0` disables it;
+    /// any other value, including an unset variable, leaves it on.
+    pub tsp_broker_enabled: bool,
 }
 impl Default for Server {
     fn default() -> Self {
@@ -304,6 +311,8 @@ impl Server {
             next_command_group: 0,
             options: OptionsStore::new(),
             hyperlinks: HyperlinkRegistry::default(),
+            #[cfg(feature = "sixel")]
+            images: rmux_emu::image::ImageRegistry::default(),
             layout_cells: Arena::new(),
             paste: super::paste::PasteStore::default(),
             monitors: Arena::new(),
@@ -353,9 +362,34 @@ impl Server {
             deferred: BTreeMap::new(),
             next_deferred: 0,
             format_live: crate::server::format_live::FormatLiveState::default(),
+            tsp_broker_enabled: crate::options::environment::tsp_broker_enabled_from_env(),
         };
         crate::format::runtime::initialize_defaults(&mut server);
         server
+    }
+    pub fn free_options(&mut self, options: OptionsId) {
+        loop {
+            let Some(name) = self
+                .options
+                .entries(options)
+                .next()
+                .map(|entry| entry.name().to_vec())
+            else {
+                break;
+            };
+            let token = self
+                .options
+                .prepare_removal(options, &name)
+                .expect("option entry");
+            if let Some(monitor) = token.monitor {
+                let callback = self
+                    .option_monitor_removed
+                    .expect("option monitor cleanup dispatcher");
+                callback(self, monitor);
+            }
+            self.options.finish_removal(token);
+        }
+        self.options.free(options);
     }
     pub fn emit(
         &mut self,

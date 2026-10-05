@@ -77,6 +77,8 @@ fn window_set_fill_cell(srv: &mut Server, w: WindowId, inside: bool) -> GridCell
         &mut sink,
         ScreenWritePolicy::default(),
         &mut srv.hyperlinks,
+        #[cfg(feature = "sixel")]
+        None,
     );
     crate::format::draw::draw(&mut ctx, &DEFAULT_CELL, 1, &expanded, None, false);
     ctx.finish();
@@ -84,7 +86,11 @@ fn window_set_fill_cell(srv: &mut Server, w: WindowId, inside: bool) -> GridCell
     if new_gc.data.width == 1 {
         gc = new_gc;
     }
-    let _ = s.release(&mut srv.hyperlinks);
+    let _ = s.release(
+        &mut srv.hyperlinks,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     gc
 }
 
@@ -280,6 +286,8 @@ pub fn window_make_pane_status(
         &mut sink,
         ScreenWritePolicy::default(),
         &mut srv.hyperlinks,
+        #[cfg(feature = "sixel")]
+        None,
     );
     let mut cursor = first;
     for i in 0..width {
@@ -303,7 +311,11 @@ pub fn window_make_pane_status(
     p.border_status_line.expanded = expanded;
 
     let changed = p.status_screen.grid.compare(&old.grid);
-    let _ = old.release(&mut srv.hyperlinks);
+    let _ = old.release(
+        &mut srv.hyperlinks,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     changed
 }
 

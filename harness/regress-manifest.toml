@@ -1,11 +1,13 @@
 # tmux 8f25579c: reviewed namespace-only mapping; raw imsg needs a P7 fixture.
 # Hand review: 31 unchanged, 169 mapped (including input-common.inc users),
 # 1 adapted: cfg-client-lost-before-wait.sh constructs raw imsg headers.
-# Of the 169 mapped, 40 touch the real namespace (TMUX_TMPDIR, TMUX_PANE,
-# tmux-$(id -u), tmux-server-*.log); the other 129 only use the scripts' own
-# unexported `TMUX="$TEST_TMUX -L..."` shell variable, which the mapper renames
-# to RMUX as well (harmless, consistent). Unchanged scripts use $TEST_TMUX only.
+# Of the 169 mapped, 41 touch the real namespace (TMUX_TMPDIR, TMUX_PANE,
+# tmux-$(id -u), tmux-server-*.log or the -V program-name prefix); the other 128
+# only use the scripts' own unexported `TMUX="$TEST_TMUX -L..."` shell variable,
+# which the mapper renames to RMUX (harmless, consistent). Unchanged scripts
+# use $TEST_TMUX only.
 # TEST_TMUX and tmux-256color are not namespace replacements.
+# Anchored -V output prefix stripping (^tmux ) maps to the rmux program name.
 [[tests]]
 name = "alerts.sh"
 category = "mapped"
@@ -336,6 +338,7 @@ category = "mapped"
 
 [[tests]]
 name = "format-variables.sh"
+# Maps the -V program-name prefix stripped before comparing #{version}.
 category = "mapped"
 
 [[tests]]

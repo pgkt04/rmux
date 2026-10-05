@@ -1,0 +1,101 @@
+# window_copy_cmd_table extracted from tmux window-copy.c:3300-3890 @ 8f25579c
+# name	template	lower	upper	readonly	clear (0 = ALWAYS)
+append-selection		0	0	0	ALWAYS
+append-selection-and-cancel		0	0	0	ALWAYS
+back-to-indentation		0	0	1	ALWAYS
+begin-selection		0	0	0	ALWAYS
+bottom-line		0	0	1	EMACS_ONLY
+cancel		0	0	1	ALWAYS
+clear-selection		0	0	0	ALWAYS
+copy-end-of-line	CP	0	1	0	ALWAYS
+copy-end-of-line-and-cancel	CP	0	1	0	ALWAYS
+copy-pipe-end-of-line	CP	0	2	0	ALWAYS
+copy-pipe-end-of-line-and-cancel	CP	0	2	0	ALWAYS
+copy-line	CP	0	1	0	ALWAYS
+copy-line-and-cancel	CP	0	1	0	ALWAYS
+copy-pipe-line	CP	0	2	0	ALWAYS
+copy-pipe-line-and-cancel	CP	0	2	0	ALWAYS
+copy-pipe-no-clear	CP	0	2	0	NEVER
+copy-pipe	CP	0	2	0	ALWAYS
+copy-pipe-and-cancel	CP	0	2	0	ALWAYS
+copy-selection-no-clear	CP	0	1	0	NEVER
+copy-selection	CP	0	1	0	ALWAYS
+copy-selection-and-cancel	CP	0	1	0	ALWAYS
+cursor-down		0	0	1	EMACS_ONLY
+cursor-down-and-cancel		0	0	1	ALWAYS
+cursor-left		0	0	1	EMACS_ONLY
+cursor-right		0	0	1	EMACS_ONLY
+cursor-up		0	0	1	EMACS_ONLY
+cursor-centre-vertical		0	0	1	EMACS_ONLY
+cursor-centre-horizontal		0	0	1	EMACS_ONLY
+end-of-line		0	0	1	EMACS_ONLY
+goto-line		1	1	1	EMACS_ONLY
+halfpage-down		0	0	1	EMACS_ONLY
+halfpage-down-and-cancel		0	0	1	ALWAYS
+halfpage-up		0	0	1	EMACS_ONLY
+history-bottom		0	0	1	EMACS_ONLY
+history-top		0	0	1	EMACS_ONLY
+jump-again		0	0	0	EMACS_ONLY
+jump-backward		1	1	0	EMACS_ONLY
+jump-forward		1	1	0	EMACS_ONLY
+jump-reverse		0	0	0	EMACS_ONLY
+jump-to-backward		1	1	0	EMACS_ONLY
+jump-to-forward		1	1	0	EMACS_ONLY
+jump-to-mark		0	0	1	ALWAYS
+line-numbers-on		0	0	1	NEVER
+line-numbers-off		0	0	1	NEVER
+line-numbers-toggle		0	0	1	NEVER
+next-prompt	o	0	0	1	ALWAYS
+previous-prompt	o	0	0	1	ALWAYS
+middle-line		0	0	1	EMACS_ONLY
+next-matching-bracket		0	0	1	ALWAYS
+next-paragraph		0	0	1	EMACS_ONLY
+next-space		0	0	1	EMACS_ONLY
+next-space-end		0	0	1	EMACS_ONLY
+next-word		0	0	1	EMACS_ONLY
+next-word-end		0	0	1	EMACS_ONLY
+other-end		0	0	0	EMACS_ONLY
+page-down		0	0	1	EMACS_ONLY
+page-down-and-cancel		0	0	1	ALWAYS
+page-up		0	0	1	EMACS_ONLY
+pipe-no-clear		0	1	0	NEVER
+pipe		0	1	0	ALWAYS
+pipe-and-cancel		0	1	0	ALWAYS
+previous-matching-bracket		0	0	1	ALWAYS
+previous-paragraph		0	0	1	EMACS_ONLY
+previous-space		0	0	1	EMACS_ONLY
+previous-word		0	0	1	EMACS_ONLY
+recentre-top-bottom		0	0	1	ALWAYS
+rectangle-on		0	0	0	ALWAYS
+rectangle-off		0	0	0	ALWAYS
+rectangle-toggle		0	0	0	ALWAYS
+refresh-on		0	0	1	NEVER
+refresh-off		0	0	1	NEVER
+refresh-now		0	0	1	NEVER
+refresh-toggle		0	0	1	NEVER
+scroll-bottom		0	0	1	ALWAYS
+scroll-down		0	0	1	EMACS_ONLY
+scroll-down-and-cancel		0	0	1	ALWAYS
+scroll-exit-on		0	0	0	ALWAYS
+scroll-exit-off		0	0	0	ALWAYS
+scroll-exit-toggle		0	0	0	ALWAYS
+scroll-middle		0	0	1	ALWAYS
+scroll-to-mouse	e	0	0	1	EMACS_ONLY
+scroll-top		0	0	1	ALWAYS
+scroll-up		0	0	1	EMACS_ONLY
+search-again		0	0	0	ALWAYS
+search-backward		0	1	0	ALWAYS
+search-backward-text		0	1	0	ALWAYS
+search-backward-incremental		1	1	0	ALWAYS
+search-forward		0	1	0	ALWAYS
+search-forward-text		0	1	0	ALWAYS
+search-forward-incremental		1	1	0	ALWAYS
+search-reverse		0	0	0	ALWAYS
+select-line		0	0	0	ALWAYS
+select-word		0	0	0	ALWAYS
+selection-mode		0	1	0	ALWAYS
+set-mark		0	0	1	ALWAYS
+start-of-line		0	0	1	EMACS_ONLY
+stop-selection		0	0	0	ALWAYS
+toggle-position		0	0	1	NEVER
+top-line		0	0	1	EMACS_ONLY

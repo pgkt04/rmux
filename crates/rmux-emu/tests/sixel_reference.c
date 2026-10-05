@@ -14,7 +14,8 @@ static void *xcalloc(size_t n, size_t s) { void *p = calloc(n, s); if (!p) abort
 static void *xreallocarray(void *p, size_t n, size_t s) { p = realloc(p, n*s); if (!p) abort(); return p; }
 static void *xrecallocarray(void *p, size_t old, size_t n, size_t s) { p = xreallocarray(p,n,s); memset((char *)p + old*s,0,(n-old)*s); return p; }
 static int xsnprintf(char *p, size_t n, const char *fmt, ...) { va_list ap; va_start(ap,fmt); int r = vsnprintf(p,n,fmt,ap); va_end(ap); if (r < 0 || (size_t)r >= n) abort(); return r; }
-static long long strtonum(const char *s, long long min, long long max, const char **error) { char *end; errno=0; long long n=strtoll(s,&end,10); *error = errno || *end || n<min || n>max ? "range" : NULL; return *error ? 0 : n; }
+static long long fixture_strtonum(const char *s, long long min, long long max, const char **error) { char *end; errno=0; long long n=strtoll(s,&end,10); *error = errno || *end || n<min || n>max ? "range" : NULL; return *error ? 0 : n; }
+#define strtonum fixture_strtonum
 struct sixel_image;
 void sixel_free(struct sixel_image *);
 void sixel_size_in_cells(struct sixel_image *, u_int *, u_int *);

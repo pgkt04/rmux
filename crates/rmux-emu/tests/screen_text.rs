@@ -30,6 +30,8 @@ fn simple_text_limits_charset_and_newlines() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.nputs(2, &DEFAULT_CELL, "a界z".as_bytes());
     assert_eq!(ctx.screen.cx, 2);
@@ -65,6 +67,8 @@ fn wrapped_text_preserves_more_and_final_line_rule() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     assert!(ctx.text(0, 5, 3, true, &DEFAULT_CELL, b"abc def"));
     assert_eq!((ctx.screen.cx, ctx.screen.cy), (3, 1));
@@ -83,6 +87,8 @@ fn outlines_restore_cursor_and_set_palette_policy() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.draw_box(5, 4, BoxLines::Simple, None);
     assert_eq!((ctx.screen.cx, ctx.screen.cy), (0, 0));
@@ -112,6 +118,8 @@ fn copy_avoids_split_wide_cells_and_preview_advances_cursor() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         ctx.puts(&DEFAULT_CELL, "ab界".as_bytes());
         ctx.finish();
@@ -122,6 +130,8 @@ fn copy_avoids_split_wide_cells_and_preview_advances_cursor() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.fast_copy(&src, 0, 0, 3, 1);
     assert_eq!(ctx.screen.grid.view_get_cell(0, 0).data.bytes(), b"a");
@@ -177,6 +187,8 @@ fn fast_copy_writes_first_hidden_cell_then_stops_row() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.fast_copy(&src, 0, 0, 4, 1);
     assert_eq!(ctx.screen.grid.view_get_cell(0, 0).data.bytes(), b"a");

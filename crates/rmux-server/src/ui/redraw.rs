@@ -1664,6 +1664,8 @@ fn redraw_make_pane_prompt(
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         let mut pdd = PromptDrawData {
             cursor_x: &mut cursor_x,
@@ -1743,11 +1745,18 @@ fn redraw_draw_pane_prompt(
         cy as u32,
         None,
     );
-    let _ = screen.release(&mut registry);
+    let _ = screen.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
 }
 
 /// Draw scene to client.
 fn redraw_draw(srv: &mut Server, c: ClientId, wp: Option<PaneId>, mut flags: RedrawOps) {
+    if crate::tsp::broker::native_client(srv, c) {
+        return;
+    }
     let Some(client) = srv.clients.get(c) else {
         return;
     };
@@ -1926,6 +1935,15 @@ fn redraw_draw(srv: &mut Server, c: ClientId, wp: Option<PaneId>, mut flags: Red
     }
 
     t.tty.reset(&mut t.tparm);
+    #[cfg(feature = "sixel")]
+    match wp {
+        Some(wp) => crate::ui::fanout::tty_draw_images(&mut t.tty, &mut t.tparm, srv, c, wp),
+        None => {
+            for wp in &panes {
+                crate::ui::fanout::tty_draw_images(&mut t.tty, &mut t.tparm, srv, c, *wp);
+            }
+        }
+    }
     t.restore(srv, c);
     put_scene(srv, c, scene);
     log_debug!("{}: finished redraw", client_name(srv, c));
@@ -2100,7 +2118,11 @@ fn redraw_damage_draw_pane_prompt(
             None,
         );
     }
-    let _ = screen.release(&mut registry);
+    let _ = screen.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
 }
 
 /// Draw the spans intersecting a damaged rectangle.
@@ -2148,6 +2170,9 @@ fn redraw_draw_damage_rectangle(
 
 /// Draw pending window damage on this client.
 pub fn redraw_client_damage(srv: &mut Server, c: ClientId) {
+    if crate::tsp::broker::native_client(srv, c) {
+        return;
+    }
     let Some(w) = client_window(srv, c) else {
         return;
     };

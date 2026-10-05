@@ -7,6 +7,8 @@ pub mod osdep;
 pub mod proc;
 pub mod pty;
 pub mod server;
+#[cfg(all(feature = "systemd", target_os = "linux"))]
+pub mod systemd;
 pub mod termios;
 
 pub use errno::{access_executable, errno, strerror};

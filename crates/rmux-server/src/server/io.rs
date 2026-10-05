@@ -173,7 +173,14 @@ impl BufferedIo {
             self.fd.is_some() && self.write_enabled && !self.write_closed && self.output_len != 0,
         )
     }
+    /// One bufferevent read: data reaches its callback before a later EOF callback.
+    pub fn read_once(&mut self) -> io::Result<IoProgress> {
+        self.read_with_limit(true)
+    }
     pub fn read_ready(&mut self) -> io::Result<IoProgress> {
+        self.read_with_limit(false)
+    }
+    fn read_with_limit(&mut self, once: bool) -> io::Result<IoProgress> {
         let mut progress = IoProgress::default();
         if !self.interests().0 {
             progress.eof = self.read_closed;
@@ -206,6 +213,9 @@ impl BufferedIo {
                     }
                     self.input.extend_from_slice(&buffer[..count]);
                     progress.bytes += count;
+                    if once {
+                        break;
+                    }
                 }
                 Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
@@ -358,6 +368,19 @@ mod tests {
         let mut buffered = BufferedIo::new(read);
         assert!(buffered.read_ready().unwrap().eof);
         assert_eq!(buffered.input(), b"\0\xff\n");
+    }
+
+    #[test]
+    fn single_read_delivers_control_commands_before_eof() {
+        let (read, write) = rmux_sys::fd::pipe().unwrap();
+        rmux_sys::fd::write(write.as_fd(), b"refresh -C 100,50\n").unwrap();
+        drop(write);
+        let mut buffered = BufferedIo::new(read);
+        let progress = buffered.read_once().unwrap();
+        assert_eq!(buffered.take_input(), b"refresh -C 100,50\n");
+        assert!(!progress.eof);
+        assert!(buffered.interests().0);
+        assert!(buffered.read_once().unwrap().eof);
     }
 }
 

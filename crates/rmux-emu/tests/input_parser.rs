@@ -5,6 +5,8 @@ use rmux_emu::cell::{GridAttributes, GridCell};
 use rmux_emu::colour::{Colour, ColourFlags, ColourPalette};
 use rmux_emu::grid::GridLineFlags;
 use rmux_emu::hyperlinks::HyperlinkRegistry;
+#[cfg(feature = "sixel")]
+use rmux_emu::image::ImageRegistry;
 use rmux_emu::input::dump::{capture_pane, state_line};
 use rmux_emu::input::{
     ColourQueryKind, InputCtx, InputEffect, InputEnd, InputPolicy, InputRequestKind, InputSink,
@@ -17,6 +19,8 @@ use rmux_emu::screen::{Screen, ScreenMode, ScreenResetPolicy};
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Rec {
     Reply(Vec<u8>),
+    TspMessage(Vec<u8>),
+    TerminalReset,
     Request(InputRequestKind, InputEnd),
     ClipboardQuery(u8, InputEnd),
     ClipboardReceived(Vec<u8>, Vec<u8>),
@@ -44,6 +48,8 @@ impl InputSink for Recorder {
     fn effect(&mut self, effect: InputEffect<'_>) {
         self.0.push(match effect {
             InputEffect::Reply(b) => Rec::Reply(b.to_vec()),
+            InputEffect::TspMessage { payload } => Rec::TspMessage(payload.to_vec()),
+            InputEffect::TerminalReset => Rec::TerminalReset,
             InputEffect::Request { kind, end } => Rec::Request(kind, end),
             InputEffect::ClipboardQuery { clip, end } => Rec::ClipboardQuery(clip, end),
             InputEffect::ClipboardReceived { clip, data } => {
@@ -72,6 +78,8 @@ impl InputSink for Recorder {
 
 struct Fixture {
     registry: HyperlinkRegistry,
+    #[cfg(feature = "sixel")]
+    images: ImageRegistry,
     screen: Screen,
     palette: ColourPalette,
     ictx: InputCtx,
@@ -83,8 +91,17 @@ impl Fixture {
         let mut registry = HyperlinkRegistry::new();
         let screen =
             Screen::new(sx, sy, 2000, ScreenResetPolicy::default(), &mut registry).unwrap();
+        #[cfg(feature = "sixel")]
+        let (screen, images) = {
+            let mut screen = screen;
+            let mut images = ImageRegistry::default();
+            screen.bind_images(&mut images);
+            (screen, images)
+        };
         Fixture {
             registry,
+            #[cfg(feature = "sixel")]
+            images,
             screen,
             palette: ColourPalette::new(),
             ictx: InputCtx::new(),
@@ -101,6 +118,8 @@ impl Fixture {
                 ..ScreenWritePolicy::default()
             },
             &mut self.registry,
+            #[cfg(feature = "sixel")]
+            Some(&mut self.images),
         );
         self.ictx
             .parse(&mut sw, Some(&mut self.palette), &self.policy, sink, bytes);
@@ -351,7 +370,10 @@ fn effects_in_c_order() {
     assert_eq!(
         rec,
         vec![
+            #[cfg(not(feature = "sixel"))]
             Rec::Reply(b"\x1b[?1;2c".to_vec()),
+            #[cfg(feature = "sixel")]
+            Rec::Reply(b"\x1b[?1;2;4c".to_vec()),
             Rec::Reply(b"\x1b[>84;0;0c".to_vec()),
             Rec::Reply(b"\x1b[1;1R".to_vec()),
             Rec::Reply(b"\x1b[?6;2$y".to_vec()),
@@ -492,6 +514,8 @@ fn parse_step_consumed_counts() {
             ..ScreenWritePolicy::default()
         },
         &mut f.registry,
+        #[cfg(feature = "sixel")]
+        Some(&mut f.images),
     );
     let bytes = b"ab\x07cd\x1b[?2031;2031h";
     let step = f.ictx.parse_step(&mut sw, None, &f.policy, bytes);
@@ -603,6 +627,8 @@ fn query_and_command_end_barriers_precede_later_mutations() {
             ..ScreenWritePolicy::default()
         },
         &mut f.registry,
+        #[cfg(feature = "sixel")]
+        Some(&mut f.images),
     );
     let bytes = b"\x1b]11;red\x07\x1b]11;?\x07\x1b]11;blue\x07\x1b]133;C\x07\x1b]133;D;7\x07";
     let mut offset = 0;
@@ -662,4 +688,220 @@ fn query_and_command_end_barriers_precede_later_mutations() {
             .contains(GridLineFlags::END_OUTPUT)
     );
     sw.finish();
+}
+
+#[test]
+fn tsp_every_byte_split_preserves_payload_and_legacy_title() {
+    let payload = "tsp;f;c=abc;{\"text\":\"中😀;a=b;\\u001b\u{009c}\"}".as_bytes();
+    let mut bytes = b"\x1b_".to_vec();
+    bytes.extend_from_slice(payload);
+    bytes.extend_from_slice(b"\x1b\\\x1b[cZ");
+    for split in 0..=bytes.len() {
+        let mut f = Fixture::new(20, 4);
+        f.screen.title = b"original".to_vec();
+        f.policy.buffer_limit = 1;
+        let mut effects = f.run(&bytes[..split]);
+        effects.extend(f.run(&bytes[split..]));
+        let messages: Vec<_> = effects
+            .iter()
+            .filter(|effect| matches!(effect, Rec::TspMessage(_) | Rec::Reply(_)))
+            .collect();
+        assert_eq!(messages.len(), 2, "split {split}");
+        assert_eq!(messages[0], &Rec::TspMessage(payload.to_vec()));
+        assert!(matches!(messages[1], Rec::Reply(_)));
+        assert_eq!(f.screen.title, b"original");
+        assert_eq!(f.text(0), "Z");
+    }
+    for title in [
+        b"tspx".as_slice(),
+        b"TSP;q;{}",
+        b"prefix tsp;q;{}",
+        b"ts\x07p;q;{}",
+    ] {
+        let mut f = Fixture::new(20, 4);
+        let mut bytes = b"\x1b_".to_vec();
+        bytes.extend_from_slice(title);
+        bytes.extend_from_slice(b"\x1b\\");
+        let effects = f.run(&bytes);
+        assert!(
+            effects
+                .iter()
+                .any(|effect| matches!(effect, Rec::TitleChanged(_)))
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Rec::TspMessage(_)))
+        );
+    }
+    let mut f = Fixture::new(20, 4);
+    assert!(
+        f.run(b"\x1b_legacy\x1b[31mX")
+            .contains(&Rec::TitleChanged(b"legacy".to_vec()))
+    );
+    assert_eq!(f.text(0), "X");
+    assert_eq!(f.ictx.cell().fg, Colour(1));
+}
+
+#[test]
+fn tsp_cancel_malformed_st_and_timeout_discard_without_leakage() {
+    for interruption in [b"\x1b[31m".as_slice(), b"\x18", b"\x1a", b"\x1b\x1bQ"] {
+        let mut bytes = b"\x1b_tsp;q;{\"q\":\"hello\"".to_vec();
+        bytes.extend_from_slice(interruption);
+        bytes.extend_from_slice(b"JSON-tail}\x1b\\Z");
+        for split in 0..=bytes.len() {
+            let mut f = Fixture::new(20, 4);
+            f.screen.title = b"keep".to_vec();
+            let mut effects = f.run(&bytes[..split]);
+            effects.extend(f.run(&bytes[split..]));
+            assert!(
+                !effects
+                    .iter()
+                    .any(|effect| matches!(effect, Rec::TspMessage(_) | Rec::TitleChanged(_)))
+            );
+            assert_eq!(f.screen.title, b"keep");
+            assert_eq!(f.text(0), "Z", "split {split}");
+            assert_eq!(f.ictx.cell().fg, Colour::DEFAULT);
+        }
+    }
+    let mut f = Fixture::new(20, 4);
+    f.run(b"\x1b_tsp;q;{incomplete");
+    f.ictx.ground_timeout();
+    let effects = f.run(b"tail}\x1b\\Z");
+    assert!(!effects.iter().any(|effect| matches!(
+        effect,
+        Rec::TspMessage(_) | Rec::TitleChanged(_) | Rec::TerminalReset
+    )));
+    assert_eq!(f.text(0), "Z");
+    for repair in [false, true] {
+        let mut f = Fixture::new(20, 4);
+        f.run(b"\x1b_tsp;q;{}\x1b");
+        if repair {
+            f.ictx.reset(None, &mut NullSink);
+        } else {
+            f.ictx.ground_timeout();
+        }
+        let effects = f.run(b"\\Z");
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Rec::TspMessage(_) | Rec::TerminalReset))
+        );
+        assert_eq!(f.text(0), "Z");
+    }
+}
+
+#[test]
+fn tsp_dedicated_bound_accepts_exact_limit_and_consumes_overflow() {
+    use rmux_emu::input::TSP_APC_LIMIT;
+    for length in [TSP_APC_LIMIT, TSP_APC_LIMIT + 1, TSP_APC_LIMIT * 2] {
+        let mut f = Fixture::new(20, 4);
+        f.policy.buffer_limit = 1;
+        let mut bytes = b"\x1b_tsp;".to_vec();
+        bytes.resize(length + 2, b'x');
+        let mut effects = f.run(&bytes);
+        assert!(f.ictx.pending().len() <= TSP_APC_LIMIT + 6);
+        effects.extend(f.run(b"\x1b"));
+        assert!(
+            !effects
+                .iter()
+                .any(|effect| matches!(effect, Rec::TspMessage(_)))
+        );
+        effects.extend(f.run(b"\\Z"));
+        let messages: Vec<_> = effects
+            .iter()
+            .filter_map(|effect| {
+                if let Rec::TspMessage(payload) = effect {
+                    Some(payload)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(messages.len(), usize::from(length == TSP_APC_LIMIT));
+        if let Some(payload) = messages.first() {
+            assert_eq!(payload.len(), TSP_APC_LIMIT);
+        }
+        assert!(f.screen.title.is_empty());
+        assert_eq!(f.text(0), "Z");
+    }
+}
+
+#[test]
+fn tsp_borrowed_barrier_stops_at_st_before_da1_and_grid_output() {
+    let mut f = Fixture::new(20, 4);
+    let mut tty = ScreenOnlySink;
+    let mut sw = ScreenWriteCtx::start(
+        &mut f.screen,
+        &mut tty,
+        ScreenWritePolicy::default(),
+        &mut f.registry,
+        #[cfg(feature = "sixel")]
+        Some(&mut f.images),
+    );
+    let bytes = b"\x1b_tsp;q;{\"q\":\"hello\"}\x1b\\\x1b[cZ";
+    let end = bytes.len() - 4;
+    assert_eq!(
+        f.ictx.parse_step(&mut sw, None, &f.policy, bytes),
+        InputStep::Effect {
+            consumed: 2,
+            effect: InputEffect::GroundTimer(true),
+        }
+    );
+    assert_eq!(
+        f.ictx.parse_step(&mut sw, None, &f.policy, &bytes[2..]),
+        InputStep::Effect {
+            consumed: end - 2,
+            effect: InputEffect::TspMessage {
+                payload: b"tsp;q;{\"q\":\"hello\"}",
+            },
+        }
+    );
+    assert_eq!(sw.screen.cx, 0);
+    assert_eq!(
+        f.ictx.parse_step(&mut sw, None, &f.policy, &bytes[end..]),
+        InputStep::Effect {
+            consumed: 0,
+            effect: InputEffect::GroundTimer(false),
+        }
+    );
+    match f.ictx.parse_step(&mut sw, None, &f.policy, &bytes[end..]) {
+        InputStep::Effect {
+            consumed: 3,
+            effect: InputEffect::Reply(_),
+        } => {}
+        step => panic!("unexpected DA1 barrier {step:?}"),
+    }
+    assert_eq!(sw.screen.cx, 0);
+    assert_eq!(
+        f.ictx.parse_step(&mut sw, None, &f.policy, b"Z"),
+        InputStep::Complete { consumed: 1 }
+    );
+    sw.finish();
+    assert_eq!(f.text(0), "Z");
+}
+
+#[test]
+fn terminal_reset_is_ris_only_and_discards_history_anchors() {
+    use rmux_emu::grid::SurfaceAnchorId;
+    let mut f = Fixture::new(20, 4);
+    assert!(f.screen.grid.attach_surface_anchor(0, SurfaceAnchorId(4)));
+    f.screen.grid.scroll_history(Colour::DEFAULT);
+    let effects = f.run(b"\x1bcZ");
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Rec::TerminalReset))
+            .count(),
+        1
+    );
+    assert_eq!(
+        f.screen.drain_surface_anchor_removals().collect::<Vec<_>>(),
+        vec![SurfaceAnchorId(4)]
+    );
+    assert_eq!(f.text(0), "Z");
+    let mut rec = Recorder::default();
+    f.ictx.reset(None, &mut rec);
+    f.ictx.ground_timeout();
+    assert!(!rec.0.contains(&Rec::TerminalReset));
 }

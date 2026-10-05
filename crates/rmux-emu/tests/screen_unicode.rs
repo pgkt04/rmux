@@ -83,6 +83,8 @@ fn dependent_input_and_padding_at_left_are_discarded() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     for input in [
         cell("\u{200d}", 0),
@@ -111,6 +113,8 @@ fn accents_combine_after_narrow_and_wide_cells_without_advancing() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         ctx.cell(&cell(base, width));
         ctx.cell(&cell("\u{301}", 0));
@@ -136,7 +140,14 @@ fn variation_selector_policy_controls_padding_and_invalidation() {
             variation_selector_always_wide: wide,
             ..ScreenWritePolicy::default()
         };
-        let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+        let mut ctx = ScreenWriteCtx::start(
+            &mut screen,
+            &mut sink,
+            policy,
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         let mut base = cell("♥", 1);
         base.bg = Colour(4);
         ctx.cell(&base);
@@ -169,7 +180,14 @@ fn partly_hidden_forced_combination_changes_grid_but_not_cursor_or_output() {
         pane_backed: true,
         ..ScreenWritePolicy::default()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        policy,
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cell(&cell("♥", 1));
     ctx.cell(&cell("\u{fe0f}", 0));
     assert_eq!(ctx.screen.cx, 1);
@@ -199,7 +217,14 @@ fn forced_combination_at_last_column_preserves_pinned_cursor_clamp() {
         variation_selector_always_wide: true,
         ..ScreenWritePolicy::default()
     };
-    let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+    let mut ctx = ScreenWriteCtx::start(
+        &mut screen,
+        &mut sink,
+        policy,
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
     ctx.cell(&cell("♥", 1));
     assert_eq!(ctx.screen.cx, 4);
     ctx.cell(&cell("\u{fe0f}", 0));
@@ -229,6 +254,8 @@ fn zwj_modifier_and_regional_pairs_use_pinned_combination_rules() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         for (text, columns) in parts {
             ctx.cell(&cell(text, columns));
@@ -252,6 +279,8 @@ fn third_regional_indicator_starts_another_cell() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     for text in ["🇩", "🇪", "🇫"] {
         ctx.cell(&cell(text, 1));
@@ -278,6 +307,8 @@ fn hangul_jamo_composes_or_discards_without_generic_segmentation() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&cell("x", 1));
     ctx.cell(&cell("ᅡ", 1));
@@ -307,6 +338,8 @@ fn payload_capacity_discards_dependent_but_writes_independent_input() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         let mut full = cell("a", 1);
         full.data.data[..28].fill(b'a');
@@ -347,7 +380,14 @@ fn overwriting_every_tab_padding_column_retains_distinct_backgrounds() {
             pane_backed: true,
             ..ScreenWritePolicy::default()
         };
-        let mut ctx = ScreenWriteCtx::start(&mut screen, &mut sink, policy, &mut registry);
+        let mut ctx = ScreenWriteCtx::start(
+            &mut screen,
+            &mut sink,
+            policy,
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
         ctx.cell(&cell("x", 1));
         for x in 0..5 {
             let stored = ctx.screen.grid.view_get_cell(x, 0);
@@ -389,6 +429,8 @@ fn wide_overwrite_repairs_trailing_padding_and_sets_new_background() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     let mut new = cell("語", 2);
     new.bg = Colour(5);
@@ -422,6 +464,8 @@ fn compact_equal_cell_skips_output_but_extended_cell_does_not() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         ctx.cell(&input);
         assert_eq!(ctx.screen.cx, u32::from(width));
@@ -442,6 +486,8 @@ fn insert_emits_prewrite_snapshot_without_shifting_twice() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&cell("界", 2));
     assert_eq!(ctx.screen.cx, 2);
@@ -464,6 +510,8 @@ fn pending_wrap_and_nowrap_wide_rejection_match_cell_rules() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&cell("a", 1));
     assert_eq!(ctx.screen.cx, 4);
@@ -500,6 +548,8 @@ fn partly_hidden_wide_cell_draws_only_visible_spaces() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&cell("界", 2));
     assert_eq!(
@@ -523,6 +573,8 @@ fn exact_capacity_draw_preserves_payload_and_pinned_storage_alias() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     let mut base = cell("a", 1);
     base.data.data[..30].fill(b'a');
@@ -554,6 +606,8 @@ fn invalid_preceding_padding_discards_dependent_input() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&cell("\u{301}", 0));
     assert_eq!(ctx.screen.grid.view_get_cell(0, 0).data.bytes(), b"a");
@@ -578,6 +632,8 @@ fn narrow_write_repairs_both_columns_of_old_wide_cell() {
             &mut sink,
             ScreenWritePolicy::default(),
             &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
         );
         ctx.cell(&cell("x", 1));
         let repaired = ctx.screen.grid.view_get_cell(1 - x, 0);
@@ -616,6 +672,8 @@ fn selection_disables_equal_cell_skip_and_only_styles_output() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&source);
     let stored = ctx.screen.grid.view_get_cell(0, 0);
@@ -640,6 +698,8 @@ fn modifier_base_absent_from_pinned_table_stays_separate() {
         &mut sink,
         ScreenWritePolicy::default(),
         &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
     );
     ctx.cell(&cell("☝", 1));
     ctx.cell(&cell("🏻", 2));

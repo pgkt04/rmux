@@ -104,7 +104,12 @@ pub struct TtySelection<'a> {
 pub enum TtyCommandData<'a> {
     Count(u32),
     Bytes(&'a [u8]),
-    Selection { clip: &'a str, data: &'a [u8] },
+    Selection {
+        clip: &'a str,
+        data: &'a [u8],
+    },
+    #[cfg(feature = "sixel")]
+    SixelImage(&'a rmux_emu::image::Image),
 }
 pub struct TtyCtx<'a> {
     pub s: &'a Screen,
@@ -172,6 +177,8 @@ pub enum TtyCommand {
     RedrawLine,
     SetSelection,
     RawString,
+    #[cfg(feature = "sixel")]
+    SixelImage,
     SyncStart,
 }
 
@@ -197,6 +204,8 @@ impl From<&rmux_emu::screen::write::DrawCommand<'_>> for TtyCommand {
             Draw::ReverseIndex { .. } => Self::ReverseIndex,
             Draw::SetSelection { .. } => Self::SetSelection,
             Draw::RawString { .. } => Self::RawString,
+            #[cfg(feature = "sixel")]
+            Draw::SixelImage { .. } => Self::SixelImage,
         }
     }
 }
@@ -215,6 +224,10 @@ struct ClampedLine {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 struct ClampedArea {
+    #[cfg(feature = "sixel")]
+    skip_x: u32,
+    #[cfg(feature = "sixel")]
+    skip_y: u32,
     x: u32,
     y: u32,
     width: u32,
@@ -286,7 +299,7 @@ fn clamp_area(ctx: &TtyCtx<'_>, px: u32, py: u32, nx: u32, ny: u32) -> Option<Cl
     if !is_visible(ctx, px, py, nx, ny) {
         return None;
     }
-    let (_, x, width) = clamp_axis(
+    let (_skip_x, x, width) = clamp_axis(
         position(ctx.rxoff, px, 0),
         position(ctx.xoff, px, 0),
         nx,
@@ -294,7 +307,7 @@ fn clamp_area(ctx: &TtyCtx<'_>, px: u32, py: u32, nx: u32, ny: u32) -> Option<Cl
         ctx.wsx,
         false,
     );
-    let (_, y, height) = clamp_axis(
+    let (_skip_y, y, height) = clamp_axis(
         position(ctx.ryoff, py, 0),
         position(ctx.yoff, py, 0),
         ny,
@@ -303,6 +316,10 @@ fn clamp_area(ctx: &TtyCtx<'_>, px: u32, py: u32, nx: u32, ny: u32) -> Option<Cl
         false,
     );
     Some(ClampedArea {
+        #[cfg(feature = "sixel")]
+        skip_x: _skip_x,
+        #[cfg(feature = "sixel")]
+        skip_y: _skip_y,
         x,
         y,
         width,
@@ -449,6 +466,7 @@ impl Tty {
             y,
             width: nx,
             height: ny,
+            ..
         } = c;
         if nx == 0 || ny == 0 {
             return;
@@ -787,6 +805,8 @@ impl Tty {
                 self.add(ctx.bytes());
                 self.invalidate(state);
             }
+            #[cfg(feature = "sixel")]
+            SixelImage => self.command_sixelimage(state, ctx),
             SyncStart => {
                 if ctx.flags.contains(TtyCtxFlags::SYNC) {
                     self.sync_start(state);
@@ -794,6 +814,53 @@ impl Tty {
             }
         }
         None
+    }
+}
+
+#[cfg(feature = "sixel")]
+impl Tty {
+    fn command_sixelimage(&mut self, state: &mut TparmState, ctx: &TtyCtx<'_>) {
+        let TtyCommandData::SixelImage(image) = ctx.data else {
+            panic!("image command without image");
+        };
+        let (sx, sy) = image.data.size_in_cells();
+        let Some(area) = clamp_area(ctx, ctx.ocx, ctx.ocy, sx, sy) else {
+            return;
+        };
+        let xpixel = std::num::NonZeroU32::new(self.xpixel);
+        let ypixel = std::num::NonZeroU32::new(self.ypixel);
+        if (!self.term().flags().contains(TtyTermFlags::SIXEL) && !self.term().has(Code::Sxl))
+            || xpixel.is_none()
+            || ypixel.is_none()
+        {
+            self.region_off(state);
+            self.margin_off(state);
+            self.cursor(state, area.x, area.y);
+            self.flags.insert(TtyFlags::NOBLOCK);
+            self.add(&image.fallback);
+            self.invalidate(state);
+            return;
+        }
+        let Some(scaled) = image.data.scale(
+            xpixel,
+            ypixel,
+            area.skip_x,
+            area.skip_y,
+            area.width,
+            area.height,
+            false,
+        ) else {
+            return;
+        };
+        let Some(bytes) = scaled.print(Some(&image.data)) else {
+            return;
+        };
+        self.region_off(state);
+        self.margin_off(state);
+        self.cursor(state, area.x, area.y);
+        self.flags.insert(TtyFlags::NOBLOCK);
+        self.add(&bytes);
+        self.invalidate(state);
     }
 }
 

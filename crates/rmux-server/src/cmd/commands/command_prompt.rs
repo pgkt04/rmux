@@ -18,10 +18,10 @@ struct Prompt {
     item: Option<QueueItemId>,
     state: Option<ArgsCommandState>,
     flags: PromptFlags,
-    pane: Option<PaneId>,
     prompts: Vec<(Vec<u8>, Vec<u8>)>,
     current: usize,
     answers: Vec<ByteString>,
+    update: Option<(ByteString, ByteString)>,
 }
 impl Prompt {
     fn close(&mut self, server: &mut Server) {
@@ -54,11 +54,7 @@ impl Prompt {
             self.answers.push(text.into());
             self.current += 1;
             if let Some((message, input)) = self.prompts.get(self.current) {
-                if let Some(pane) = self.pane {
-                    prompt::pane_prompt_update(server, pane, message, Some(input));
-                } else if let Some(client) = client {
-                    status::status_prompt_update(server, client, message, Some(input));
-                }
+                self.update = Some((message.as_slice().into(), input.as_slice().into()));
                 return PromptResult::Continue;
             }
         }
@@ -106,6 +102,9 @@ impl StatusPromptInput for Prompt {
     ) -> PromptResult {
         self.answer(server, Some(client), text, key)
     }
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        self.update.take()
+    }
     fn free(&mut self, server: &mut Server) {
         Prompt::free(self, server);
     }
@@ -120,6 +119,9 @@ impl PanePromptInput for Prompt {
         key: PromptKeyResult,
     ) -> PromptResult {
         self.answer(server, client, text, key)
+    }
+    fn take_update(&mut self) -> Option<(ByteString, ByteString)> {
+        self.update.take()
     }
     fn free(&mut self, server: &mut Server) {
         Prompt::free(self, server);
@@ -223,10 +225,10 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         item: wait.then_some(item),
         state: Some(state),
         flags,
-        pane,
         prompts,
         current: 0,
         answers: Vec::new(),
+        update: None,
     };
     let (message, input) = continuation.prompts[0].clone();
     if let Some(pane) = pane {

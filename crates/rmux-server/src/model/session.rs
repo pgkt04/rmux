@@ -243,7 +243,7 @@ pub fn session_free(server: &mut Server, session: SessionId) -> bool {
         .request_remove(session)
         .expect("session free")
         .expect("unleased session");
-    server.options.free(s.options);
+    server.free_options(s.options);
     true
 }
 
@@ -1833,15 +1833,22 @@ mod tests {
                     .intersects(WinlinkFlags::ALERTFLAGS)
             );
         }
-        assert!(
-            !server
-                .windows
-                .get(window)
-                .unwrap()
-                .flags
-                .intersects(super::super::WindowFlags::ALERTFLAGS)
+        // session_set_current clears WINDOW_ALERTFLAGS, then window_update_activity
+        // queues WINDOW_ACTIVITY. monitor-activity defaults off, so the flag stays
+        // until a later alerts_dispatch only when monitoring is enabled.
+        assert_eq!(
+            server.windows.get(window).unwrap().flags & super::super::WindowFlags::ALERTFLAGS,
+            super::super::WindowFlags::ACTIVITY
         );
+        assert!(!server.alerts.is_pending(window));
         assert_eq!(server.windows.get(window).unwrap().activity, (888, 4));
+        assert!(server.effects.iter().any(|effect| matches!(
+            effect,
+            ModelEffect::Alert(super::super::alerts::AlertEffect::SilenceTimer {
+                window: id,
+                seconds: 0,
+            }) if *id == window
+        )));
         let effects = session_effects(&server);
         assert_eq!(
             effects[effects.len() - 2],

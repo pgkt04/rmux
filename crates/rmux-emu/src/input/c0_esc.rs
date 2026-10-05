@@ -17,7 +17,7 @@
 
 //! C0 and ESC dispatch (`input.c:1302-1459`).
 
-use super::{Env, FLAG_DISCARD, FLAG_LAST, Flow, InputCtx, Pending};
+use super::{Env, FLAG_DISCARD, FLAG_LAST, Flow, InputCtx, Pending, Sub};
 use crate::screen::{ScreenMode, ScreenResetPolicy};
 use rmux_util::utf8::UTF8_SIZE;
 
@@ -134,12 +134,12 @@ impl InputCtx {
     }
 
     /// `input_esc_dispatch` (`input.c:1387-1459`).
-    pub(super) fn esc_dispatch(&mut self, env: &mut Env<'_, '_>) {
+    pub(super) fn esc_dispatch(&mut self, env: &mut Env<'_, '_>) -> Flow {
         if self.flags & FLAG_DISCARD != 0 {
-            return;
+            return Flow::Done;
         }
         let Some(entry) = table_lookup(&ESC_TABLE, self.ch, self.interm.as_slice()) else {
-            return;
+            return Flow::Done;
         };
         match entry {
             Esc::Ris => {
@@ -147,10 +147,13 @@ impl InputCtx {
                     palette.clear_runtime();
                 }
                 self.reset_cell();
+                env.sw.screen.clear_surface_anchors();
                 env.sw.reset(ScreenResetPolicy {
                     extended_keys: env.policy.reset_extended_keys,
                 });
                 env.sw.fullredraw();
+                self.flags &= !FLAG_LAST;
+                return Flow::Yield(Pending::TerminalReset, Sub::Done);
             }
             Esc::Ind => env.sw.linefeed(false, self.cell.cell.bg),
             Esc::Nel => {
@@ -176,6 +179,7 @@ impl InputCtx {
             Esc::St => {}
         }
         self.flags &= !FLAG_LAST;
+        Flow::Done
     }
 }
 

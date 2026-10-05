@@ -443,7 +443,30 @@ fn startup_fills_every_global_tree() {
             assert!(store.get_only(store.global_w, oe.name).is_some(), "{name}");
         }
     }
-    assert_eq!(store.entries(store.global).count(), 47);
+    let pinned = std::fs::read_to_string(FIXTURE).expect("pinned option table");
+    for (scope, tree) in [
+        (OptionsScope::SERVER, store.global),
+        (OptionsScope::SESSION, store.global_s),
+        (OptionsScope::WINDOW, store.global_w),
+    ] {
+        let expected: std::collections::BTreeSet<_> = pinned
+            .split("\n\n")
+            .filter_map(|block| {
+                let name = block.lines().find_map(|line| line.strip_prefix("name="))?;
+                let bits = block
+                    .lines()
+                    .find_map(|line| line.strip_prefix("scope="))?
+                    .parse::<u32>()
+                    .expect("pinned scope");
+                (bits & scope.bits() != 0).then_some(name.as_bytes().to_vec())
+            })
+            .collect();
+        let actual: std::collections::BTreeSet<_> = store
+            .entries(tree)
+            .map(|entry| entry.name().to_vec())
+            .collect();
+        assert_eq!(actual, expected, "global scope {}", scope.bits());
+    }
 }
 
 // ---- oracle differential -----------------------------------------------------

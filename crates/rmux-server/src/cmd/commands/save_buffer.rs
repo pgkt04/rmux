@@ -74,6 +74,13 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
         libc::O_TRUNC
     };
     let callback = done_callback(item, path.clone());
-    file::write(server, c, &path, flags, bufdata, callback);
+    file::write(
+        server,
+        c,
+        &path,
+        flags,
+        bufdata.as_slice().to_vec(),
+        callback,
+    );
     CmdReturn::Wait
 }
