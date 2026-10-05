@@ -8,8 +8,9 @@ namespace; it never connects to a C tmux server.
 P0 provides the workspace, oracle, regression/differential harnesses and platform
 probes. It does **not** implement a server: `rmux -V` prints its version, `-h`
 prints usage, and other valid invocations fail with
-`rmux: server not implemented yet (P0)`. Terminal and server crates are empty
-phase boundaries, not pretend implementations.
+`rmux: server not implemented yet (P0)`. P1 adds typed generational server
+arenas with deferred lease-based removal and canonical header enums, flags,
+and encoded key constants; it does not add terminal or server behavior.
 
 ## Build
 
@@ -24,6 +25,21 @@ cargo test --workspace
 ```
 
 Only `rmux-sys` permits unsafe code. Workspace clippy warnings are errors.
+
+The G00 header-value test extracts `8f25579c` into a temporary directory and
+compiles a C reference to compare all enum, key, flag and composite-mask values.
+Set `RMUX_TMUX_SOURCE` to the pinned tmux git checkout (default:
+`/Users/j/fun/tmux`). The test reports a skip when the checkout or C compiler
+is unavailable; libevent headers are required when the reference is present.
+
+The G01 foundation tests (`rmux-util`, `rmux-sys`) compile small C programs
+from the pinned `utf8.c`, `utf8-combined.c` and `compat/*.c` (`TMUX_SRC`,
+default `$HOME/fun/tmux`) and compare decoder widths for every code point,
+vis/unvis, strtonum and base64 against them; the width programs link the same
+Homebrew `libutf8proc` the oracle uses (`pkg-config libutf8proc`). On macOS
+`rmux-sys` links `libutf8proc` for `utf8proc_charwidth`; Linux uses libc
+`wcwidth`. One test drives `oracle/bin/tmux` with `#{w:...}`. Missing
+prerequisites print a skip; a failing C compile is a test failure.
 
 ## Pinned oracle
 

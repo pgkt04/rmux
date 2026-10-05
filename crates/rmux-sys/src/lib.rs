@@ -1,4 +1,32 @@
+pub mod errno;
+pub mod fd;
+pub mod ids;
+pub mod locale;
+pub mod osdep;
+pub mod proc;
+pub mod pty;
+pub mod termios;
+
+pub use errno::{access_executable, errno, strerror};
+pub use ids::{GroupId, PrincipalId, ProcessId, UserId};
+pub use std::os::fd::OwnedFd;
+pub use termios::TermiosState;
+
+/// `compat.h:268-270`.
+pub const TTY_NAME_MAX: usize = 32;
+/// `compat.h:272-274`; macOS lacks the constant and uses 255.
+pub const HOST_NAME_MAX: usize = 255;
+
 use std::io;
+
+mod cstring;
+pub mod fnmatch;
+pub mod number;
+pub mod path;
+pub mod regex;
+pub mod time;
+
+pub use fnmatch::{FnmatchFlags, fnmatch};
 
 pub fn terminate_process_group(child: &mut std::process::Child) -> io::Result<bool> {
     if child.try_wait()?.is_some() {
