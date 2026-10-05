@@ -242,6 +242,14 @@ pub struct ScreenWriteLine {
     pub data: Vec<u8>,
     pub items: Vec<ScreenWriteItem>,
 }
+/// Borrow-free continuation for synchronous server barriers; suspension never flushes.
+pub struct ScreenWriteState {
+    flags: ScreenWriteFlags,
+    spans: Vec<Range<u32>>,
+    scrolled: u32,
+    bg: Colour,
+    item: ScreenWriteItem,
+}
 pub struct ScreenWriteCtx<'a> {
     pub screen: &'a mut Screen,
     pub(crate) sink: &'a mut dyn TtySink,
@@ -274,6 +282,34 @@ impl<'a> ScreenWriteCtx<'a> {
             scrolled: 0,
             bg: Colour::DEFAULT,
             item: ScreenWriteItem::default(),
+        }
+    }
+    pub fn suspend(self) -> ScreenWriteState {
+        ScreenWriteState {
+            flags: self.flags,
+            spans: self.spans,
+            scrolled: self.scrolled,
+            bg: self.bg,
+            item: self.item,
+        }
+    }
+    pub fn resume(
+        screen: &'a mut Screen,
+        sink: &'a mut dyn TtySink,
+        policy: ScreenWritePolicy,
+        registry: &'a mut HyperlinkRegistry,
+        state: ScreenWriteState,
+    ) -> Self {
+        Self {
+            screen,
+            sink,
+            policy,
+            registry,
+            flags: state.flags,
+            spans: state.spans,
+            scrolled: state.scrolled,
+            bg: state.bg,
+            item: state.item,
         }
     }
     pub fn finish(mut self) {

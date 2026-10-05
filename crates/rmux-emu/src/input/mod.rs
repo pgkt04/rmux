@@ -270,6 +270,15 @@ impl InputCtx {
         self.flags = 0;
         self.resume = None;
     }
+    /// `input_ground_timer_callback` resets state without clearing the screen.
+    pub fn ground_timeout(&mut self) {
+        self.reset_cell();
+        self.clear();
+        self.timer_armed = false;
+        self.state = StateId::Ground;
+        self.flags = 0;
+        self.resume = None;
+    }
 
     /// `input_pending` (`input.c:951-954`).
     pub fn pending(&self) -> &[u8] {

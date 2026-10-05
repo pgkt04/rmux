@@ -12,6 +12,68 @@ prints usage, and other valid invocations fail with
 arenas with deferred lease-based removal and canonical header enums, flags,
 and encoded key constants; it does not add terminal or server behavior.
 
+The G12 model (`rmux-server::model`) owns generation-bearing session, group,
+winlink, window and pane arenas, separate public-id indexes, ordered selection
+history, paste buffers and format subscriptions. Model mutations expose owned
+events and timer requests; the event loop and client/redraw owners consume them
+in P7/P8. Pane parsing preserves synchronous emulator barriers, including
+alternate-screen geometry repair, and request replies follow a pane-owned FIFO.
+Process launch prepares arguments and environment before fork and changes cwd
+only in the child. This deliberately does not preserve the pinned `spawn.c`
+parent-cwd change on fork failure: the parent's cwd remains unchanged on every
+launch path. The child still tries requested cwd, home and `/`, and sets PWD to
+the selected directory. Model tests cover lifecycle/selection ordering, store
+semantics, monitor cache identity, resize and alerts, plus pinned C/oracle
+comparisons and a real pty command parsed into a pane screen.
+`PaneInputHost` supplies synchronous pipe/control delivery, draw and geometry
+repair. `PaneModeDriver` and `PanePromptEngine` delegate to the owning mode and
+prompt engines rather than installing parallel engines in the model. Server
+`model_event` and `option_monitor_removed` dispatch callbacks run synchronously;
+in particular, a window-closed callback may retain the window before its final
+release. Hook-monitor subscriptions require an installed dispatch callback.
+`ModelWithClients` lends live G15 client views to G11 target lookup without
+creating a second client arena. `rmux_sys::pty::{LaunchOptions, PreparedLaunch,
+LaunchedProcess}` is the owned launch boundary.
+
+
+The G10 format core (`rmux-server::format`) expands arbitrary byte strings with
+the pinned lookup order, lazy callbacks/conditionals, POSIX regex modifiers,
+time conversion, ordered model/options/environment loops and styled widths.
+Its 214-entry registry computes model and emulator facts directly; borrowed
+`FormatExternal` facts supply client, mouse, mode, default-colour and pipe data
+owned by later phases. Owner and evaluated clients remain distinct, including
+job namespaces and legacy layout selection. `ServerFormatRuntime` connects
+real job transports and client leases; the model-only runtime emits owned
+actions rather than claiming an unstarted child exists. Cached jobs reject
+stale callbacks and preserve the pinned update/completion line distinction;
+animation uses one generation-checked 100-ms owner timer. G11 argument,
+configuration-condition and hook expansion use this same engine.
+Format tests include a private-socket pinned-oracle corpus and extracted-C
+registry, quoting and time comparisons. Full command-driven regression tests
+remain dependent on the P7 server and later client/redraw/mode consumers.
+
+G10 helpers provide restricted byte-preserving JSON, duplicate-preserving model
+sorting, POSIX substitution, scored fuzzy masks and eight-section styled drawing.
+Drawing comparisons include cells, colours, attributes, links, ranges and cursor
+restoration, not just visible text. JSON/substitution tests compile extracted C
+automatically; full drawing/fuzzy/sort references can be rebuilt with:
+
+```sh
+python3 scripts/build-format-drivers.py --tmux-source /Users/j/fun/tmux --output /tmp/swarm-rmux-build/g10-reference
+export RMUX_G10_HELPER_DRIVER=/tmp/swarm-rmux-build/g10-reference/helper-driver
+export RMUX_FORMAT_HELPER_DRIVER=/tmp/swarm-rmux-build/g10-reference/helper-driver
+export RMUX_G10_SORT_DRIVER=/tmp/swarm-rmux-build/g10-reference/sort-driver
+cargo test -p rmux-server pinned_
+```
+
+The full reference build needs the oracle's compiler, autotools, libevent,
+ncurses and (on macOS) utf8proc dependencies. Missing references report a clear
+skip; supplied references must match. Existing configured oracle objects can
+also be linked with `scripts/build-format-helper-driver.sh BUILD_DIR OUTPUT`.
+Run `TMUX_SRC=/Users/j/fun/tmux cargo test -p rmux-server --test format_json_regsub`
+for automatic JSON/substitution C extraction; `RMUX_JSON_REGSUB_DRIVER` selects
+an already compiled driver for the parser, typed accessor and substitution corpus.
+
 ## Build
 
 Stable Rust 1.85 or newer (edition 2024):
@@ -162,6 +224,22 @@ its `--check` mode compares decoded literals independently of Rust formatting.
 The ignored `parser_fuzz_ten_minutes_parseonly_oracle_status` test accepts
 `RMUX_CMD_FUZZ_SECONDS` and `RMUX_CMD_FUZZ_SEED`; two 300-second runs with seeds
 1 and 2 provide the ten-minute parser/oracle acceptance run within bounded jobs.
+
+The G13 layout port (`rmux-server::layout`) keeps the cell tree in the server
+arena (`Server.layout_cells`, `LayoutCellId`) and reaches the window and pane
+model through the `LayoutHost` trait, implemented for `model::Server` in
+`layout/host.rs`. `tree.rs` is `layout.c` (split, destroy, resize, spread,
+floating cells, tile and untile), `custom.rs` is `layout-custom.c` (v2 JSON and
+legacy v1 strings with the rotate-and-add checksum, byte-exact parse causes)
+and `set.rs` is `layout-set.c` (the seven presets). C unsigned wrap is kept
+where it is observable (float clamping, tiled sizes); one deliberate deviation:
+a float split in a window too small for its borders reports `no space for a new
+pane` where the pinned server crashes. Differential tests start a private
+oracle server and compare `#{window_layout}`, the control-client v1 dump, the
+window size and every pane's geometry after each step of split, `new-pane`,
+`resize-pane`, `resize-window`, preset and kill sequences, plus a seeded random
+walk; they skip when `oracle/bin/tmux` is missing. `parse_fuzz_never_panics`
+accepts `RMUX_LAYOUT_FUZZ_SECONDS` and `RMUX_LAYOUT_FUZZ_SEED`.
 
 ## Pinned oracle
 

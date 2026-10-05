@@ -83,6 +83,29 @@ impl CommandParser for RealParser {
     }
 }
 
+#[test]
+fn numeric_setter_without_parser_matches_materialized_numbers() {
+    let mut store = OptionsStore::new();
+    let mut parser = StubParser::default();
+    store.load_defaults(&mut parser);
+    let left = store.create(Some(store.global_w));
+    let right = store.create(Some(store.global_w));
+    for (name, values) in [
+        (b"automatic-rename".as_slice(), [0, 1]),
+        (b"remain-on-exit".as_slice(), [2, 0]),
+    ] {
+        for value in values {
+            store.set_number(left, name, value, &mut parser);
+            store.set_number_value(right, name, value);
+            assert_eq!(store.get_number(left, name), store.get_number(right, name));
+            assert_eq!(
+                store.get_only(left, name).unwrap().is_number(),
+                store.get_only(right, name).unwrap().is_number()
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct RecordingSink {
     freed: Vec<HooksMonitorId>,

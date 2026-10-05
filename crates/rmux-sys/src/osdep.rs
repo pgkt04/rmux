@@ -9,6 +9,16 @@ fn until_nul(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
+/// The initial pane title uses gethostname (`window.c:1479-1481`).
+pub fn hostname() -> std::io::Result<Vec<u8>> {
+    let mut name = [0u8; crate::HOST_NAME_MAX + 1];
+    // SAFETY: name is writable for its complete length; gethostname takes its bound.
+    if unsafe { libc::gethostname(name.as_mut_ptr().cast(), name.len()) } == -1 {
+        return Err(std::io::Error::last_os_error());
+    }
+    Ok(until_nul(&name).to_vec())
+}
+
 /// `osdep_get_name`: the raw kernel process name of the pty's foreground group.
 #[cfg(target_os = "macos")]
 pub fn get_name(fd: BorrowedFd<'_>) -> Option<Vec<u8>> {

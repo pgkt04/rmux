@@ -49,6 +49,29 @@ pub fn printf_fixed(dst: &mut Vec<u8>, precision: i32, value: f64) -> io::Result
     Ok(())
 }
 
+/// Preserve the native C `(double)(long long)value` conversion, including
+/// architecture-specific nonfinite and out-of-range results.
+pub fn format_integer_operand(value: f64) -> f64 {
+    #[cfg(target_arch = "aarch64")]
+    {
+        let integer: i64;
+        // SAFETY: this register-only conversion has no memory or stack effects.
+        unsafe {
+            std::arch::asm!("fcvtzs {integer}, {value:d}", integer = out(reg) integer, value = in(vreg) value, options(nomem, nostack, pure));
+        }
+        integer as f64
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        // SAFETY: SSE2 is guaranteed by the x86-64 ABI.
+        unsafe { std::arch::x86_64::_mm_cvttsd_si64(std::arch::x86_64::_mm_set_sd(value)) as f64 }
+    }
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+    {
+        (value as i64) as f64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -25,9 +25,47 @@ pub fn check_shell(path: &[u8], program: &[u8]) -> bool {
     rmux_sys::access_executable(path)
 }
 
+/// `clean_name`: valid UTF-8, visible controls, and untrusted format-job filtering.
+pub fn clean_name(name: &[u8], untrusted: bool) -> Option<Vec<u8>> {
+    let name = crate::bytes::cstr(name);
+    std::str::from_utf8(name).ok()?;
+    let mut bytes = name.to_vec();
+    if untrusted {
+        for i in 0..bytes.len().saturating_sub(1) {
+            if bytes[i] == b'#' && bytes[i + 1] == b'(' {
+                bytes[i] = b'_';
+            }
+        }
+    }
+    let mut out = Vec::new();
+    crate::utf8::strvis(
+        &mut out,
+        &bytes,
+        crate::vis::VisFlags::OCTAL
+            | crate::vis::VisFlags::CSTYLE
+            | crate::vis::VisFlags::TAB
+            | crate::vis::VisFlags::NL,
+    );
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn names_validate_escape_and_filter_jobs() {
+        assert!(clean_name(&[0xff], true).is_none());
+        assert_eq!(
+            clean_name(b"x#(whoami)\t\n", true).unwrap(),
+            b"x_(whoami)\\t\\n"
+        );
+        assert_eq!(
+            clean_name("é#(job)".as_bytes(), false).unwrap(),
+            "é#(job)".as_bytes()
+        );
+        assert_eq!(clean_name(b"name\0ignored", true).unwrap(), b"name");
+    }
 
     #[test]
     fn bin_sh_is_a_shell() {

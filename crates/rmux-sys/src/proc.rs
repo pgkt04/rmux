@@ -1,10 +1,62 @@
-// Ported from tmux compat/setproctitle.c, compat/getpeereid.c, compat/closefrom.c,
-// compat/daemon.c, compat/daemon-darwin.c @ 8f25579c
+// Ported from tmux spawn.c, server-client.c, compat/setproctitle.c,
+// compat/getpeereid.c, compat/closefrom.c, compat/daemon.c, compat/daemon-darwin.c @ 8f25579c
 
 use std::io;
 use std::os::fd::BorrowedFd;
 
 use crate::{GroupId, ProcessId, UserId};
+
+pub fn wait_exit_status(status: i32) -> Option<i32> {
+    libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
+}
+
+pub fn wait_signal_name(status: i32) -> Option<Vec<u8>> {
+    if !libc::WIFSIGNALED(status) {
+        return None;
+    }
+    let signal = libc::WTERMSIG(status);
+    #[cfg(target_os = "macos")]
+    if signal > 0 && signal < 32 {
+        unsafe extern "C" {
+            static sys_signame: [*const libc::c_char; 32];
+        }
+        // SAFETY: Darwin exports NSIG entries; checked signal indexes it,
+        // and each signal name is an immutable NUL-terminated string.
+        return Some(
+            unsafe { std::ffi::CStr::from_ptr(sys_signame[signal as usize]) }
+                .to_bytes()
+                .to_vec(),
+        );
+    }
+    Some(signal.to_string().into_bytes())
+}
+
+pub fn home_directory(user: Option<&[u8]>) -> Option<Vec<u8>> {
+    if user.is_none() {
+        use std::os::unix::ffi::OsStringExt;
+        if let Some(home) = std::env::var_os("HOME").filter(|v| !v.is_empty()) {
+            return Some(home.into_vec());
+        }
+    }
+    let name = user.map(crate::cstring::nul_terminated);
+    // SAFETY: name is NUL-terminated; libc owns the returned record. Copy
+    // its directory before any other passwd lookup can invalidate it.
+    unsafe {
+        let record = if let Some(name) = &name {
+            libc::getpwnam(name.as_ptr().cast())
+        } else {
+            libc::getpwuid(libc::getuid())
+        };
+        if record.is_null() || (*record).pw_dir.is_null() {
+            return None;
+        }
+        Some(
+            std::ffi::CStr::from_ptr((*record).pw_dir)
+                .to_bytes()
+                .to_vec(),
+        )
+    }
+}
 
 /// `compat/setproctitle.c:29-47`: `<program>: <title>` in 16 bytes, cut at the
 /// last retained space when truncated, then `PR_SET_NAME`.
@@ -286,4 +338,62 @@ pub fn getpid() -> ProcessId {
 pub fn getuid() -> UserId {
     // SAFETY: getuid takes no arguments and cannot fail.
     UserId(unsafe { libc::getuid() })
+}
+
+/// Wait for this owned child only, preserving the raw wait status for the model.
+pub fn wait_process(pid: ProcessId, nonblocking: bool) -> io::Result<Option<i32>> {
+    let mut status = 0;
+    loop {
+        // SAFETY: status is writable; pid designates the child being waited for.
+        let result = unsafe {
+            libc::waitpid(
+                pid.0,
+                &mut status,
+                if nonblocking { libc::WNOHANG } else { 0 },
+            )
+        };
+        if result == -1 {
+            let error = io::Error::last_os_error();
+            if error.kind() == io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
+        return Ok((result != 0).then_some(status));
+    }
+}
+
+pub fn exit_code(status: i32) -> i32 {
+    if libc::WIFEXITED(status) {
+        libc::WEXITSTATUS(status)
+    } else if libc::WIFSIGNALED(status) {
+        128 + libc::WTERMSIG(status)
+    } else {
+        128 + libc::SIGHUP
+    }
+}
+
+/// Terminate one owned child; never signal unrelated processes or groups.
+pub fn terminate_process(pid: ProcessId) -> io::Result<()> {
+    // SAFETY: kill receives an explicit child pid and a valid signal number.
+    if unsafe { libc::kill(pid.0, libc::SIGKILL) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Create the editor file with mkstemp's exclusive, mode-0600 semantics.
+pub fn temporary_file(template: &[u8]) -> io::Result<(std::fs::File, Vec<u8>)> {
+    use std::os::fd::FromRawFd;
+    let mut path = std::ffi::CString::new(template)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "temporary path contains NUL"))?
+        .into_bytes_with_nul();
+    // SAFETY: path is a mutable NUL-terminated template; mkstemp returns a fresh fd.
+    let fd = unsafe { libc::mkstemp(path.as_mut_ptr().cast()) };
+    if fd == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    path.pop();
+    // SAFETY: successful mkstemp transfers unique ownership of its new fd.
+    Ok((unsafe { std::fs::File::from_raw_fd(fd) }, path))
 }

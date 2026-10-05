@@ -238,4 +238,21 @@ impl TryFrom<i32> for WindowSizePolicy {
 
 pub mod alerts;
 pub mod monitor;
+pub mod names;
+pub mod pane;
+pub mod pane_input;
+pub mod paste;
+pub mod resize;
+pub mod session;
 pub mod spawn;
+pub mod state;
+pub mod store_runtime;
+pub mod view;
+pub mod window;
+pub mod winlink;
+pub use session::{
+    DetachOutcome, SelectOutcome, SessionCreate, SessionEffect, SessionTimerRequest,
+};
+pub use state::{
+    ModelEffect, ModelError, Pane, Server, Session, SessionGroup, TimerRequest, Window, Winlink,
+};

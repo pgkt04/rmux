@@ -944,6 +944,26 @@ impl OptionsStore {
         o
     }
 
+    /// Numeric materialization never reaches command parsing (`options.c:968-987`).
+    pub fn set_number_value(
+        &mut self,
+        id: OptionsId,
+        name: &[u8],
+        value: i64,
+    ) -> &mut OptionsEntry {
+        assert!(name.first() != Some(&b'@'), "user option must be a string");
+        if self.get_only(id, name).is_none() {
+            let table = self.parent_table_entry(id, name);
+            let entry = OptionsEntry::new(name, Some(table));
+            assert!(entry.is_number(), "option is not a number");
+            self.insert_entry(id, entry);
+        }
+        let entry = self.get_mut_only(id, name).unwrap();
+        assert!(entry.is_number(), "option is not a number");
+        entry.value = OptionsValue::Number(value);
+        entry
+    }
+
     /// `options_set_command` (`options.c:989-1011`).
     pub fn set_command(
         &mut self,

@@ -1,4 +1,4 @@
-// Ported from tmux tmux.h @ 8f25579c
+// Ported from tmux format.c, tmux.h @ 8f25579c
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
  *
@@ -105,4 +105,243 @@ impl std::ops::Not for FormatTagFlags {
     }
 }
 
+pub mod draw;
+mod expand;
+pub mod fuzzy;
+pub mod grid;
+pub mod jobs;
+pub mod json;
+pub mod parse;
+pub mod regsub;
+pub mod runtime;
 pub mod sort;
+pub mod variables;
+use crate::ids::{ClientId, PaneId, PasteBufferId, QueueItemId, SessionId, WindowId, WinlinkId};
+pub use grid::{hyperlink as grid_hyperlink, line as grid_line, word as grid_word};
+pub use jobs::FormatJobs;
+pub use parse::skip;
+use rmux_util::{bytes::ByteString, time::Timestamp};
+pub use runtime::{
+    FormatExternal, FormatLoopEntry, FormatRuntime, OptionScope, ServerFormatRuntime, condition,
+    create_from_state, expand_hook, lost_client, single_from_state, tidy_jobs,
+};
+use std::collections::BTreeMap;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FormatKind {
+    #[default]
+    Unknown,
+    Session,
+    Window,
+    Pane,
+}
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FormatContext {
+    pub evaluated_client: Option<ClientId>,
+    pub session: Option<SessionId>,
+    pub winlink: Option<WinlinkId>,
+    pub window: Option<WindowId>,
+    pub pane: Option<PaneId>,
+    pub buffer: Option<PasteBufferId>,
+    pub kind: FormatKind,
+}
+#[derive(Clone, Debug)]
+pub enum FormatValue {
+    Bytes(ByteString),
+    Signed(i64),
+    Unsigned(u64),
+    Time(Timestamp),
+}
+impl FormatValue {
+    pub fn bytes(self) -> ByteString {
+        match self {
+            Self::Bytes(v) => v,
+            Self::Signed(v) => v.to_string().into(),
+            Self::Unsigned(v) => v.to_string().into(),
+            Self::Time(v) => v.sec.to_string().into(),
+        }
+    }
+}
+pub type FormatCallback =
+    Box<dyn FnMut(&FormatContext, &mut dyn FormatRuntime) -> Option<FormatValue>>;
+enum Entry {
+    Bytes(ByteString),
+    Time(Timestamp),
+    Lazy(FormatCallback, Option<ByteString>),
+}
+pub struct FormatTree {
+    pub context: FormatContext,
+    pub owner: Option<ClientId>,
+    pub item: Option<QueueItemId>,
+    pub tag: u32,
+    pub flags: FormatFlags,
+    entries: BTreeMap<ByteString, Entry>,
+}
+impl FormatTree {
+    pub fn create(
+        owner: Option<ClientId>,
+        item: Option<QueueItemId>,
+        tag: u32,
+        flags: FormatFlags,
+        runtime: &mut dyn FormatRuntime,
+    ) -> Self {
+        if let Some(owner) = owner {
+            runtime.retain_client(owner);
+        }
+        let mut tree = Self {
+            context: FormatContext::default(),
+            owner,
+            item,
+            tag,
+            flags,
+            entries: BTreeMap::new(),
+        };
+        if let Some(item) = item {
+            for (key, value) in runtime.queue_formats(item) {
+                tree.add(&key, value);
+            }
+        }
+        tree
+    }
+    pub fn release(self, runtime: &mut dyn FormatRuntime) {
+        if let Some(owner) = self.owner {
+            runtime.release_client(owner);
+        }
+    }
+    pub fn defaults(&mut self, runtime: &mut dyn FormatRuntime, mut context: FormatContext) {
+        context.kind = if context.pane.is_some() {
+            FormatKind::Pane
+        } else if context.winlink.is_some() {
+            FormatKind::Window
+        } else if context.session.is_some() {
+            FormatKind::Session
+        } else {
+            FormatKind::Unknown
+        };
+        self.context = runtime.defaults(context);
+    }
+    pub fn defaults_window(&mut self, window: WindowId) {
+        self.context.window = Some(window);
+    }
+    pub fn defaults_pane(&mut self, runtime: &mut dyn FormatRuntime, pane: PaneId) {
+        self.context.pane = Some(pane);
+        self.context = runtime.defaults(self.context);
+    }
+    pub fn defaults_paste_buffer(&mut self, buffer: PasteBufferId) {
+        self.context.buffer = Some(buffer);
+    }
+    pub fn pane(&self) -> Option<PaneId> {
+        self.context.pane
+    }
+    pub fn add(&mut self, key: &[u8], mut value: ByteString) {
+        value.0.truncate(rmux_util::bytes::cstr(&value).len());
+        self.entries
+            .insert(rmux_util::bytes::cstr(key).into(), Entry::Bytes(value));
+    }
+    pub fn add_time(&mut self, key: &[u8], value: Timestamp) {
+        self.entries
+            .insert(rmux_util::bytes::cstr(key).into(), Entry::Time(value));
+    }
+    pub fn add_callback(&mut self, key: &[u8], cb: FormatCallback) {
+        self.entries
+            .insert(rmux_util::bytes::cstr(key).into(), Entry::Lazy(cb, None));
+    }
+    pub fn merge(&mut self, from: &Self) {
+        for (key, value) in &from.entries {
+            let bytes = match value {
+                Entry::Bytes(v) | Entry::Lazy(_, Some(v)) => Some(v),
+                _ => None,
+            };
+            if let Some(v) = bytes {
+                self.add(key, v.clone());
+            }
+        }
+    }
+    fn custom(&mut self, runtime: &mut dyn FormatRuntime, key: &[u8]) -> Option<FormatValue> {
+        match self.entries.get_mut(key)? {
+            Entry::Bytes(v) => Some(FormatValue::Bytes(v.clone())),
+            Entry::Time(v) => Some(FormatValue::Time(*v)),
+            Entry::Lazy(cb, cache) => {
+                if cache.is_none() {
+                    *cache = Some(
+                        cb(&self.context, runtime)
+                            .map(FormatValue::bytes)
+                            .unwrap_or_default(),
+                    );
+                }
+                Some(FormatValue::Bytes(cache.as_ref().unwrap().clone()))
+            }
+        }
+    }
+    pub fn each(&mut self, runtime: &mut dyn FormatRuntime, mut emit: impl FnMut(&[u8], &[u8])) {
+        for key in variables::REGISTRY {
+            if let Some(value) = variables::find_owned(runtime, &self.context, self.owner, key) {
+                emit(key, &value.bytes());
+            }
+        }
+        let keys: Vec<_> = self.entries.keys().cloned().collect();
+        for key in keys {
+            if let Some(value) = self.custom(runtime, &key) {
+                emit(&key, &value.bytes());
+            }
+        }
+    }
+    pub fn expand(&mut self, runtime: &mut dyn FormatRuntime, input: &[u8]) -> ByteString {
+        expand::expand(self, runtime, input, false)
+    }
+    pub fn expand_time(&mut self, runtime: &mut dyn FormatRuntime, input: &[u8]) -> ByteString {
+        expand::expand(self, runtime, input, true)
+    }
+}
+pub fn true_value(input: Option<&[u8]>) -> bool {
+    input.is_some_and(|v| {
+        let v = rmux_util::bytes::cstr(v);
+        !v.is_empty() && v != b"0"
+    })
+}
+pub fn create_defaults(
+    runtime: &mut dyn FormatRuntime,
+    item: Option<QueueItemId>,
+    context: FormatContext,
+) -> FormatTree {
+    let owner = item.and_then(|item| runtime.owner_client(item));
+    let mut tree = FormatTree::create(owner, item, 0, FormatFlags::NONE, runtime);
+    tree.defaults(runtime, context);
+    tree
+}
+pub fn single(
+    runtime: &mut dyn FormatRuntime,
+    item: Option<QueueItemId>,
+    context: FormatContext,
+    input: &[u8],
+) -> ByteString {
+    let mut tree = create_defaults(runtime, item, context);
+    let value = tree.expand(runtime, input);
+    tree.release(runtime);
+    value
+}
+pub fn create_from_target(runtime: &mut dyn FormatRuntime, item: QueueItemId) -> FormatTree {
+    let context = runtime.target(item);
+    create_defaults(runtime, Some(item), context)
+}
+pub fn single_from_target(
+    runtime: &mut dyn FormatRuntime,
+    item: QueueItemId,
+    input: &[u8],
+) -> ByteString {
+    let context = runtime.target(item);
+    single(runtime, Some(item), context, input)
+}
+#[cfg(test)]
+mod tests;
+pub fn pretty_time(value: Timestamp, seconds: bool) -> ByteString {
+    variables::pretty_time_at(value.sec, Timestamp::now().sec, seconds)
+}
+pub fn log_debug(tree: &FormatTree, runtime: &mut dyn FormatRuntime, depth: u32, message: &[u8]) {
+    runtime.log(
+        tree.item,
+        depth.min(10),
+        message,
+        tree.flags.contains(FormatFlags::VERBOSE),
+    );
+}

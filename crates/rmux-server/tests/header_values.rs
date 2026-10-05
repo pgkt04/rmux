@@ -9768,7 +9768,7 @@ fn pinned_header_values() {
         ),
         (
             "LAYOUT_CUSTOM_OLD_FORMAT",
-            rmux_server::layout::LayoutDumpFlags::FORMAT.bits() as i64,
+            rmux_server::layout::LayoutDumpFlags::OLD_FORMAT.bits() as i64,
         ),
         (
             "MENU_NOMOUSE",
