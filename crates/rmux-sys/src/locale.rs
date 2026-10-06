@@ -150,6 +150,11 @@ mod utf8proc {
 /// on failure (state reset) or on a zero return value. The utf8proc path
 /// returns length 1 for a NUL byte, so U+0000 decodes there but not with libc.
 pub fn mbtowc(bytes: &[u8]) -> Option<u32> {
+    // glibc mbtowc reads *s before it checks n, so an empty slice's dangling
+    // pointer crashes it; tmux never converts an empty sequence.
+    if bytes.is_empty() {
+        return None;
+    }
     let Ok(len) = isize::try_from(bytes.len()) else {
         return None;
     };

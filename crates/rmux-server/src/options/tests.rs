@@ -10,6 +10,8 @@ use rmux_emu::hyperlinks::HyperlinkRegistry;
 use rmux_util::bytes::ByteString;
 use rmux_util::time::Timestamp;
 
+use crate::test_common;
+
 use super::store::{
     CommandParser, FormatExpander, HooksMonitorId, MonitorSink, OptionsParseCtx, OptionsStore,
     OptionsValue,
@@ -317,25 +319,17 @@ fn table_matches_fresh_c_dump() {
     assert!(tar.wait().unwrap().success());
     let exe = dir.join("dump");
     let mut cc = Command::new("cc");
-    cc.args([
-        "-DHAVE_CLOCK_GETTIME",
-        "-DHAVE_EVENT2_EVENT_H",
-        "-DHAVE_SYS_QUEUE_H",
-        "-DHAVE_SYS_TREE_H",
-        "-DHAVE_BITSTRING_H",
-        "-DHAVE_U_INT",
-        "-DHAVE_U_CHAR",
-        "-DHAVE_STRLCPY",
-        "-DHAVE_STRLCAT",
-        "-DHAVE_STRNLEN",
-        "-DHAVE_STRNDUP",
-        "-DHAVE_SETPROCTITLE",
-        "-D_FORTIFY_SOURCE=0",
-        // Makefile.am:17 builds with the mouse on; tmux.h:107 is the
-        // unconfigured fallback.
-        "-DTMUX_MOUSE=1",
-    ])
-    .arg(format!("-I{}", src.display()));
+    cc.args(test_common::HEADER_DEFINES.iter())
+        .args([
+            "-DHAVE_STRNLEN",
+            "-DHAVE_STRNDUP",
+            "-DHAVE_SETPROCTITLE",
+            "-D_FORTIFY_SOURCE=0",
+            // Makefile.am:17 builds with the mouse on; tmux.h:107 is the
+            // unconfigured fallback.
+            "-DTMUX_MOUSE=1",
+        ])
+        .arg(format!("-I{}", src.display()));
     cc.arg(format!("-DTMUX_TERM=\"{}\"", env!("RMUX_DEFAULT_TERM")));
     cc.arg(format!("-DTMUX_LOCK_CMD=\"{}\"", env!("RMUX_LOCK_COMMAND")));
     for include in ["/opt/homebrew/opt/libevent/include", "/usr/local/include"] {

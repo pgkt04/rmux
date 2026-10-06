@@ -324,10 +324,17 @@ fn lexer_escape_errors_and_home_fallback() {
     }
     for (bytes, error) in [
         (b"\\u12xz".as_slice(), b"invalid \\u argument".as_slice()),
-        (b"\\U00110000", b"invalid \\U argument"),
         (b"\\uD800", b"invalid \\u argument"),
     ] {
         assert_eq!(lex(bytes, &mut context).2.unwrap().message(), error);
+    }
+    // utf8_fromwc: utf8proc rejects U+110000; glibc wctomb encodes it, and a
+    // libc build gives a negative wcwidth width 1, so tmux there accepts it.
+    let above_unicode = lex(b"\\U00110000", &mut context).2;
+    if cfg!(target_os = "macos") {
+        assert_eq!(above_unicode.unwrap().message(), b"invalid \\U argument");
+    } else {
+        assert!(above_unicode.is_none());
     }
     assert!(lex(b"\\u12", &mut context).2.is_none());
     context
@@ -1120,10 +1127,13 @@ fn fuzz_regression_signed_buffer_eof_differs_from_file_bytes() {
         flags: CmdParseFlags::PARSEONLY,
         ..Default::default()
     };
-    assert!(
-        from_file(&mut context, &mut reader, &mut input)
-            .unwrap()
-            .commands
-            .is_empty()
-    );
+    // The file bytes start an `\xdaO=G...` word. yylex_is_var asks isalpha:
+    // macOS's UTF-8 ctype calls 0xda alphabetic (an assignment, no command);
+    // glibc's does not, so tmux there parses an unknown command.
+    let parsed = from_file(&mut context, &mut reader, &mut input);
+    if cfg!(target_os = "macos") {
+        assert!(parsed.unwrap().commands.is_empty());
+    } else {
+        assert!(parsed.is_err());
+    }
 }

@@ -56,8 +56,13 @@ mod tests {
     }
 
     #[test]
-    fn invalid_pattern_does_not_match() {
-        assert!(!fnmatch(b"[", b"[", FnmatchFlags::NONE));
+    fn unterminated_bracket_follows_the_platform() {
+        // tmux calls the system fnmatch: macOS rejects an unterminated `[`,
+        // glibc matches it as a literal character.
+        assert_eq!(
+            fnmatch(b"[", b"[", FnmatchFlags::NONE),
+            !cfg!(target_os = "macos")
+        );
         assert!(!fnmatch(b"[", b"a", FnmatchFlags::CASEFOLD));
     }
 

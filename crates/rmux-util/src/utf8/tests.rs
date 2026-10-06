@@ -480,7 +480,12 @@ fn from_wc_round_trip() {
     assert_eq!(ud.to_wc(), Some(0x1F600));
     assert_eq!(Utf8Data::from_wc(0).map(|ud| ud.width), nul_width());
     assert_eq!(Utf8Data::from_wc(0xD800), None);
-    assert_eq!(Utf8Data::from_wc(0x11_0000), None);
+    // utf8_fromwc: utf8proc rejects U+110000; glibc wctomb encodes it, and
+    // utf8_width's libc branch turns its negative wcwidth into width 1.
+    assert_eq!(
+        Utf8Data::from_wc(0x11_0000).map(|ud| ud.bytes().to_vec()),
+        (!cfg!(target_os = "macos")).then(|| b"\xf4\x90\x80\x80".to_vec())
+    );
 }
 
 #[test]

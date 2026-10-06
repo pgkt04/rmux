@@ -35,9 +35,6 @@ use rmux_emu::screen::{Screen, ScreenResetPolicy};
 use rmux_util::key::KeyCode;
 pub use state::*;
 use std::time::Duration;
-#[cfg(test)]
-#[path = "../../../../rmux-util/tests/common/mod.rs"]
-mod test_common;
 
 #[derive(Clone)]
 pub enum CopyModeKind {
@@ -610,9 +607,9 @@ pub fn timer(server: &mut Server, action: CopyTimerAction) {
 
 #[cfg(test)]
 mod tests {
-    use super::test_common as common;
     use super::*;
     use crate::ids::ArenaId;
+    use crate::test_common as common;
     use rmux_emu::cell::GridCell;
     use rmux_emu::colour::Colour;
     use rmux_emu::grid::GridLineFlags;

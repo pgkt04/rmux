@@ -155,12 +155,18 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
         cc.arg("-DHAVE_UTF8PROC").args(&flags);
     }
     for s in sources {
+        // tmux compiles compat/utf8proc.c only with --enable-utf8proc.
+        if !utf8proc && *s == Path::new("compat/utf8proc.c") {
+            continue;
+        }
         if s.is_absolute() {
             cc.arg(s);
         } else {
             cc.arg(src.join(s));
         }
     }
+    // colour.c uses round(); glibc keeps libm separate.
+    cc.arg("-lm");
     let output = match cc.output() {
         Ok(output) => output,
         Err(e) => {
