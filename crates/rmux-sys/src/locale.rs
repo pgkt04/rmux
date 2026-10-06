@@ -58,8 +58,18 @@ fn setup_ctype_named(named: &[&CStr]) -> Result<(), LocaleError> {
 }
 
 /// `tmux.c:445-452`: named UTF-8 locales first; environment and codeset check only after both fail.
+/// Runs once per process; later calls return the first result.
 pub fn setup_ctype() -> Result<(), LocaleError> {
-    setup_ctype_named(&[c"en_US.UTF-8", c"C.UTF-8"])
+    static CTYPE: std::sync::LazyLock<Result<(), LocaleError>> =
+        std::sync::LazyLock::new(|| setup_ctype_named(&[c"en_US.UTF-8", c"C.UTF-8"]));
+    CTYPE.clone()
+}
+
+/// The libc conversions below read LC_CTYPE. Every rmux process sets it at
+/// startup; this makes a library caller (a test process) do the same first.
+#[cfg(not(target_os = "macos"))]
+fn ensure_ctype() {
+    let _ = setup_ctype();
 }
 
 pub fn is_alnum(byte: u8) -> bool {
@@ -157,6 +167,7 @@ pub fn mbtowc(bytes: &[u8]) -> Option<u32> {
     };
     #[cfg(not(target_os = "macos"))]
     let (n, wc) = {
+        ensure_ctype();
         let mut wc: libc::wchar_t = 0;
         // SAFETY: bytes is valid for len bytes; wc is a valid out pointer.
         let n = unsafe { ffi::mbtowc(&mut wc, bytes.as_ptr().cast(), len as libc::size_t) };
@@ -190,7 +201,10 @@ pub fn wctomb(wc: u32, dst: &mut [u8; 32]) -> Option<usize> {
     };
     #[cfg(not(target_os = "macos"))]
     // SAFETY: wctomb writes at most MB_CUR_MAX (<= 16) bytes into dst.
-    let size = unsafe { ffi::wctomb(dst.as_mut_ptr().cast(), wc as libc::wchar_t) };
+    let size = unsafe {
+        ensure_ctype();
+        ffi::wctomb(dst.as_mut_ptr().cast(), wc as libc::wchar_t)
+    };
     match size {
         ..0 => {
             reset_wctomb();
@@ -216,6 +230,7 @@ pub fn wcwidth(wc: u32) -> i32 {
     #[cfg(not(target_os = "macos"))]
     // SAFETY: pure table lookup on an integer argument.
     unsafe {
+        ensure_ctype();
         ffi::wcwidth(wc as libc::wchar_t)
     }
 }

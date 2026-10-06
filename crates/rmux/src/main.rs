@@ -249,6 +249,13 @@ fn errx(text: &[u8]) -> ! {
 /// The reexecuted server child (`server_start` child branch, `server.c:189-264`).
 /// argv: `--rmux-internal-server <peer_fd> <lock_fd|-1> <socket_path> <flags> <log_level> [cfg files...]`.
 fn internal_server(args: &[Vec<u8>]) -> ! {
+    // tmux.c:445-455 run before the fork, so tmux's server inherits LC_CTYPE
+    // and LC_TIME; a re-exec'd server starts in the C locale and must set
+    // them again (libc wcwidth/mbtowc depend on it off macOS).
+    if let Err(e) = rmux_sys::locale::setup_ctype() {
+        errx(&e.message());
+    }
+    rmux_sys::locale::setup_time();
     let parse_fd = |s: &[u8]| -> i32 {
         std::str::from_utf8(s)
             .ok()

@@ -6,24 +6,57 @@
 #![allow(dead_code)]
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::LazyLock;
 
 pub const PIN: &str = "8f25579c";
 
-/// Common tmux header feature macros for this platform (docs/p0-probes.md).
-pub const HEADER_DEFINES: &[&str] = &[
-    "-DHAVE_CLOCK_GETTIME",
-    "-DHAVE_EVENT2_EVENT_H",
-    "-DHAVE_SYS_QUEUE_H",
-    "-DHAVE_SYS_TREE_H",
-    "-DHAVE_BITSTRING_H",
-    "-DHAVE_U_INT",
-    "-DHAVE_U_CHAR",
-    // macOS fortify macros redeclare strlcpy/strlcat; both targets have them.
-    "-DHAVE_STRLCPY",
-    "-DHAVE_STRLCAT",
-];
+/// Common tmux header feature macros (docs/p0-probes.md). The optional ones
+/// are probed on this host: glibc has no `<bitstring.h>`, and only glibc
+/// 2.38+ has strlcpy/strlcat (macOS fortify macros redeclare them, so they
+/// must be declared there).
+pub static HEADER_DEFINES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
+    let mut defines = vec![
+        "-DHAVE_CLOCK_GETTIME",
+        "-DHAVE_EVENT2_EVENT_H",
+        "-DHAVE_SYS_QUEUE_H",
+        "-DHAVE_SYS_TREE_H",
+        "-DHAVE_U_INT",
+        "-DHAVE_U_CHAR",
+    ];
+    if c_compiles("#include <bitstring.h>\n") {
+        defines.push("-DHAVE_BITSTRING_H");
+    }
+    if c_compiles(
+        "#include <string.h>\nint f(char *d) { return (int)strlcpy(d, \"a\", 2) + (int)strlcat(d, \"b\", 2); }\n",
+    ) {
+        defines.extend(["-DHAVE_STRLCPY", "-DHAVE_STRLCAT"]);
+    }
+    defines
+});
+
+fn c_compiles(source: &str) -> bool {
+    use std::io::Write;
+    let Ok(mut child) = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()))
+        .args([
+            "-fsyntax-only",
+            "-Werror=implicit-function-declaration",
+            "-x",
+            "c",
+            "-",
+        ])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(source.as_bytes());
+    }
+    child.wait().is_ok_and(|status| status.success())
+}
 
 fn tmux_checkout() -> Option<PathBuf> {
     let path = std::env::var_os("TMUX_SRC")
@@ -103,7 +136,7 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
     let partial = src.join(format!("cref-{name}.{}.tmp", std::process::id()));
     let mut cc = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
     cc.args(["-std=gnu99", "-w", "-O1", "-o"]).arg(&partial);
-    cc.args(HEADER_DEFINES).args(defines);
+    cc.args(HEADER_DEFINES.iter()).args(defines);
     cc.arg("-I").arg(src);
     let mut libevent = pkg_config(&["--cflags", "libevent"]);
     if libevent.is_empty() && Path::new("/opt/homebrew/opt/libevent/include").exists() {
