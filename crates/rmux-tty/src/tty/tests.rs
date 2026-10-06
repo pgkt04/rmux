@@ -114,6 +114,27 @@ fn bytes(tty: &mut Tty) -> Vec<u8> {
 fn remove(tty: &mut Tty, cap: &[u8]) {
     tty.term_mut().apply(cap, false, TtyTermFlags(0));
 }
+/// Everything the tty wrote to the pty so far. Linux hands slave output to
+/// the master asynchronously, so one read can miss the last bytes: read
+/// until nothing more arrives for 50 ms (at most 2 s).
+fn read_settled(master: &OwnedFd) -> Vec<u8> {
+    rmux_sys::fd::set_blocking(master.as_fd(), false);
+    let mut out = Vec::new();
+    let mut buffer = [0; 4096];
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut quiet_since = std::time::Instant::now();
+    while std::time::Instant::now() < deadline {
+        match rmux_sys::fd::read(master.as_fd(), &mut buffer) {
+            Ok(n) if n > 0 => {
+                out.extend_from_slice(&buffer[..n]);
+                quiet_since = std::time::Instant::now();
+            }
+            _ if quiet_since.elapsed() >= std::time::Duration::from_millis(50) => break,
+            _ => std::thread::sleep(std::time::Duration::from_millis(5)),
+        }
+    }
+    out
+}
 
 #[test]
 fn start_stop_bytes_and_raw_termios() {
@@ -147,14 +168,13 @@ fn start_stop_bytes_and_raw_termios() {
         tty.cstyle = ScreenCursorStyle::Bar;
         tty.ccolour = 0;
         tty.stop(&mut state, &opts);
-        let mut recorded = [0; 4096];
-        let n = rmux_sys::fd::read(master.as_fd(), &mut recorded).unwrap();
+        let recorded = read_settled(&master);
         let expected = if clear {
             &b"<r0,23>eZkCEcNa"[..]
         } else {
             &b"<r0,23>eZkEcNC"[..]
         };
-        assert_eq!(&recorded[..n], expected);
+        assert_eq!(recorded.as_slice(), expected);
         assert_eq!(bytes(&mut tty), b"pending");
         let (_baseline_master, baseline_slave, _) = rmux_sys::pty::openpty().unwrap();
         raw.set(baseline_slave.as_fd()).unwrap();
@@ -987,10 +1007,7 @@ fn lifecycle_cursor_and_attributes_match_pinned_c() {
             "stop" => {
                 let opts = tty.opts.clone();
                 tty.stop(&mut state, &opts);
-                rmux_sys::fd::set_blocking(master.as_fd(), false);
-                let mut b = [0; 4096];
-                let n = rmux_sys::fd::read(master.as_fd(), &mut b).unwrap_or(0);
-                tty.out.extend(&b[..n]);
+                tty.out.extend(read_settled(&master));
             }
             "termios" => {
                 let tio = TermiosState::get(tty.fd()).unwrap();
