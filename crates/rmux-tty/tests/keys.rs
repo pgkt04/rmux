@@ -28,6 +28,7 @@ fn ctx() -> KeyDecodeContext {
         xpixel: 0,
         ypixel: 0,
         has_input_requests: false,
+        tsp_input: false,
     }
 }
 
@@ -46,10 +47,11 @@ fn build(users: &[(u32, &[u8])]) -> TtyKeyDecoder {
 fn decode_all(dec: &mut TtyKeyDecoder, bytes: &[u8], ctx: &KeyDecodeContext) -> Vec<KeyCode> {
     let mut keys = Vec::new();
     let mut buf = bytes.to_vec();
-    loop {
+    // A decoder that never settles fails here instead of hanging the suite.
+    for _ in 0..bytes.len() * 2 + 4 {
         let step = dec.next(&buf, ctx);
         let consumed = match step {
-            DecodeStep::Empty => break,
+            DecodeStep::Empty => return keys,
             DecodeStep::Partial { .. } => {
                 dec.timer_fired();
                 continue;
@@ -67,7 +69,7 @@ fn decode_all(dec: &mut TtyKeyDecoder, bytes: &[u8], ctx: &KeyDecodeContext) -> 
         };
         buf.drain(..consumed);
     }
-    keys
+    panic!("decode of {bytes:x?} did not settle; keys so far: {keys:x?}");
 }
 
 #[test]
@@ -728,6 +730,7 @@ fn random_input_never_panics() {
             xpixel: rng.below(20) as u32,
             ypixel: rng.below(20) as u32,
             has_input_requests: rng.below(2) == 0,
+            tsp_input: rng.below(2) == 0,
         };
         let mut steps = 0;
         while !buf.is_empty() {

@@ -65,7 +65,9 @@ impl ProtocolInput {
         }
     }
 
-    pub(super) fn next<'a>(&mut self, buf: &'a [u8]) -> Option<DecodeStep<'a>> {
+    /// `tsp_input`: the terminal speaks TSP or a TSP probe is pending. Any
+    /// other terminal sends `ESC _` only as the `M-_` key.
+    pub(super) fn next<'a>(&mut self, buf: &'a [u8], tsp_input: bool) -> Option<DecodeStep<'a>> {
         const PREFIX: &[u8] = b"\x1b_tsp;";
         if self.discarding {
             for (i, &byte) in buf.iter().enumerate() {
@@ -92,13 +94,21 @@ impl ProtocolInput {
         if buf.len() == 1 {
             return None;
         }
+        if !tsp_input && !self.waiting {
+            return None;
+        }
+        if buf.len() < PREFIX.len() {
+            // Not a TSP message yet: after the idle timeout these are keys.
+            if self.expired {
+                *self = Self::default();
+                return None;
+            }
+            return Some(self.partial(buf.len()));
+        }
         if self.expired {
             self.discarding = true;
             self.escape = buf.last() == Some(&0x1b);
             return Some(self.fault(buf.len(), ProtocolFault::Timeout));
-        }
-        if buf.len() < PREFIX.len() {
-            return Some(self.partial(buf.len()));
         }
         let start = self.scanned.max(PREFIX.len());
         for (i, &byte) in buf.iter().enumerate().skip(start) {

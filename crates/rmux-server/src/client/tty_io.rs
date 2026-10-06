@@ -240,6 +240,10 @@ fn decode_context(server: &Server, id: ClientId) -> Option<KeyDecodeContext> {
         xpixel,
         ypixel,
         has_input_requests: !c.input_requests.is_empty(),
+        tsp_input: matches!(
+            c.tsp.capability,
+            crate::tsp::client::Capability::Probing | crate::tsp::client::Capability::V1(_)
+        ),
     })
 }
 

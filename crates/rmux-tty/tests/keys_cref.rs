@@ -295,6 +295,7 @@ impl Sim {
             xpixel: self.size.2,
             ypixel: self.size.3,
             has_input_requests: self.requests,
+            tsp_input: false,
         };
         let buf = std::mem::take(&mut self.buf);
         let step = self.dec.next(&buf, &ctx);

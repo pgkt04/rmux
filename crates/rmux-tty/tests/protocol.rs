@@ -10,6 +10,7 @@ fn ctx() -> KeyDecodeContext {
         flags: TtyFlags::ALL_REQUEST_FLAGS,
         has_session: false,
         escape_time_ms: 1,
+        tsp_input: true,
         ..Default::default()
     }
 }
@@ -226,4 +227,39 @@ fn ordinary_keys_before_protocol_without_session_are_discarded_separately() {
             ..
         }
     ));
+}
+
+fn meta_underscore(step: &DecodeStep<'_>) -> bool {
+    matches!(step, DecodeStep::Complete { consumed: 2, input: TtyInput::Key(k), .. }
+        if rmux_tty::key_string::key_name(k.key, false) == b"M-_")
+}
+
+#[test]
+fn plain_terminal_meta_underscore_is_a_key_at_once() {
+    let mut decoder = TtyKeyDecoder::new();
+    let context = KeyDecodeContext {
+        has_session: true,
+        tsp_input: false,
+        ..ctx()
+    };
+    let step = decoder.next(b"\x1b_", &context);
+    assert!(meta_underscore(&step), "{step:?}");
+    assert!(!decoder.protocol_partial());
+}
+
+#[test]
+fn tsp_prefix_that_never_completes_becomes_keys_not_a_fault() {
+    let mut decoder = TtyKeyDecoder::new();
+    let context = KeyDecodeContext {
+        has_session: true,
+        ..ctx()
+    };
+    assert!(matches!(
+        decoder.next(b"\x1b_ts", &context),
+        DecodeStep::Partial { timer: Some(timer), .. } if timer.timer == TtyTimer::Protocol
+    ));
+    decoder.protocol_timer_fired();
+    let step = decoder.next(b"\x1b_ts", &context);
+    assert!(meta_underscore(&step), "{step:?}");
+    assert!(!decoder.protocol_partial());
 }

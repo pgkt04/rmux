@@ -91,6 +91,9 @@ pub struct KeyDecodeContext {
     pub ypixel: u32,
     /// `!TAILQ_EMPTY(&c->input_requests)`.
     pub has_input_requests: bool,
+    /// rmux TSP extension: the terminal answered the TSP hello or a probe
+    /// is pending, so `ESC _tsp;` input is a protocol message.
+    pub tsp_input: bool,
 }
 
 /// One decoded key (G00 `DecodedKey`): the key, the mouse fields for
@@ -587,7 +590,12 @@ impl TtyKeyDecoder {
             return DecodeStep::Empty;
         }
 
-        if let Some(step) = self.protocol.next(buf) {
+        let tsp_input = ctx.tsp_input
+            || self
+                .da1_owners
+                .iter()
+                .any(|owner| matches!(owner, Da1Owner::Token(_)));
+        if let Some(step) = self.protocol.next(buf, tsp_input) {
             if !matches!(step, DecodeStep::Partial { .. }) {
                 self.timer = TimerPhase::Idle;
             }
