@@ -98,8 +98,11 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
     if out.exists() {
         return Some(out);
     }
+    // nextest runs each test in its own process: build to a private path,
+    // then rename, so a concurrent process never runs a half-written binary.
+    let partial = src.join(format!("cref-{name}.{}.tmp", std::process::id()));
     let mut cc = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
-    cc.args(["-std=gnu99", "-w", "-O1", "-o"]).arg(&out);
+    cc.args(["-std=gnu99", "-w", "-O1", "-o"]).arg(&partial);
     cc.args(HEADER_DEFINES).args(defines);
     cc.arg("-I").arg(src);
     let mut libevent = pkg_config(&["--cflags", "libevent"]);
@@ -134,6 +137,7 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
         "C reference {name}: cc failed\n{}",
         String::from_utf8_lossy(&output.stderr)
     );
+    std::fs::rename(&partial, &out).expect("install C reference binary");
     Some(out)
 }
 
@@ -141,7 +145,7 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
 pub fn write_c(name: &str, text: &str) -> Option<PathBuf> {
     static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let serial = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = pinned_source()?.join(format!("{serial}-{name}"));
+    let path = pinned_source()?.join(format!("{}-{serial}-{name}", std::process::id()));
     std::fs::write(&path, text).ok()?;
     Some(path)
 }

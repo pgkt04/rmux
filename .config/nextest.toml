@@ -1,0 +1,31 @@
+# cargo nextest run           fast default run; skips the slowest oracle matrices
+# cargo nextest run -P full   every test, with longer per-test limits
+# Tests marked #[ignore] (exhaustive matrices) also need --run-ignored all.
+
+[profile.default]
+# Skipped by default (each 90 s or more, or a whole grid of them); -P full runs them.
+default-filter = """
+not (
+    binary(=copy_core_oracle)
+    | binary(=copy_commands_oracle)
+    | test(=session_and_window_preview_strip_matrix)
+    | test(=tree_prefix_three_levels_forty_lines)
+    | test(=client_screen_matches_oracle)
+)
+"""
+test-threads = 4
+fail-fast = false
+# A test that hangs is killed after 3 minutes instead of stalling the run.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+[profile.full]
+default-filter = "all()"
+slow-timeout = { period = "120s", terminate-after = 10 }
+
+[test-groups]
+# Tests that start real tmux/rmux servers in ptys; more at once overloads the machine.
+pty-oracle = { max-threads = 2 }
+
+[[profile.default.overrides]]
+filter = "binary(/oracle/) | binary(=g19_modes_rest) | binary(=cli) | test(/oracle/)"
+test-group = "pty-oracle"

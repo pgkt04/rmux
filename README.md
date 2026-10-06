@@ -164,8 +164,20 @@ cargo build --workspace
 cargo run -p rmux -- -V
 cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
+cargo nextest run --workspace       # fast default run
+cargo nextest run --workspace -P full
+cargo test --workspace --doc
 ```
+
+Tests run under [cargo-nextest](https://nexte.st) (`brew install cargo-nextest`),
+configured in `.config/nextest.toml`. The default profile skips the copy-mode
+oracle grids (`copy_core_oracle`, `copy_commands_oracle`) and three oracle
+matrices of 90 s or more each (two in `g19_modes_rest`, plus
+`client_screen_matches_oracle`). It runs pty oracle tests at most two at a time
+and kills a test that runs longer than 3 minutes. The
+`full` profile runs every test with a 20-minute limit per test. Plain
+`cargo test --workspace` still works but runs the test binaries one after
+another with no hang limit.
 
 Only `rmux-sys` permits unsafe code. Workspace clippy warnings are errors.
 
