@@ -823,6 +823,14 @@ fn request(
     if let Some(data) = data {
         file.io.as_mut().expect("local io").queue(data);
     }
+    if file.direct {
+        // file_read/file_write (file.c:395-433, 321-340) read or write a
+        // local file at once, so done fires on the next loop turn. Run the
+        // first bounded pass now to keep that timing: a control client's
+        // stdin EOF must not overtake a source-file's error output.
+        on_ready(server, id, false, false);
+        return Some(id);
+    }
     if let Err(error) = arm(file, &mut server.event_loop, id) {
         file.error = errno(&error);
         schedule_done(server, id);
