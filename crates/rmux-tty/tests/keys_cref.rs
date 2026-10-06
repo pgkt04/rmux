@@ -468,7 +468,7 @@ fn compare(name: &str, script: &Script) {
     assert_eq!(sim.out.len(), producing.len(), "{name}: output count");
     assert_eq!(expected.len(), sim.out.len(), "{name}: C output count");
     for (n, (c, r)) in expected.iter().zip(sim.out.iter()).enumerate() {
-        if c != r {
+        if mask_short_utf8_key(c) != mask_short_utf8_key(r) {
             let at = producing[n];
             let from = at.saturating_sub(12);
             let mut context = String::new();
@@ -478,6 +478,26 @@ fn compare(name: &str, script: &Script) {
             panic!("{name}: line {n} differs\n  C:    {c}\n  Rust: {r}\ncommands:\n{context}");
         }
     }
+}
+
+/// utf8_from_data packs data[0..3] for any size up to 3 (utf8.c:479-482), so
+/// a one- or two-byte key carries whatever the C stack held above its size
+/// (glibc runs showed 0x67 there). Compare only the bytes the key owns.
+fn mask_short_utf8_key(line: &str) -> String {
+    let Some(at) = line.find("key:") else {
+        return line.to_owned();
+    };
+    let rest = &line[at + 4..];
+    let end = rest.find(':').unwrap_or(rest.len());
+    let Ok(key) = u64::from_str_radix(&rest[..end], 16) else {
+        return line.to_owned();
+    };
+    let size = (key >> 24) & 0x1f;
+    if end != 8 || !(1..3).contains(&size) {
+        return line.to_owned();
+    }
+    let unused = 0x00ff_ffff & !((1u64 << (8 * size)) - 1);
+    format!("{}key:{:08x}{}", &line[..at], key & !unused, &rest[end..])
 }
 
 const ESC: u8 = 0x1b;

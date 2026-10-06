@@ -1847,8 +1847,9 @@ pub(crate) mod tests {
         }
         let socket = Socket {
             oracle,
+            // A short /tmp root keeps the path under the sun_path limit.
             path: PathBuf::from(format!(
-                "/tmp/swarm-rmux-p4/find-oracle-{}-{}.sock",
+                "/tmp/rmux-find-oracle-{}-{}.sock",
                 std::process::id(),
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)

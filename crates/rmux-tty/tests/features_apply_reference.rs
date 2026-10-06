@@ -33,20 +33,25 @@ fn applied_capabilities_and_overrides_match_pinned_c() {
         flags.extend(["-Wl,--gc-sections", "-Wl,--no-as-needed"]);
     }
     flags.extend(["-levent", "-lncurses"]);
+    let mut sources = vec![
+        driver.as_path(),
+        Path::new("utf8.c"),
+        Path::new("utf8-combined.c"),
+        Path::new("xmalloc.c"),
+        Path::new("compat/utf8proc.c"),
+        Path::new("compat/vis.c"),
+        Path::new("compat/strtonum.c"),
+        Path::new("compat/reallocarray.c"),
+        Path::new("compat/recallocarray.c"),
+        Path::new("compat/explicit_bzero.c"),
+    ];
+    // tty_term_apply calls strunvis: libc on macOS, compat/unvis.c elsewhere.
+    if !cfg!(target_os = "macos") {
+        sources.push(Path::new("compat/unvis.c"));
+    }
     let Some(binary) = common::build_c(
         "features-apply",
-        &[
-            &driver,
-            Path::new("utf8.c"),
-            Path::new("utf8-combined.c"),
-            Path::new("xmalloc.c"),
-            Path::new("compat/utf8proc.c"),
-            Path::new("compat/vis.c"),
-            Path::new("compat/strtonum.c"),
-            Path::new("compat/reallocarray.c"),
-            Path::new("compat/recallocarray.c"),
-            Path::new("compat/explicit_bzero.c"),
-        ],
+        &sources,
         &flags,
         cfg!(target_os = "macos"),
     ) else {

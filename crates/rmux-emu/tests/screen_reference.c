@@ -21,6 +21,12 @@ static int extended_keys, selector_wide;
 void log_debug(const char *fmt, ...) {(void)fmt;}
 int log_get_level(void) {return 0;}
 __dead void fatalx(const char *fmt, ...) {(void)fmt;abort();}
+/* screen_write_box_border_set refers to these tty-acs.c tables. No test draws
+ * box borders; ld64 -dead_strip drops the function, but GNU ld reports the
+ * reference even with --gc-sections. */
+const struct utf8_data *tty_acs_double_borders(int cell_type) {(void)cell_type;abort();}
+const struct utf8_data *tty_acs_heavy_borders(int cell_type) {(void)cell_type;abort();}
+const struct utf8_data *tty_acs_rounded_borders(int cell_type) {(void)cell_type;abort();}
 __dead void fatal(const char *fmt, ...) {(void)fmt;abort();}
 long long options_get_number(struct options *o, const char *n) {
  (void)o;

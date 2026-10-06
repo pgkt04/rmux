@@ -21,6 +21,9 @@ pub static HEADER_DEFINES: LazyLock<Vec<&'static str>> = LazyLock::new(|| {
         // wcwidth only with it.
         "-D_GNU_SOURCE",
         "-DHAVE_CLOCK_GETTIME",
+        // configure finds forkpty in libc/libutil on both hosts; without this
+        // compat.h's prototype conflicts with glibc's <pty.h>.
+        "-DHAVE_FORKPTY",
         "-DHAVE_EVENT2_EVENT_H",
         "-DHAVE_SYS_QUEUE_H",
         "-DHAVE_SYS_TREE_H",
