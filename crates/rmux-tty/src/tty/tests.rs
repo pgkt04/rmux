@@ -223,6 +223,10 @@ fn failed_stop_ioctl_pipe_output_and_error_read() {
     let mut got = [0; 8];
     assert_eq!(rmux_sys::fd::read(read.as_fd(), &mut got).unwrap(), 6);
     assert_eq!(&got[..6], b"queued");
+    // A stopped tty is not read (tty.c:468); its fd is blocking again.
+    assert_eq!(tty.on_readable(), ReadOutcome::Bytes(0));
+    assert!(!tty.drain_effects().any(|e| e == TtyEffect::ReadClosed));
+    tty.read_pending = true;
     assert_eq!(tty.on_readable(), ReadOutcome::Closed);
     assert!(tty.drain_effects().any(|e| e == TtyEffect::ReadClosed));
     tty.close(&mut state);
@@ -261,6 +265,7 @@ fn open_builds_key_tree_and_close_frees_it() {
 fn read_buffer_consumption_and_write_error_not_rearmed() {
     let (mut tty, _master, _state) = fixture();
     let (read, write) = rmux_sys::fd::pipe().unwrap();
+    tty.read_pending = true;
     tty.fd = read;
     rmux_sys::fd::write(write.as_fd(), b"abc").unwrap();
     assert_eq!(tty.on_readable(), ReadOutcome::Bytes(3));

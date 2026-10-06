@@ -213,6 +213,11 @@ pub fn server_start(mut startup: Startup) -> io::Result<i32> {
         .event_loop
         .register(signals.fd(), true, false, LoopAction::Signal)?;
     drop(mask);
+    // server.c:205-206: at -vv every byte written to a tty also goes to
+    // rmux-out-<pid>.log; tmux ignores a failed open.
+    if rmux_util::log::level().0 > 1 {
+        let _ = rmux_tty::tty::OutLog::create();
+    }
     server.model_event = Some(model_event);
     server.option_monitor_removed = Some(|s, id| hooks::monitor_free(s, id));
     server.hook_monitor_dispatch = Some(|s, id, change| hooks::monitor_change(s, id, change));

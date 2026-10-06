@@ -495,7 +495,7 @@ fn pane_child_fixture() {
                 Packet::Message(b'e', body) if body["ev"] == "rmux-view" => {
                     if native {
                         output
-                            .write_all(&apc(b'x', &json!({"sf":"program","keep":false})))
+                            .write_all(&apc(b'x', &json!({"id":"program","keep":false})))
                             .unwrap();
                     }
                     probe(&mut output, body["epoch"].as_u64());

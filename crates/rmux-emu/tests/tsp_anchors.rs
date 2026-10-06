@@ -99,6 +99,26 @@ fn insertion_ends_nonempty_rows_and_places_cursor_below_one_unwrapped_row() {
 }
 
 #[test]
+fn insertion_above_text_opens_a_blank_row_and_keeps_the_text() {
+    // omp's ANSI paint leaves its status line right below the editor row,
+    // where the cursor sits when it reopens a native surface.
+    let mut f = Fixture::new(8, 5, 100);
+    f.feed(b"top\r\neditor\r\nstatus\x1b[2;1H");
+    assert!(f.insert(1));
+    let row = f.screen.surface_anchor_row(SurfaceAnchorId(1)).unwrap();
+    assert_eq!(row, 2);
+    assert_eq!(f.screen.grid.get_line(row).cellused(), 0);
+    let text = |y: u32| {
+        let line = f.screen.grid.get_line(y);
+        (0..line.cellused())
+            .map(|x| f.screen.grid.get_cell(x, y).data.data[0] as char)
+            .collect::<String>()
+    };
+    assert_eq!(text(1), "editor");
+    assert_eq!(text(3), "status");
+}
+
+#[test]
 fn anchor_scrolls_to_history_then_trim_and_clear_report_once() {
     let mut f = Fixture::new(8, 2, 2);
     assert!(f.insert(1));

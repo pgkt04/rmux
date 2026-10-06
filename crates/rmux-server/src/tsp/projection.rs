@@ -768,7 +768,8 @@ impl Projection {
         self.pending_palette = None;
         self.pending_sheets.clear();
         self.sheets.clear();
-        WireMessage::json(b'x', &json!({"sf":self.outer,"keep":false}))
+        // Surfaces doc: `x` names the surface by `id`; frames and events use `sf`.
+        WireMessage::json(b'x', &json!({"id":self.outer,"keep":false}))
     }
 
     /// The caller still validates node existence, listener lifetime and permission.
@@ -1423,7 +1424,7 @@ mod tests {
         );
         assert!(p.route_event(&json!({"sf":"stale","id":"outer"})).is_none());
         let close: Value = serde_json::from_slice(&p.close().body).unwrap();
-        assert_eq!(close, json!({"sf":"outer","keep":false}));
+        assert_eq!(close, json!({"id":"outer","keep":false}));
         assert!(!p.is_open());
         assert!(p.route_event(&event).is_none());
         assert_eq!(p.ack(coverage.sequence), Err(ProjectionError::Closed));

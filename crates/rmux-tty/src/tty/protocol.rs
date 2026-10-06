@@ -418,6 +418,9 @@ pub(super) fn write_queued(
         let entry = queue.transactions.front_mut().expect("front transaction");
         let bytes = entry.transaction.bytes()?;
         let n = write(bytes)?;
+        if n <= bytes.len() {
+            super::log_output(&bytes[..n]);
+        }
         if n > bytes.len() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,

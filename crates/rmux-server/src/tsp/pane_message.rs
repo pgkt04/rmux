@@ -103,7 +103,7 @@ pub fn pane_message(server: &mut Server, pane: PaneId, payload: &[u8]) {
         b'q' => query(server, pane, value),
         b'o' => open(server, pane, value),
         b'x' => {
-            let Some(sf) = value["sf"].as_str() else {
+            let Some(sf) = value["id"].as_str() else {
                 return;
             };
             let keep = value["keep"].as_bool().unwrap_or(true);
@@ -201,7 +201,10 @@ fn open(server: &mut Server, pane: PaneId, value: Value) {
             super::lifetime::protocol_error_for(server, pane, &e.to_string(), Some(&value));
             return;
         }
-        None => return,
+        None => {
+            rmux_util::log_debug!("tsp {pane:?}: open dropped, pane has no TSP state");
+            return;
+        }
     };
     let mut anchor = None;
     if needs_anchor {
@@ -219,6 +222,12 @@ fn open(server: &mut Server, pane: PaneId, value: Value) {
             Some(&mut server.images),
         );
         if !writer.insert_surface_anchor(id) {
+            rmux_util::log_debug!(
+                "tsp {pane:?}: open dropped, no anchor row (alternate {}, cursor {},{})",
+                writer.screen.is_alternate(),
+                writer.screen.cx,
+                writer.screen.cy
+            );
             return;
         }
         writer.finish();

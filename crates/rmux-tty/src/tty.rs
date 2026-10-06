@@ -513,7 +513,10 @@ impl Tty {
     /// drain while reads fill the buffer; a short read means the fd is empty.
     /// `EAGAIN`/`EINTR` are not a closed tty.
     pub fn on_readable(&mut self) -> ReadOutcome {
-        if self.read_paused {
+        // tty_stop_tty deletes event_in (tty.c:468): a stopped tty is never
+        // read. A ready event from the same poll can still arrive, and after
+        // the stop the fd is blocking again, so a read here could hang.
+        if self.read_paused || !self.read_pending {
             return ReadOutcome::Bytes(0);
         }
         let mut bytes = [0; 4096];
@@ -885,14 +888,20 @@ fn queue_bytes(
     }
     out.extend(bytes);
     effects.push(TtyEffect::Written(bytes.len()));
+    log_output(bytes);
+    if flags.contains(TtyFlags::STARTED) {
+        *write_pending = true;
+    }
+}
+
+/// `tty_log_fd` (`tty.c:92-101`): copy tty bytes to `rmux-out-<pid>.log`
+/// when the server runs at `-vv`. TSP transactions are logged when written.
+pub(crate) fn log_output(bytes: &[u8]) {
     if let Some(file) = OUTPUT_LOG
         .lock()
         .expect("output log mutex poisoned")
         .as_mut()
     {
         let _ = file.write(bytes);
-    }
-    if flags.contains(TtyFlags::STARTED) {
-        *write_pending = true;
     }
 }

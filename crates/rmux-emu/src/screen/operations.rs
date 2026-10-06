@@ -47,6 +47,13 @@ impl ScreenWriteCtx<'_> {
             self.linefeed(false, Colour::DEFAULT);
         }
         let y = self.screen.grid.hsize() + self.screen.cy;
+        let line = self.screen.grid.get_line(y);
+        if line.cellused() != 0 || line.surface_anchor().is_some() {
+            // Tern anchors an inline surface at the cursor row whatever is
+            // below it; keep those rows by opening a blank one here.
+            self.insertline(1, Colour::DEFAULT);
+        }
+        let y = self.screen.grid.hsize() + self.screen.cy;
         if !self.screen.grid.attach_surface_anchor(y, id) {
             return false;
         }

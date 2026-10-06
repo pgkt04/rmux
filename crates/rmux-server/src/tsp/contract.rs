@@ -1088,7 +1088,15 @@ mod tests {
         assert_eq!(errors[0]["s"], 7);
         assert_eq!(errors[0]["op"], 0);
         assert!(errors[0]["msg"].is_string());
-        pane_send(&mut server, pane, b'x', json!({"sf":"live","keep":false}));
+        pane_send(&mut server, pane, b'x', json!({"id":"live","keep":false}));
+        // The surfaces doc names `x`'s surface by `id`; a field rmux ignored
+        // before left omp's closed surface open.
+        assert!(
+            state(&server, pane)
+                .surfaces
+                .selected()
+                .is_none_or(|sf| sf.wire_id != "live")
+        );
         super::super::lifetime::protocol_error(&mut server, pane, "still reading");
         assert_eq!(
             replies(&mut server, pane),

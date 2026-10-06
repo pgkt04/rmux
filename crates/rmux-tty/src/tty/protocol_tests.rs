@@ -163,6 +163,7 @@ fn bounded_reads_include_pending_input_and_pause() {
     raw.set(slave.as_fd()).unwrap();
     rmux_sys::fd::set_blocking(slave.as_fd(), false);
     let mut tty = Tty::new(slave, tio, TtyHostInfo::default());
+    tty.read_pending = true;
     rmux_sys::fd::write(master.as_fd(), b"abcdefgh").unwrap();
     tty.in_buf.add(b"prior");
     tty.set_read_limit(Some(8));
