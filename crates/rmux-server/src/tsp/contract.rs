@@ -276,6 +276,7 @@ fn timeout(server: &mut Server, pane: PaneId, generation: u64, epoch: u64) {
         return;
     }
     switch.failed = true;
+    rmux_util::log_debug!("tsp {pane:?}: switch to epoch {epoch} timed out");
     switch.timer = None;
     state.ui_pending = false;
     let deferred = std::mem::take(&mut state.deferred_ui);
@@ -316,6 +317,7 @@ fn request_view(server: &mut Server, pane: PaneId, reason: &str) {
     switch.probing_epoch = Some(epoch);
     switch.native = state.contract.is_some();
     switch.probe_observed = false;
+    rmux_util::log_debug!("tsp {pane:?}: request view epoch {epoch} ({reason})");
     broker::event(server, pane, &super::wire::view_event(epoch, reason));
     arm_timer(server, pane);
 }
@@ -407,6 +409,11 @@ fn recompute_pane(server: &mut Server, pane: PaneId, force: bool) {
         return;
     }
     if !state.registered || state.switch.as_ref().is_some_and(|s| s.failed) {
+        rmux_util::log_debug!(
+            "tsp {pane:?}: recompute skipped (registered {}, failed switch {})",
+            state.registered,
+            state.switch.as_ref().is_some_and(|s| s.failed)
+        );
         return;
     }
     if ids.is_empty()
@@ -520,6 +527,7 @@ pub fn ready(server: &mut Server, pane: PaneId, epoch: u64, renderer: &str) -> b
                 renderer == "ansi"
             }
         });
+    rmux_util::log_debug!("tsp {pane:?}: ready epoch {epoch} {renderer}: accepted {accepted}");
     broker::reply(
         server,
         pane,
