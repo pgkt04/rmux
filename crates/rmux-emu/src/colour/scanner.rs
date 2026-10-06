@@ -200,8 +200,13 @@ impl<'a> Scanner<'a> {
                         i32::MAX
                     });
                 value *= (if hex { 2.0_f64 } else { 10.0_f64 }).powi(exponent);
-            } else {
+            } else if cfg!(target_os = "macos") {
+                // tmux reads these with sscanf %lf. macOS libc pushes an
+                // exponent with no digits back and keeps the mantissa;
+                // glibc fails the conversion ("1e+", "0x1p" read nothing).
                 i = mantissa_end;
+            } else {
+                return None;
             }
         }
         self.offset = i;

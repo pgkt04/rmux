@@ -482,7 +482,8 @@ fn compare(name: &str, script: &Script) {
 
 /// utf8_from_data packs data[0..3] for any size up to 3 (utf8.c:479-482), so
 /// a one- or two-byte key carries whatever the C stack held above its size
-/// (glibc runs showed 0x67 there). Compare only the bytes the key owns.
+/// (glibc runs showed 0x67 and 0xd9 there). Compare only the bytes the key
+/// owns; modifier flags above bit 31 are kept.
 fn mask_short_utf8_key(line: &str) -> String {
     let Some(at) = line.find("key:") else {
         return line.to_owned();
@@ -493,11 +494,16 @@ fn mask_short_utf8_key(line: &str) -> String {
         return line.to_owned();
     };
     let size = (key >> 24) & 0x1f;
-    if end != 8 || !(1..3).contains(&size) {
+    if !(1..3).contains(&size) {
         return line.to_owned();
     }
     let unused = 0x00ff_ffff & !((1u64 << (8 * size)) - 1);
-    format!("{}key:{:08x}{}", &line[..at], key & !unused, &rest[end..])
+    format!(
+        "{}key:{:0end$x}{}",
+        &line[..at],
+        key & !unused,
+        &rest[end..]
+    )
 }
 
 const ESC: u8 = 0x1b;
