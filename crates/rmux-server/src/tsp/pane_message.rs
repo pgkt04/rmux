@@ -27,7 +27,7 @@ pub fn pane_message(server: &mut Server, pane: PaneId, payload: &[u8]) {
             let Ok(value) = serde_json::from_slice::<Value>(&message.body) else {
                 return;
             };
-            if !opted_hello(&value) {
+            if value["q"] != "hello" {
                 return;
             }
             initial_value = Some(value);
@@ -90,7 +90,7 @@ pub fn pane_message(server: &mut Server, pane: PaneId, payload: &[u8]) {
                 && s.program_hello.is_null()
                 && s.surfaces.is_empty()
         });
-    if provisional && message.verb == b'q' && !opted_hello(&value) {
+    if provisional && message.verb == b'q' && value["q"] != "hello" {
         server.panes.get_mut(pane).unwrap().tsp = None;
         return;
     }
@@ -150,16 +150,22 @@ fn hello(server: &mut Server, pane: PaneId, value: Value) {
     let state = server.panes.get_mut(pane).unwrap().tsp.as_mut().unwrap();
     state.answers_enabled = true;
     state.program_exited = false;
-    if !opt {
-        return;
-    }
     state.registered = true;
+    state.stock = !opt;
     state.program_hello = value;
     let (contract, leader) = super::contract::display_contract(server, pane);
-    let native = contract.is_some();
+    let hello = contract.as_ref().map(|c| c.hello(epoch));
+    let native = hello.is_some();
     let state = server.panes.get_mut(pane).unwrap().tsp.as_mut().unwrap();
     state.contract = contract;
     state.leader = leader;
+    if !opt {
+        super::contract::begin_stock(server, pane, native);
+        if let Some(hello) = hello {
+            reply(server, pane, WireMessage::json(b'r', &hello));
+        }
+        return;
+    }
     if state.switch.is_none() {
         super::contract::begin_initial(server, pane, native);
     }
@@ -168,18 +174,7 @@ fn hello(server: &mut Server, pane: PaneId, value: Value) {
         pane,
         WireMessage::json(b'r', &wire::probe_reply(epoch, native, None)),
     );
-    if native {
-        let hello = server
-            .panes
-            .get(pane)
-            .unwrap()
-            .tsp
-            .as_ref()
-            .unwrap()
-            .contract
-            .as_ref()
-            .unwrap()
-            .hello(epoch);
+    if let Some(hello) = hello {
         reply(server, pane, WireMessage::json(b'r', &hello));
     }
     super::contract::note_probe(server, pane, epoch, native);
@@ -291,6 +286,8 @@ fn frame(server: &mut Server, pane: PaneId, value: Value) {
             sequence: frame.s,
         });
     }
+    let stock = state.stock;
+    let mut drawn = false;
     for id in &server.client_order {
         let Some(client) = server.clients.get_mut(*id) else {
             continue;
@@ -301,10 +298,14 @@ fn frame(server: &mut Server, pane: PaneId, value: Value) {
             .as_mut()
             .filter(|p| p.pane == pane && p.logical == frame.sf)
         {
+            drawn = true;
             if projection.queue_frame(&frame, &applied).is_err() {
                 projection.failed = true;
             }
         }
+    }
+    if stock && !drawn {
+        super::client_runtime::release_undrawn(server, pane);
     }
     if listens {
         for error in &applied.errors {

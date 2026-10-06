@@ -212,7 +212,8 @@ fn same_renderer_contract(a: Option<&DisplayContract>, b: Option<&DisplayContrac
     }
 }
 
-fn close_pane_projections(server: &mut Server, pane: PaneId) {
+/// Close every projection of `pane`; returns the clients that had one.
+fn close_pane_projections(server: &mut Server, pane: PaneId) -> Vec<ClientId> {
     let ids: Vec<_> = server
         .client_order
         .iter()
@@ -224,9 +225,10 @@ fn close_pane_projections(server: &mut Server, pane: PaneId) {
                 .is_some_and(|c| c.tsp.projection.as_ref().is_some_and(|p| p.pane == pane))
         })
         .collect();
-    for id in ids {
-        broker::close_projection(server, id);
+    for id in &ids {
+        broker::close_projection(server, *id);
     }
+    ids
 }
 
 fn cancel_timer(server: &mut Server, timer: Option<(crate::ids::TimerId, u64)>) {
@@ -352,6 +354,80 @@ pub fn begin_initial(server: &mut Server, pane: PaneId, native: bool) {
     arm_timer(server, pane);
 }
 
+/// A [`PaneTspState::stock`] program takes its renderer from the viewers at
+/// its hello and keeps it until its next hello: native when it starts with only
+/// eligible viewers, else ANSI.
+pub fn begin_stock(server: &mut Server, pane: PaneId, native: bool) {
+    let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
+        return;
+    };
+    let old = state.switch.take().and_then(|s| s.timer);
+    state.renderer = if native {
+        Renderer::Native
+    } else {
+        Renderer::Ansi
+    };
+    cancel_timer(server, old);
+    clear_transition_clients(server, pane);
+    if !native {
+        for client in close_pane_projections(server, pane) {
+            broker::restore_grid(server, client);
+        }
+    }
+}
+
+/// Viewer changes for a stock program, which cannot be asked to switch. A
+/// native program stays native: rmux projects it while the pane is eligible,
+/// shows the plain grid while it is not, and acks its frames itself while no
+/// viewer draws them.
+fn recompute_stock(
+    server: &mut Server,
+    pane: PaneId,
+    ids: Vec<ClientId>,
+    contract: Option<DisplayContract>,
+    leader: Option<ClientId>,
+) {
+    let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
+        return;
+    };
+    state.leader = leader;
+    if !matches!(state.renderer, Renderer::Native | Renderer::Detached) {
+        return;
+    }
+    if ids.is_empty() {
+        let notify = state.renderer == Renderer::Native;
+        state.renderer = Renderer::Detached;
+        close_pane_projections(server, pane);
+        if notify {
+            visible_event(server, pane, false);
+        }
+        super::client_runtime::release_undrawn(server, pane);
+        return;
+    }
+    let returning = state.renderer == Renderer::Detached;
+    state.renderer = Renderer::Native;
+    let Some(contract) = contract else {
+        for client in close_pane_projections(server, pane) {
+            broker::restore_grid(server, client);
+        }
+        super::client_runtime::release_undrawn(server, pane);
+        return;
+    };
+    let changed = !same_renderer_contract(state.contract.as_ref(), Some(&contract));
+    state.contract = Some(contract);
+    if changed {
+        close_pane_projections(server, pane);
+    }
+    if returning {
+        visible_event(server, pane, true);
+    }
+    super::client_runtime::report_view(server, pane);
+    for client in ids {
+        broker::project_pending(server, client);
+    }
+    super::client_runtime::release_drawn(server, pane);
+}
+
 pub fn note_probe(server: &mut Server, pane: PaneId, epoch: u64, native: bool) {
     let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
         return;
@@ -414,6 +490,10 @@ fn recompute_pane(server: &mut Server, pane: PaneId, force: bool) {
             state.registered,
             state.switch.as_ref().is_some_and(|s| s.failed)
         );
+        return;
+    }
+    if state.stock {
+        recompute_stock(server, pane, ids, contract, leader);
         return;
     }
     if ids.is_empty()
@@ -831,6 +911,92 @@ mod tests {
             .unwrap();
         assert!(ready(&mut server, pane, epoch, "native"));
         assert_eq!(state(&server, pane).renderer, Renderer::Native);
+    }
+
+    /// A hello without the broker feature, as released omp sends it.
+    fn stock_hello(server: &mut Server, pane: PaneId) {
+        server.panes.get_mut(pane).unwrap().tsp = None;
+        pane_send(
+            server,
+            pane,
+            b'q',
+            json!({"q":"hello","v":[1],"app":"omp","features":["edit","undo","send"]}),
+        );
+    }
+
+    fn broker_messages(messages: &[serde_json::Value]) -> usize {
+        messages
+            .iter()
+            .filter(|m| m["r"] == "rmux-probe" || m["ev"] == "rmux-view")
+            .count()
+    }
+
+    #[test]
+    fn stock_program_stays_native_through_plain_viewer_and_detach() {
+        let (mut server, pane, session) = fixture();
+        let tern = client(&mut server, session, true, false);
+        stock_hello(&mut server, pane);
+        let hello = replies(&mut server, pane);
+        assert_eq!(hello.len(), 1);
+        assert_eq!(hello[0]["r"], "hello");
+        assert_eq!(hello[0]["v"], 1);
+        assert!(state(&server, pane).stock);
+        assert_eq!(state(&server, pane).renderer, Renderer::Native);
+        pane_send(
+            &mut server,
+            pane,
+            b'o',
+            json!({"id":"view","mode":"screen"}),
+        );
+        let epoch = state(&server, pane).epoch;
+
+        // A plain viewer cannot see the native view, and the program cannot be
+        // told to switch: it stays native and its frames are acked by rmux.
+        let plain = client(&mut server, session, false, false);
+        recompute(&mut server);
+        assert_eq!(state(&server, pane).renderer, Renderer::Native);
+        assert_eq!(state(&server, pane).epoch, epoch);
+        assert!(state(&server, pane).switch.is_none());
+        replies(&mut server, pane);
+        pane_send(
+            &mut server,
+            pane,
+            b'f',
+            json!({"sf":"view","s":1,"ops":[["add","main","view",null,{"id":"main","k":"col"}]]}),
+        );
+        let out = replies(&mut server, pane);
+        assert!(
+            out.contains(&json!({"ev":"ack","sf":"view","s":1})),
+            "{out:?}"
+        );
+        assert_eq!(broker_messages(&out), 0);
+
+        // Every viewer gone: detached, frames still acked; Tern back: native.
+        server.clients.get_mut(plain).unwrap().session = None;
+        server.clients.get_mut(tern).unwrap().session = None;
+        recompute(&mut server);
+        assert_eq!(state(&server, pane).renderer, Renderer::Detached);
+        replies(&mut server, pane);
+        pane_send(&mut server, pane, b'f', json!({"sf":"view","s":2,"ops":[]}));
+        assert!(replies(&mut server, pane).contains(&json!({"ev":"ack","sf":"view","s":2})));
+        server.clients.get_mut(tern).unwrap().session = Some(session);
+        recompute(&mut server);
+        assert_eq!(state(&server, pane).renderer, Renderer::Native);
+        assert_eq!(state(&server, pane).epoch, epoch);
+        assert_eq!(broker_messages(&replies(&mut server, pane)), 0);
+    }
+
+    #[test]
+    fn stock_program_without_a_tsp_viewer_gets_no_hello_and_stays_ansi() {
+        let (mut server, pane, session) = fixture();
+        stock_hello(&mut server, pane);
+        assert!(replies(&mut server, pane).is_empty());
+        assert_eq!(state(&server, pane).renderer, Renderer::Ansi);
+        // It already painted rows; a Tern viewer arriving later cannot switch it.
+        client(&mut server, session, true, false);
+        recompute(&mut server);
+        assert_eq!(state(&server, pane).renderer, Renderer::Ansi);
+        assert!(replies(&mut server, pane).is_empty());
     }
 
     #[test]

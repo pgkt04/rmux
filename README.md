@@ -304,8 +304,10 @@ for that process, and there is no live option to change it afterward. An
 explicit `refresh-client` still re-probes. Pane programs
 receive `TERM_PROGRAM=rmux`, the actual rmux package version in
 `TERM_PROGRAM_VERSION`, and `RMUX_TSP=1` only while the broker is enabled at
-spawn; configured `TERM` and `PI_TUI_NATIVE=0` are preserved. The marker permits
-a broker-aware probe, not optimistic native rendering. Read-only formats
+spawn; configured `TERM` is preserved. While the broker is enabled, a pane
+without its own `PI_TUI_NATIVE` gets `PI_TUI_NATIVE=1`: released omp skips its
+TSP probe under a tmux `TERM` unless that override asks for it, and an explicit
+`PI_TUI_NATIVE=0` still wins. Read-only formats
 `client_tsp` (`unknown`, `no`, `v1`), `pane_tsp` (`ansi`, `switching`, `native`,
 `detached`), and `pane_tsp_epoch` report broker state, not terminal-environment
 guesses. Changes expose an ordered `OptionsChange` plan for the G14 host;
@@ -326,11 +328,23 @@ remain rmux input. UI entry first requests a complete ANSI paint; leaving the
 ineligible view can return the same live program to a fresh native document.
 This is not simultaneous native/ANSI rendering or a TSP-to-cells converter.
 
+A program whose `hello` lacks the broker feature (any TSP program, released omp
+included) is a stock program: it negotiates once and cannot be asked to switch.
+It gets a real `hello` reply only when it starts with only eligible TSP viewers,
+and then stays native until it exits or sends its next `hello`; otherwise it
+gets no reply and paints ANSI rows. A native stock program survives detach and
+reattach (the retained document replays) and new TSP viewers. While a plain
+viewer is attached or the pane is otherwise ineligible, viewers see the plain
+grid, which a native program does not paint; keys still reach the program, and
+native rendering resumes once the pane is eligible again. rmux acknowledges a
+stock program's frames itself whenever no viewer draws them.
+
 Transitions hold pane input until matching ready, with a 64 KiB admission bound
 and tty backpressure. A missing completion after five seconds closes projections
 and shows a diagnostic plus the last real grid, not a fabricated usable program
-view. Detached native documents remain retained; frame credits require actual
-draws from every current native viewer and are never acknowledged without viewers.
+view. Detached native documents remain retained; a broker-aware program's frame
+credits require actual draws from every current native viewer and are never
+acknowledged without viewers.
 `capture-pane` still captures the grid, not a semantic transcript. Replay and
 automated fake-terminal checks do not replace the real omp/Tern smoke acceptance.
 

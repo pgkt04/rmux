@@ -350,6 +350,27 @@ pub fn release_drawn(server: &mut Server, pane: PaneId) {
     }
 }
 
+/// Ack every outstanding frame without a viewer draw. A stock program is not
+/// drawn by anyone (no viewer, or one that needs the grid) and cannot be told
+/// to wait, so it must not stall on its credits.
+pub fn release_undrawn(server: &mut Server, pane: PaneId) {
+    let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
+        return;
+    };
+    let mut acks = Vec::new();
+    for (handle, debts) in &mut state.debts {
+        let Some(last) = debts.drain(..).next_back() else {
+            continue;
+        };
+        if let Some(surface) = state.surfaces.get(*handle).filter(|s| s.listens()) {
+            acks.push(json!({"ev":"ack","sf":surface.wire_id,"s":last.sequence}));
+        }
+    }
+    for ack in acks {
+        broker::event(server, pane, &ack);
+    }
+}
+
 fn accept_blobs(server: &mut Server, client: ClientId, value: &Value) {
     let Some(c) = server.clients.get(client) else {
         return;

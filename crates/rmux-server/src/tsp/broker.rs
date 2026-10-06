@@ -37,6 +37,10 @@ pub struct PaneTspState {
     pub epoch: u64,
     pub generation: u64,
     pub registered: bool,
+    /// The program's hello lacks the broker feature (released omp): it
+    /// negotiates once and never answers `rmux-view`, so rmux keeps its
+    /// renderer and acks its frames while no viewer draws them.
+    pub stock: bool,
     pub renderer: Renderer,
     pub contract: Option<DisplayContract>,
     pub leader: Option<ClientId>,
@@ -67,6 +71,7 @@ impl Default for PaneTspState {
             epoch: 1,
             generation: 1,
             registered: false,
+            stock: false,
             renderer: Renderer::Ansi,
             contract: None,
             leader: None,

@@ -207,6 +207,11 @@ fn launch_policy(
     );
     if server.tsp_broker_enabled {
         environment.set(b"RMUX_TSP", none, b"1");
+        // Released omp never probes TSP under a tmux `TERM`; its own override
+        // asks it to, and the broker answers. An explicit value wins.
+        if environment.find(b"PI_TUI_NATIVE").is_none() {
+            environment.set(b"PI_TUI_NATIVE", none, b"1");
+        }
     } else {
         environment.unset(b"RMUX_TSP");
     }
@@ -823,6 +828,18 @@ mod tests {
             );
             assert_eq!(value(b"RMUX_TSP"), enabled.then_some(b"1".as_slice()));
             assert_eq!(value(b"PI_TUI_NATIVE"), Some(b"0".as_slice()));
+        }
+        // Without the user's override, a brokered pane asks released omp to
+        // probe TSP (it skips the probe under a tmux TERM otherwise).
+        server.global_environment.unset(b"PI_TUI_NATIVE");
+        for enabled in [true, false] {
+            server.tsp_broker_enabled = enabled;
+            let launch = launch_policy(&mut server, &context, pane).unwrap();
+            let native = launch
+                .environment
+                .iter()
+                .find_map(|entry| entry.strip_prefix(b"PI_TUI_NATIVE=".as_slice()));
+            assert_eq!(native, enabled.then_some(b"1".as_slice()));
         }
     }
 }

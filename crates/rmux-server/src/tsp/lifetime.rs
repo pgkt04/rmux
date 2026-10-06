@@ -84,6 +84,7 @@ fn end_reader(server: &mut Server, pane: PaneId, kind: u8) {
     let Some(s) = p.tsp.as_mut() else { return };
     let was_native = matches!(s.renderer, Renderer::Native | Renderer::Detached);
     s.registered = false;
+    s.stock = false;
     s.answers_enabled = false;
     s.program_exited = kind == 2;
     s.chunk = None;
