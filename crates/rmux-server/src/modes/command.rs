@@ -172,7 +172,7 @@ fn enter_copy(server: &mut Server, request: CommandModeRequest) -> CmdReturn {
         let Some(client) = request.client.and_then(|c| server.clients.get(c)) else {
             return CmdReturn::Normal;
         };
-        let grab = client.drag.slider_mpos.map_or(-1, |row| row as i32);
+        let grab = client.drag.slider_mpos;
         let pan = event.mouse.offset_y;
         super::copy::motion::scrollbar_scroll(
             server,

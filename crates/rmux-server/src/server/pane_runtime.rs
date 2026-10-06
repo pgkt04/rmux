@@ -56,29 +56,23 @@ impl PaneHost {
 impl PaneInputHost for PaneHost {
     fn begin_draw(&mut self, server: &mut Server, pane: PaneId) {
         assert!(self.sink.is_none(), "nested pane draw lease");
-        let time = if server.current_time.0 == 0 {
-            0
-        } else {
-            server
-                .current_time
-                .0
-                .wrapping_sub(server.start_time.0)
-                .wrapping_add(1) as u32
-        };
+        let clock = server.line_clock();
         server
             .panes
             .get_mut(pane)
             .expect("live pane line clock")
             .base
             .grid
-            .set_line_clock(rmux_emu::grid::LineTime(time));
+            .set_line_clock(clock);
         let snapshot = PaneDrawSnapshot::capture(server, pane).expect("live pane draw snapshot");
         self.colours = snapshot.defaults;
-        self.sink = Some(PaneSink::new(
+        let in_mode = !server.panes.get(pane).expect("live pane").modes.is_empty();
+        let sink = PaneSink::new(
             snapshot,
             std::mem::take(&mut server.clients),
             std::mem::take(&mut server.tparm),
-        ));
+        );
+        self.sink = Some(if in_mode { sink.muted() } else { sink });
     }
     fn end_draw(&mut self, server: &mut Server, pane: PaneId) {
         let (clients, tparm, effects) = self.sink.take().expect("pane draw lease").into_parts();

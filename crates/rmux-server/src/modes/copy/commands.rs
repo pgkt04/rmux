@@ -950,11 +950,7 @@ fn cmd_scroll_to_mouse(server: &mut Server, cs: &mut CopyCommandContext<'_>) -> 
         return Move;
     };
     let (_, _, tty_oy, _, _) = crate::client::lifecycle::window_offset(server, client);
-    let sl_mpos = server
-        .clients
-        .get(client)
-        .and_then(|c| c.drag.slider_mpos)
-        .map_or(-1, |v| v as i32);
+    let sl_mpos = server.clients.get(client).map_or(0, |c| c.drag.slider_mpos);
     motion::scrollbar_scroll(server, cs.mode.owner, sl_mpos, m.y, tty_oy, scroll_exit);
     Move
 }

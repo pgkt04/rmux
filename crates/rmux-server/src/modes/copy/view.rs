@@ -79,6 +79,7 @@ pub fn add(server: &mut Server, pane: PaneId, parse: bool, bytes: &[u8]) -> Resu
     append(server, mode, parse, bytes)
 }
 fn append(server: &mut Server, mode: ModeId, parse: bool, bytes: &[u8]) -> Result<(), ModelError> {
+    let clock = server.line_clock();
     let (panes, registry) = (&mut server.panes, &mut server.hyperlinks);
     let entry = panes
         .get_mut(mode.owner)
@@ -99,6 +100,7 @@ fn append(server: &mut Server, mode: ModeId, parse: bool, bytes: &[u8]) -> Resul
         return Err(ModelError::StaleId);
     };
     let old_hsize = screen.grid.hsize();
+    screen.grid.set_line_clock(clock);
     let mut sink = ScreenOnlySink;
     let mut effects = ViewEffects::default();
     let mut ctx = ScreenWriteCtx::start(

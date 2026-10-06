@@ -151,7 +151,9 @@ pub struct MouseDragState {
     pub x: u32,
     pub y: u32,
     pub scrolling: bool,
-    pub slider_mpos: Option<u32>,
+    /// `int mouse_slider_mpos`: 0 in a new client (`xcalloc`), -1 after a
+    /// drag ends.
+    pub slider_mpos: i32,
     pub last_pane: Option<PaneId>,
     pub update: Option<MouseDragAction>,
     pub release: Option<MouseDragAction>,
@@ -658,7 +660,7 @@ fn reset_drag(drag: &mut MouseDragState) {
     drag.release = None;
     drag.flag = 0;
     drag.scrolling = false;
-    drag.slider_mpos = None;
+    drag.slider_mpos = -1;
     drag.last_pane = None;
 }
 
@@ -996,7 +998,7 @@ pub fn check_mouse(server: &mut Server, id: ClientId, event: &mut KeyEvent) -> K
          */
         kind = MouseType::DragEnd;
         c.drag.flag = 0;
-        c.drag.slider_mpos = None;
+        c.drag.slider_mpos = -1;
         c.drag.last_pane = None;
     }
 
@@ -1049,11 +1051,11 @@ pub fn check_mouse(server: &mut Server, id: ClientId, event: &mut KeyEvent) -> K
         if let Some(c) = server.clients.get_mut(id) {
             if !c.drag.scrolling && loc == MouseLocation::ScrollbarSlider {
                 c.drag.scrolling = true;
-                c.drag.slider_mpos = Some(if target.status_at == 0 {
-                    sl_mpos + target.status_lines
+                c.drag.slider_mpos = if target.status_at == 0 {
+                    sl_mpos as i32 + target.status_lines as i32
                 } else {
-                    sl_mpos
-                });
+                    sl_mpos as i32
+                };
             }
         }
     }

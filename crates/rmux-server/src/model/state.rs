@@ -367,6 +367,20 @@ impl Server {
         crate::format::runtime::initialize_defaults(&mut server);
         server
     }
+    /// The stamp `grid_line_set_time` (`grid.c:246-253`) gives a line that
+    /// enters any grid's history now: 0 before the first loop turn sets
+    /// `current_time`, else seconds since server start plus one.
+    pub fn line_clock(&self) -> rmux_emu::grid::LineTime {
+        if self.current_time.0 == 0 {
+            return rmux_emu::grid::LineTime(0);
+        }
+        rmux_emu::grid::LineTime(
+            self.current_time
+                .0
+                .wrapping_sub(self.start_time.0)
+                .wrapping_add(1) as u32,
+        )
+    }
     pub fn free_options(&mut self, options: OptionsId) {
         loop {
             let Some(name) = self

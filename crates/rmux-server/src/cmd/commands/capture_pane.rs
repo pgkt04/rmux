@@ -59,11 +59,13 @@ pub fn execute(server: &mut Server, command: &Command, item: QueueItemId) -> Cmd
             }
         }
     } else {
+        // cmd-capture-pane.c:280-288: the top mode's get_screen (only copy
+        // and view mode have one), else the base screen.
         let screen = if args.has(b'a') == 0 && args.has(b'M') != 0 {
             p.modes
                 .first()
                 .and_then(|mode| crate::modes::copy::backing_screen(server, mode.id))
-                .unwrap_or_else(|| p.screen())
+                .unwrap_or(&p.base)
         } else {
             &p.base
         };

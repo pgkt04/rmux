@@ -300,6 +300,7 @@ pub struct PaneSink {
     tparm: TparmState,
     effects: Vec<ScreenRenderEffects>,
     ranges: VisibleRanges,
+    muted: bool,
 }
 
 /// Which clients a command goes to (screen_write_set_client_cb).
@@ -375,7 +376,15 @@ impl PaneSink {
             tparm,
             effects: Vec::new(),
             ranges: VisibleRanges::default(),
+            muted: false,
         }
+    }
+
+    /// `input_parse_buffer` (`input.c:1062-1066`) parses into the base
+    /// screen with no pane while a mode is shown, so nothing reaches a tty.
+    pub fn muted(mut self) -> PaneSink {
+        self.muted = true;
+        self
     }
 
     pub fn into_parts(
@@ -468,6 +477,9 @@ impl PaneSink {
 
 impl TtySink for PaneSink {
     fn draw(&mut self, op: DrawOp<'_>, snapshot: &DrawSnapshot) {
+        if self.muted {
+            return;
+        }
         let cmd = TtyCommand::from(&op.command);
         let mut flags = TtyCtxFlags(0);
         if snapshot.wrapped {
@@ -974,6 +986,29 @@ pub fn pane_set_selection(srv: &mut Server, wp: PaneId, selector: &[u8], data: &
     let data = data.to_vec();
     with_pane_sink(srv, wp, |sink, s, hyperlinks| {
         let mut ignore = |_: u32, _: u32| {};
+        // screen_write_initctx (screen-write.c:332-346) opens the context
+        // with syncstart; a pane in a mode or not active always syncs, so
+        // the OSC 52 lands inside the update, as tty_set_selection does not
+        // end it (tty.c:2003-2019).
+        let sync = if sink.snapshot.sync_always {
+            TtyCtxFlags::SYNC
+        } else {
+            TtyCtxFlags(0)
+        };
+        sink.write(
+            TtyCommand::SyncStart,
+            s,
+            hyperlinks,
+            &DEFAULT_CELL,
+            TtyCommandData::Count(0),
+            sync,
+            s.cx,
+            s.cy,
+            s.rupper,
+            s.rlower,
+            Colour::DEFAULT,
+            &mut ignore,
+        );
         sink.write(
             TtyCommand::SetSelection,
             s,
