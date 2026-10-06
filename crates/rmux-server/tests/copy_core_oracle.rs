@@ -648,6 +648,9 @@ fn snapshot(bytes: &[u8], width: u16, height: u16) -> Vec<u8> {
     result.push(u8::from(screen.mode.contains(ScreenMode::CURSOR)));
     result
 }
+/// OSC 52 events in wire order. tmux's tty_set_selection (tty.c:2003-2019)
+/// does not end a synchronized update, so each event records whether it
+/// arrived inside one; the differential compares that with the oracle.
 fn clipboard_events(wire: &[u8]) -> Vec<u8> {
     let mut result = Vec::new();
     let mut synchronized = false;
@@ -661,10 +664,9 @@ fn clipboard_events(wire: &[u8]) -> Vec<u8> {
             synchronized = false;
             offset += 8;
         } else if rest.starts_with(b"\x1b]52;") {
-            assert!(
-                !synchronized,
-                "clipboard must flush pending synchronized redraw"
-            );
+            if synchronized {
+                result.extend_from_slice(b"[sync]");
+            }
             let bel = rest.iter().position(|byte| *byte == 7).map(|end| end + 1);
             let st = rest
                 .windows(2)
@@ -685,14 +687,15 @@ fn clipboard_events(wire: &[u8]) -> Vec<u8> {
 }
 
 #[test]
-fn clipboard_wire_records_payload_after_sync_barrier_not_redraw_packets() {
+fn clipboard_wire_records_payload_and_sync_state_not_redraw_packets() {
     let wire = b"\x1b[?2026hredraw\x1b[?2026l\x1b]52;c;YWJj\x1b\\cursor\x1b]52;c;ZA==\x07";
     assert_eq!(
         clipboard_events(wire),
         b"\x1b]52;c;YWJj\x1b\\\x1b]52;c;ZA==\x07"
     );
-    assert!(
-        std::panic::catch_unwind(|| clipboard_events(b"\x1b[?2026h\x1b]52;c;YWJj\x07")).is_err()
+    assert_eq!(
+        clipboard_events(b"\x1b[?2026hredraw\x1b]52;c;YWJj\x07"),
+        b"[sync]\x1b]52;c;YWJj\x07"
     );
 }
 

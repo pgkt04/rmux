@@ -179,6 +179,11 @@ and kills a test that runs longer than 3 minutes. The
 `cargo test --workspace` still works but runs the test binaries one after
 another with no hang limit.
 
+Most oracle tests drive the rmux binary at `$CARGO_TARGET_DIR/debug/rmux` (or
+`target/debug/rmux`) as it is; a test run does not rebuild it, because it is
+another package's binary. Run `cargo build -p rmux` first, or the tests compare
+the oracle against an old build.
+
 Only `rmux-sys` permits unsafe code. Workspace clippy warnings are errors.
 
 The re-executed server installs its own handled signal dispositions and unblocks

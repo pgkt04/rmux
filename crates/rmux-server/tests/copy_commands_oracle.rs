@@ -340,6 +340,8 @@ impl Terminal {
     fn model(&mut self) -> Vec<u8> {
         self.drain();
         // Compare terminal state, not redraw packetization or transient title bytes.
+        // GRID_FLAG_CLEARED only records whether the tty erased a cell with EL
+        // or spaces; the pinned oracle itself varies it for the same screen.
         let mut bytes = format!(
             "{} {} {} {}\n",
             self.screen.cx,
@@ -357,7 +359,7 @@ impl Terminal {
                         cell.data.bytes(),
                         cell.data.width,
                         cell.attr.0,
-                        cell.flags.0,
+                        cell.flags.0 & !rmux_emu::cell::GridCellFlags::CLEARED.0,
                         cell.fg.0,
                         cell.bg.0,
                         cell.us.0
