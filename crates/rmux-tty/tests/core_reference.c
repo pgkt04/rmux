@@ -52,7 +52,12 @@ int main(void) {
   else if(!strcmp(op,"termflags")){term.flags=num();}
   else if(!strcmp(op,"ttyflags")){t.flags=num();}
   else if(!strcmp(op,"start")){core_clear_on_attach=num();tty_start_tty(&t);}
-  else if(!strcmp(op,"stop")){tty_stop_tty(&t);fcntl(master,F_SETFL,O_NONBLOCK);ssize_t n=read(master,buf,sizeof buf);if(n<0)n=0;evbuffer_add(t.out,buf,n);}
+  else if(!strcmp(op,"stop")){
+    /* Linux hands slave output to the master asynchronously: read until
+     * 50 ms pass with no data, like the Rust side's read_settled. */
+    tty_stop_tty(&t);fcntl(master,F_SETFL,O_NONBLOCK);
+    for(int quiet=0,total=0;quiet<10&&total<400;total++){ssize_t n=read(master,buf,sizeof buf);if(n>0){evbuffer_add(t.out,buf,n);quiet=0;}else{quiet++;usleep(5000);}}
+  }
   else if(!strcmp(op,"termios")){struct termios a;if(tcgetattr(slave,&a))abort();printf("termios %llu %llu %llu %llu %u %u\n",(unsigned long long)a.c_iflag,(unsigned long long)a.c_oflag,(unsigned long long)a.c_lflag,(unsigned long long)a.c_cflag,a.c_cc[VMIN],a.c_cc[VTIME]);}
   else if(!strcmp(op,"addcount")){u_int n=num();if(n>sizeof buf)abort();memset(buf,'x',n);tty_add(&t,buf,n);}
   else if(!strcmp(op,"block")){tty_block_maybe(&t);}
