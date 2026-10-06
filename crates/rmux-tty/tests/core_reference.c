@@ -4,6 +4,7 @@
 #undef main
 #include <fcntl.h>
 #include <termios.h>
+#include <unistd.h>
 #if defined(__APPLE__)
 #include <util.h>
 #else
