@@ -852,6 +852,53 @@ fn stopping_the_tty_closes_an_inline_projection_first() {
 }
 
 #[test]
+fn a_program_that_leaves_without_closing_gives_the_grid_back() {
+    let mut fixture = Fixture::new();
+    let mut tern = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
+    fixture.settle(&mut tern);
+    assert!(tern.tree.is_some());
+    crate::tsp::lifetime::reap_programs(&mut fixture.server);
+    tern.pump(&mut fixture.server);
+    assert!(tern.tree.is_some(), "the program still owns the terminal");
+    // A SIGINT killed it before its `x`, and another group took the terminal.
+    let state = || {
+        fixture
+            .server
+            .panes
+            .get(fixture.pane)
+            .unwrap()
+            .tsp
+            .as_ref()
+            .unwrap()
+    };
+    assert!(state().program_pgrp.is_some());
+    fixture
+        .server
+        .panes
+        .get_mut(fixture.pane)
+        .unwrap()
+        .tsp
+        .as_mut()
+        .unwrap()
+        .program_pgrp = Some(rmux_sys::ProcessId(1));
+    crate::tsp::lifetime::reap_programs(&mut fixture.server);
+    tern.pump(&mut fixture.server);
+    assert!(tern.tree.is_none(), "the frozen native view closed");
+    assert_eq!(
+        fixture
+            .server
+            .panes
+            .get(fixture.pane)
+            .unwrap()
+            .tsp
+            .as_ref()
+            .unwrap()
+            .renderer,
+        crate::tsp::broker::Renderer::Ansi
+    );
+}
+
+#[test]
 fn source_ack_requires_every_viewer_and_none_when_detached() {
     let mut fixture = Fixture::new();
     let mut slow = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);

@@ -84,6 +84,7 @@ fn end_reader(server: &mut Server, pane: PaneId, kind: u8) {
     let Some(s) = p.tsp.as_mut() else { return };
     let was_native = matches!(s.renderer, Renderer::Native | Renderer::Detached);
     s.registered = false;
+    s.program_pgrp = None;
     s.stock = false;
     s.answers_enabled = false;
     s.program_exited = kind == 2;
@@ -148,6 +149,16 @@ fn end_reader(server: &mut Server, pane: PaneId, kind: u8) {
 }
 pub fn pane_prompt(server: &mut Server, pane: PaneId) {
     end_reader(server, pane, 0)
+}
+/// End the reader of each program that left without closing its surfaces, as
+/// a shell prompt would.
+pub fn reap_programs(server: &mut Server) {
+    let panes: Vec<_> = server.pane_ids.values().copied().collect();
+    for pane in panes {
+        if super::broker::program_left(server, pane) {
+            pane_prompt(server, pane);
+        }
+    }
 }
 pub fn pane_reset(server: &mut Server, pane: PaneId) {
     end_reader(server, pane, 1)

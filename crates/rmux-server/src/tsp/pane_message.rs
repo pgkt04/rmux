@@ -147,12 +147,18 @@ fn hello(server: &mut Server, pane: PaneId, value: Value) {
         return;
     }
     let opt = opted_hello(&value);
+    let pgrp = server
+        .panes
+        .get(pane)
+        .and_then(|p| p.fd.as_ref())
+        .and_then(|fd| rmux_sys::pty::tcgetpgrp(std::os::fd::AsFd::as_fd(fd)));
     let state = server.panes.get_mut(pane).unwrap().tsp.as_mut().unwrap();
     state.answers_enabled = true;
     state.program_exited = false;
     state.registered = true;
     state.stock = !opt;
     state.program_hello = value;
+    state.program_pgrp = pgrp;
     let (contract, leader) = super::contract::display_contract(server, pane);
     let hello = contract.as_ref().map(|c| c.hello(epoch));
     let native = hello.is_some();

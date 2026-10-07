@@ -80,6 +80,7 @@ pub fn tick(server: &mut Server) {
     for w in window_ids(server) {
         check_window_resize(server, w);
     }
+    crate::tsp::lifetime::reap_programs(server);
     crate::tsp::broker::recompute(server);
 
     // Notify modes that pane styles may have changed.

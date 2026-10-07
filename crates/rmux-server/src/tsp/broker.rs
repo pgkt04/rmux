@@ -66,6 +66,8 @@ pub struct PaneTspState {
     pub reported_motion: Option<bool>,
     /// Cell views draw the `native_only` note over this pane.
     pub native_note: bool,
+    /// The pty's foreground process group when the program said hello.
+    pub program_pgrp: Option<rmux_sys::ProcessId>,
 }
 impl Default for PaneTspState {
     fn default() -> Self {
@@ -98,6 +100,7 @@ impl Default for PaneTspState {
             reported_theme: None,
             reported_motion: None,
             native_note: false,
+            program_pgrp: None,
         }
     }
 }
@@ -135,6 +138,26 @@ pub fn native_only(server: &Server, pane: PaneId) -> Option<String> {
             .unwrap_or("This program")
             .to_owned(),
     )
+}
+/// The program that said hello is no longer the pty's foreground group: it
+/// exited or stopped without closing its surfaces (a SIGINT, a crash), and
+/// the shell is back. Tern learns this from a shell prompt mark, which a shell
+/// inside rmux usually does not send.
+pub fn program_left(server: &Server, pane: PaneId) -> bool {
+    let Some(p) = server.panes.get(pane) else {
+        return false;
+    };
+    let Some(pgrp) = p
+        .tsp
+        .as_ref()
+        .filter(|s| s.registered)
+        .and_then(|s| s.program_pgrp)
+    else {
+        return false;
+    };
+    p.fd.as_ref()
+        .and_then(|fd| rmux_sys::pty::tcgetpgrp(std::os::fd::AsFd::as_fd(fd)))
+        .is_some_and(|now| now != pgrp)
 }
 pub use super::client_runtime::{
     client_message, client_protocol_fault, client_sentinel, client_sync, probe_client,
