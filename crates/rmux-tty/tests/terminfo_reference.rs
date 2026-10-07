@@ -168,13 +168,31 @@ fn compare_infocmp(name: &str, text: &[u8]) {
             None => expected.push(b'1'),
             _ => unreachable!(),
         }
+        let prefix = &expected[..=code.name.len()];
+        let found = actual
+            .iter()
+            .find(|cap| cap.as_bytes().starts_with(prefix))
+            .map(|cap| cap.as_bytes());
+        // Ubuntu's infocmp (ncurses 6.4) prints acsc sorted; the entry keeps
+        // its own order, which is what tmux reads.
+        let same = if code.name == "acsc" {
+            found.is_some_and(|found| acsc_pairs(found) == acsc_pairs(&expected))
+        } else {
+            actual.iter().any(|cap| cap.as_bytes() == expected)
+        };
         assert!(
-            actual.iter().any(|cap| cap.as_bytes() == expected),
-            "infocmp {name}: {expected:?}"
+            same,
+            "infocmp {name}: infocmp has {:?}, rmux has {:?}",
+            String::from_utf8_lossy(&expected),
+            found.map(String::from_utf8_lossy)
         );
         checked += 1;
     }
     assert!(checked > 0, "no infocmp capabilities compared for {name}");
+}
+
+fn acsc_pairs(cap: &[u8]) -> std::collections::BTreeSet<&[u8]> {
+    cap[b"acsc=".len()..].chunks(2).collect()
 }
 
 fn compare_caps(name: &str, expected: &[u8]) {
