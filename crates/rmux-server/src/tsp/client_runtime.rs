@@ -630,6 +630,18 @@ fn client_event(
         match mapped {
             Ok(Some(error)) => broker::event(server, pane, &error),
             Ok(None) => {}
+            Err(super::projection::ProjectionError::StatusBar) => {
+                if let Some(c) = server.clients.get_mut(client) {
+                    c.tsp.bar_failed = true;
+                    c.tsp.diagnostic = Some("TSP status bar rejected".into());
+                    if let Some(projection) = c.tsp.projection.as_mut() {
+                        projection.set_bar(None);
+                        projection.reconcile();
+                    }
+                }
+                broker::project_pending(server, client);
+                return;
+            }
             Err(error) => {
                 if let Some(c) = server.clients.get_mut(client) {
                     c.tsp.diagnostic = Some(format!("TSP projection error mapping: {error}"));

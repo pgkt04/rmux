@@ -662,6 +662,7 @@ fn any_pane_redraw(server: &Server, c: ClientId, w: WindowId) -> bool {
 /// `server_client_check_redraw` (`server-client.c:2357-2478`).
 pub fn check_redraw(server: &mut Server, c: ClientId) {
     if crate::tsp::broker::native_client(server, c) {
+        crate::tsp::status_bar::redraw(server, c);
         return;
     }
     let Some(client) = server.clients.get(c) else {

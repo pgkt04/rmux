@@ -107,6 +107,7 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
             }
         }
         c.tsp.projection = Some(Projection::new(pane, logical, outer, generation, credits));
+        super::status_bar::refresh(server, id);
     }
     send_pending(server, id, pane, handle);
 }

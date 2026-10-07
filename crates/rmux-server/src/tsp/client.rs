@@ -38,6 +38,8 @@ pub struct ClientTspState {
     pub rebuild_attempted: bool,
     pub failed_logical: Option<String>,
     pub transition_pane: Option<PaneId>,
+    /// Tern rejected the native status bar; this client goes without it.
+    pub bar_failed: bool,
     next_request: u64,
 }
 impl Default for ClientTspState {
@@ -55,6 +57,7 @@ impl Default for ClientTspState {
             rebuild_attempted: false,
             failed_logical: None,
             transition_pane: None,
+            bar_failed: false,
             next_request: 0,
         }
     }
@@ -85,6 +88,7 @@ impl ClientTspState {
         self.rebuild_attempted = false;
         self.failed_logical = None;
         self.transition_pane = None;
+        self.bar_failed = false;
     }
     pub fn request(&mut self, owner: RequestOwner) -> u64 {
         self.next_request = self.next_request.wrapping_add(1).max(1);

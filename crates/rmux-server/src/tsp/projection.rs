@@ -4,6 +4,7 @@ use super::{
     blobs::TspBlobStore,
     document::{ApplyResult, TspDocument},
     replay,
+    status_bar::BAR_ID,
     wire::{Frame, JOINED_LIMIT, WireMessage},
 };
 use crate::ids::PaneId;
@@ -28,6 +29,8 @@ pub struct FrameCoverage {
     pub replay: bool,
     /// One entry per outer op; an empty entry belongs to the broker snapshot.
     pub operations: Vec<Vec<SourceOp>>,
+    /// Outer ops that carry rmux's status bar, not program content.
+    pub bar_ops: Vec<usize>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -43,6 +46,8 @@ pub enum ProjectionError {
     PendingViewLimit,
     ErrorMapping,
     Replay(replay::ReplayError),
+    /// Tern rejected an op of rmux's own status bar.
+    StatusBar,
 }
 impl std::fmt::Display for ProjectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -67,6 +72,7 @@ struct ReplayCursor {
     parents: HashMap<String, String>,
     root_props: BTreeSet<String>,
     sheets: BTreeSet<String>,
+    bar_dock: bool,
     /// Next `replay_piece` index. The frame is last and is the only piece that
     /// publishes ack coverage.
     sent_prefix: usize,
@@ -110,6 +116,11 @@ pub struct Projection {
     /// Sheet name -> latest css; `None` deletes the sheet.
     pending_sheets: Vec<(String, Option<String>)>,
     sheets: BTreeSet<String>,
+    /// The client's status line, kept as the last child of the outer `dock`.
+    bar: Option<Value>,
+    bar_dirty: bool,
+    /// The outer `dock` exists only to hold the bar: the document has none.
+    bar_dock: bool,
 }
 impl Projection {
     pub fn new(
@@ -147,6 +158,9 @@ impl Projection {
             pending_palette: None,
             pending_sheets: Vec::new(),
             sheets: BTreeSet::new(),
+            bar: None,
+            bar_dirty: false,
+            bar_dock: false,
         }
     }
 
@@ -160,6 +174,16 @@ impl Projection {
 
     pub fn has_credit(&self) -> bool {
         !self.closed && !self.failed && self.sent.len() < self.credits
+    }
+
+    /// True when the bar changed and needs a frame.
+    pub fn set_bar(&mut self, bar: Option<Value>) -> bool {
+        if self.bar == bar {
+            return false;
+        }
+        self.bar = bar;
+        self.bar_dirty = true;
+        true
     }
 
     pub fn reconcile(&mut self) {
@@ -340,7 +364,7 @@ impl Projection {
             }
             return Ok(None);
         }
-        if !self.snapshot_needed && self.pending_revision.is_none() {
+        if !self.snapshot_needed && self.pending_revision.is_none() && !self.bar_dirty {
             return Ok(None);
         }
         let next_sequence = self
@@ -411,13 +435,16 @@ impl Projection {
         next_sequence: u64,
     ) -> Result<Option<PreparedSend>, ProjectionError> {
         let sequence = self.next_sequence;
-        let mut ops = if self.opened {
-            self.reset_ops()
-        } else {
-            Vec::new()
-        };
-        ops.extend(replay::snapshot_ops(document, &self.outer, now_ms));
-        let mut operations = vec![Vec::new(); ops.len()];
+        let mut frame = OuterOps::new(&self.outer, HashMap::new(), BTreeSet::new(), false);
+        if self.opened {
+            for op in self.reset_ops() {
+                frame.push(op, Vec::new());
+            }
+        }
+        for op in replay::snapshot_ops(document, &self.outer, now_ms) {
+            frame.push(op, Vec::new());
+        }
+        frame.place_bar(self.bar.as_ref(), true);
         for pending in &self.pending {
             if !is_transient_view(&pending.value)
                 || !document.has(pending.value[1].as_str().unwrap_or(""))
@@ -426,14 +453,17 @@ impl Projection {
             }
             let mut value = pending.value.clone();
             rewrite_operation(&mut value, &self.logical, &self.outer);
-            ops.push(value);
-            operations.push(pending.sources.clone());
+            frame.push(value, pending.sources.clone());
         }
-        let mut parents = HashMap::new();
-        let mut root_props = BTreeSet::new();
-        for op in &ops {
-            Self::track_operation(&mut parents, &mut root_props, &self.outer, op);
-        }
+        let OuterOps {
+            ops,
+            operations,
+            bar_ops,
+            parents,
+            root_props,
+            bar_dock,
+            ..
+        } = frame;
         let mut plan =
             match replay::plan_with_ops(document, blobs, confirmed, &self.outer, sequence, ops) {
                 Ok(plan) => plan,
@@ -484,6 +514,7 @@ impl Projection {
             revision: document.revision,
             replay: true,
             operations,
+            bar_ops,
         };
         self.replay = Some(ReplayCursor {
             sequence,
@@ -494,6 +525,7 @@ impl Projection {
             parents,
             root_props,
             sheets,
+            bar_dock,
             sent_prefix: 0,
         });
         self.awaiting_frame = Some(sequence);
@@ -511,19 +543,36 @@ impl Projection {
         sequence: u64,
         next_sequence: u64,
     ) -> Result<Option<PreparedSend>, ProjectionError> {
-        let blobs_out = live_blobs(document, blobs, confirmed);
-        let mut messages = Vec::new();
-        let mut ops = Vec::new();
-        let mut operations = Vec::new();
-        let mut parents = self.parents.clone();
-        let mut root_props = self.root_props.clone();
+        let mut frame = OuterOps::new(
+            &self.outer,
+            self.parents.clone(),
+            self.root_props.clone(),
+            self.bar_dock,
+        );
         for pending in &self.pending {
             let mut value = pending.value.clone();
             rewrite_operation(&mut value, &self.logical, &self.outer);
-            Self::track_operation(&mut parents, &mut root_props, &self.outer, &value);
-            ops.push(value);
-            operations.push(pending.sources.clone());
+            frame.push_program(value, pending.sources.clone());
         }
+        frame.place_bar(self.bar.as_ref(), self.bar_dirty);
+        let OuterOps {
+            ops,
+            operations,
+            bar_ops,
+            parents,
+            root_props,
+            bar_dock,
+            ..
+        } = frame;
+        let Some(revision) = self
+            .pending_revision
+            .or((!ops.is_empty()).then_some(self.sent_revision))
+        else {
+            self.bar_dirty = false;
+            return Ok(None);
+        };
+        let blobs_out = live_blobs(document, blobs, confirmed);
+        let mut messages = Vec::new();
         let frame = replay::frame_message(&self.outer, sequence, ops);
         if frame.body.len() > JOINED_LIMIT {
             self.failed = true;
@@ -535,7 +584,6 @@ impl Projection {
         }
         let frame_bytes = frame.body.len();
         messages.push(frame);
-        let revision = self.pending_revision.unwrap();
         let mut sheets = self.sheets.clone();
         for (name, css) in &self.pending_sheets {
             if css.is_some() {
@@ -551,6 +599,7 @@ impl Projection {
             revision,
             replay: false,
             operations,
+            bar_ops,
         };
         let plan = Arc::new(replay::ReplayPlan {
             messages,
@@ -566,6 +615,7 @@ impl Projection {
             parents,
             root_props,
             sheets,
+            bar_dock,
             sent_prefix: 0,
         });
         self.awaiting_frame = Some(sequence);
@@ -716,6 +766,7 @@ impl Projection {
         self.parents = cursor.parents;
         self.root_props = cursor.root_props;
         self.sheets = cursor.sheets;
+        self.bar_dock = cursor.bar_dock;
         self.listening = cursor.listening;
         if self.listening {
             self.sent.push_back(cursor.coverage);
@@ -730,6 +781,7 @@ impl Projection {
         self.pending_sources = 0;
         self.pending_revision = None;
         self.snapshot_needed = false;
+        self.bar_dirty = false;
     }
 
     pub fn ack(&mut self, sequence: u64) -> Result<u64, ProjectionError> {
@@ -813,9 +865,13 @@ impl Projection {
                 Err(ProjectionError::ErrorMapping)
             };
         };
-        let sources = usize::try_from(index)
-            .ok()
-            .and_then(|index| coverage.operations.get(index))
+        let index = usize::try_from(index).map_err(|_| ProjectionError::ErrorMapping)?;
+        if coverage.bar_ops.contains(&index) {
+            return Err(ProjectionError::StatusBar);
+        }
+        let sources = coverage
+            .operations
+            .get(index)
             .ok_or(ProjectionError::ErrorMapping)?;
         if sources.is_empty() && coverage.replay {
             return Ok(None);
@@ -907,6 +963,86 @@ impl Projection {
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// One outer frame in the making: ops, their program sources, and the outer
+/// topology after them.
+struct OuterOps<'a> {
+    outer: &'a str,
+    ops: Vec<Value>,
+    operations: Vec<Vec<SourceOp>>,
+    bar_ops: Vec<usize>,
+    parents: HashMap<String, String>,
+    root_props: BTreeSet<String>,
+    bar_dock: bool,
+}
+impl<'a> OuterOps<'a> {
+    fn new(
+        outer: &'a str,
+        parents: HashMap<String, String>,
+        root_props: BTreeSet<String>,
+        bar_dock: bool,
+    ) -> Self {
+        Self {
+            outer,
+            ops: Vec::new(),
+            operations: Vec::new(),
+            bar_ops: Vec::new(),
+            parents,
+            root_props,
+            bar_dock,
+        }
+    }
+    fn push(&mut self, op: Value, sources: Vec<SourceOp>) {
+        Projection::track_operation(&mut self.parents, &mut self.root_props, self.outer, &op);
+        self.ops.push(op);
+        self.operations.push(sources);
+    }
+    fn push_bar(&mut self, op: Value) {
+        self.bar_ops.push(self.ops.len());
+        self.push(op, Vec::new());
+    }
+    fn child_of(&self, id: &str, parent: &str) -> bool {
+        self.parents.get(id).is_some_and(|p| p == parent)
+    }
+    /// The program's own dock replaces the bar's; its appends land above the bar.
+    fn push_program(&mut self, mut op: Value, sources: Vec<SourceOp>) {
+        let inserts = matches!(op_name(&op), Some("add" | "move"));
+        if self.bar_dock && op_name(&op) == Some("add") && op[1] == "dock" && op[2] == self.outer {
+            self.push_bar(json!(["del", "dock"]));
+            self.bar_dock = false;
+        }
+        if inserts && op[2] == "dock" && op[3].is_null() && self.child_of(BAR_ID, "dock") {
+            op[3] = BAR_ID.into();
+        }
+        self.push(op, sources);
+    }
+    /// Put `bar` last in `dock`, or take it out. `replace` resends a bar that is
+    /// already there.
+    fn place_bar(&mut self, bar: Option<&Value>, replace: bool) {
+        let present = self.child_of(BAR_ID, "dock");
+        match bar {
+            Some(_) if present && !replace => {}
+            Some(bar) => {
+                if present {
+                    self.push_bar(json!(["del", BAR_ID]));
+                }
+                if self.child_of("dock", self.outer) {
+                    self.push_bar(json!(["add", BAR_ID, "dock", null, bar]));
+                } else {
+                    self.push_bar(json!(["add", "dock", self.outer, null,
+                        {"id": "dock", "k": "col", "c": [bar]}]));
+                    self.bar_dock = true;
+                }
+            }
+            None if self.bar_dock => {
+                self.push_bar(json!(["del", "dock"]));
+                self.bar_dock = false;
+            }
+            None if present => self.push_bar(json!(["del", BAR_ID])),
+            None => {}
         }
     }
 }
@@ -1823,5 +1959,102 @@ mod tests {
             }]
         );
         assert_eq!(p.ack(newer.sequence).unwrap(), 2);
+    }
+
+    #[test]
+    fn status_bar_stays_last_in_the_outer_dock() {
+        fn bar(text: &str) -> Value {
+            json!({"id":BAR_ID,"k":"col","c":[{"id":"rmux:bar:0","k":"status","c":[
+                {"id":"rmux:bar:0:0","k":"seg","p":{"text":text}}]}]})
+        }
+        // Tern's side of the projection: every outer frame must apply cleanly.
+        fn draw(p: &mut Projection, d: &TspDocument, view: &mut TspDocument) -> FrameCoverage {
+            let (messages, coverage) = send(p, d);
+            let applied = view
+                .apply_frame(&serde_json::from_value(frame(&messages)).unwrap(), 0)
+                .unwrap();
+            assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+            p.ack(coverage.sequence).unwrap();
+            coverage
+        }
+        fn dock(view: &TspDocument) -> Vec<String> {
+            view.get("dock", 0).map_or_else(Vec::new, |dock| {
+                dock["c"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|child| child["id"].as_str().unwrap().to_owned())
+                    .collect()
+            })
+        }
+        let mut p = projection(2);
+        let mut d = TspDocument::new("s");
+        let mut view = TspDocument::new("outer");
+        assert!(p.set_bar(Some(bar("0:edit*"))));
+        assert!(!p.set_bar(Some(bar("0:edit*"))));
+        let opened = draw(&mut p, &d, &mut view);
+        assert!(opened.replay);
+        assert_eq!(dock(&view), [BAR_ID]);
+
+        apply(
+            &mut p,
+            &mut d,
+            3,
+            vec![json!(["add","dock","s",null,{"id":"dock","k":"col","c":[
+                {"id":"ed","k":"editor"}]}])],
+        );
+        draw(&mut p, &d, &mut view);
+        assert_eq!(dock(&view), ["ed", BAR_ID]);
+
+        apply(
+            &mut p,
+            &mut d,
+            4,
+            vec![json!(["add","st","dock",null,{"id":"st","k":"text"}])],
+        );
+        let appended = draw(&mut p, &d, &mut view);
+        assert_eq!(dock(&view), ["ed", "st", BAR_ID]);
+        assert!(appended.bar_ops.is_empty());
+
+        p.set_bar(Some(bar("1:logs*")));
+        let updated = draw(&mut p, &d, &mut view);
+        assert!(updated.operations.iter().all(Vec::is_empty));
+        assert_eq!(updated.revision, appended.revision);
+        assert_eq!(dock(&view), ["ed", "st", BAR_ID]);
+        assert_eq!(view.get("rmux:bar:0:0", 0).unwrap()["p"]["text"], "1:logs*");
+
+        apply(&mut p, &mut d, 5, vec![json!(["del", "dock"])]);
+        let (messages, removed) = send(&mut p, &d);
+        view.apply_frame(&serde_json::from_value(frame(&messages)).unwrap(), 0)
+            .unwrap();
+        assert_eq!(dock(&view), [BAR_ID]);
+        let index = *removed.bar_ops.first().unwrap();
+        assert_eq!(
+            p.map_error(&json!({"ev":"error","sf":"outer","s":removed.sequence,"op":index})),
+            Err(ProjectionError::StatusBar)
+        );
+        p.ack(removed.sequence).unwrap();
+
+        let mut newcomer = projection(2);
+        newcomer.set_bar(Some(bar("1:logs*")));
+        let mut fresh_view = TspDocument::new("outer");
+        draw(&mut newcomer, &d, &mut fresh_view);
+        assert_eq!(fresh_view.snapshot(0), view.snapshot(0));
+
+        p.set_bar(None);
+        draw(&mut p, &d, &mut view);
+        assert!(!view.has("dock"));
+        p.set_bar(None);
+        assert!(
+            p.next_messages(
+                &d,
+                &mut TspBlobStore::new(),
+                &BTreeSet::new(),
+                &json!({}),
+                0
+            )
+            .unwrap()
+            .is_none()
+        );
     }
 }

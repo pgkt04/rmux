@@ -37,6 +37,10 @@ tern:
     rmux                    in a Tern pane
     omp                     inside the rmux pane: native view
 
+In the native view the status line is drawn by Tern as a bar under omp's
+composer: the same text as `status-format`, the current window highlighted,
+bells and activity coloured, always at the bottom.
+
 `#{pane_tsp}` and `#{client_tsp}` show the state (`rmux display -p
 '#{pane_tsp}'`). Start the server with `RMUX_TSP_BROKER=0` to turn native
 rendering off, or set `PI_TUI_NATIVE=0` to keep omp on its text renderer.

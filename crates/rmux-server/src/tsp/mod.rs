@@ -11,6 +11,7 @@ pub mod pane_message;
 pub mod project;
 pub mod projection;
 pub mod replay;
+pub mod status_bar;
 pub mod surface;
 pub mod transport;
 pub mod wire;
