@@ -212,6 +212,15 @@ pub fn set_open_metadata(messages: &mut [WireMessage], logical_open: &Value) {
     open.body = serde_json::to_vec(&value).expect("JSON value serialization");
 }
 
+pub fn set_open_mode(messages: &mut [WireMessage], mode: &str) {
+    let Some(open) = messages.iter_mut().find(|m| m.verb == b'o') else {
+        return;
+    };
+    let mut value: Value = serde_json::from_slice(&open.body).expect("generated open JSON");
+    value["mode"] = mode.into();
+    open.body = serde_json::to_vec(&value).expect("JSON value serialization");
+}
+
 /// The next not-yet-sent replay message. Index order is open, palette, sheets,
 /// then each referenced blob, then the frame. Each piece is one wire message
 /// whose joined body is at most `JOINED_LIMIT`.
@@ -269,6 +278,9 @@ impl ReplayPiece {
     }
     pub fn is_frame(&self) -> bool {
         matches!(self, Self::Message { plan, index } if plan.messages[*index].verb == b'f')
+    }
+    pub fn is_open(&self) -> bool {
+        matches!(self, Self::Message { plan, index } if plan.messages[*index].verb == b'o')
     }
     pub fn token(&self) -> String {
         match self {

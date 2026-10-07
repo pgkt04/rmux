@@ -3,6 +3,7 @@ use super::{
     broker::{Renderer, now_ms},
     client::RequestOwner,
     projection::Projection,
+    surface::SurfaceMode,
     wire::WireMessage,
 };
 use crate::{
@@ -12,7 +13,7 @@ use crate::{
 };
 use rmux_tty::{
     keys::Da1Owner,
-    tty::{ProtocolTransaction, QueueFull},
+    tty::{ProtocolTransaction, QueueFull, Tty},
 };
 
 pub fn restore_grid(server: &mut Server, id: ClientId) {
@@ -24,6 +25,18 @@ pub fn restore_grid(server: &mut Server, id: ClientId) {
         }
     }
 }
+/// DECSC right after an inline `o`, where Tern leaves the cursor: the row under
+/// the surface's anchor.
+const SAVE_CURSOR: &[u8] = b"\x1b7";
+/// Tern keeps a closed inline surface's anchor row. Cell output may have moved
+/// the cursor and scroll region since the open, so reset the region, return to
+/// the saved cursor, delete the anchor row, then go back to the alternate
+/// screen of the cell view.
+fn back_to_grid(tty: &Tty) -> Vec<u8> {
+    let mut bytes = b"\x1b[r\x1b8\x1b[A\x1b[M".to_vec();
+    bytes.extend(tty.alternate_screen(true));
+    bytes
+}
 pub fn close_projection(server: &mut Server, id: ClientId) {
     let Some(c) = server.clients.get_mut(id) else {
         return;
@@ -31,8 +44,12 @@ pub fn close_projection(server: &mut Server, id: ClientId) {
     if let Some(mut projection) = c.tsp.projection.take() {
         if let Some(tty) = c.tty.as_mut() {
             tty.cancel_protocol(projection.generation);
-            let _ =
-                tty.close_protocol(ProtocolTransaction::new(projection.close().encode()).control());
+            tty.set_teardown(Vec::new());
+            let mut close = projection.close().encode();
+            if projection.inline {
+                close.extend(back_to_grid(tty));
+            }
+            let _ = tty.close_protocol(ProtocolTransaction::new(close).teardown());
         }
         restore_grid(server, id);
     }
@@ -51,8 +68,12 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
         .get(pane)
         .and_then(|p| p.tsp.as_ref())
         .filter(|s| matches!(s.renderer, Renderer::Native | Renderer::Detached))
-        .and_then(|s| s.surfaces.selected().map(|sf| (sf.id, sf.wire_id.clone())));
-    let Some((handle, logical)) = selected else {
+        .and_then(|s| {
+            s.surfaces
+                .selected()
+                .map(|sf| (sf.id, sf.wire_id.clone(), sf.mode == SurfaceMode::Inline))
+        });
+    let Some((handle, logical, inline)) = selected else {
         close_projection(server, id);
         return;
     };
@@ -106,7 +127,9 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
                 return;
             }
         }
-        c.tsp.projection = Some(Projection::new(pane, logical, outer, generation, credits));
+        let mut projection = Projection::new(pane, logical, outer, generation, credits);
+        projection.inline = inline;
+        c.tsp.projection = Some(projection);
         super::status_bar::refresh(server, id);
     }
     send_pending(server, id, pane, handle);
@@ -228,9 +251,28 @@ fn send_pending(
             .and_then(|p| p.pending_sequence())
             .unwrap_or(0);
         let token = format!("{sequence}-{}", piece.token());
+        let leave_alternate = piece.is_open()
+            && server
+                .clients
+                .get(id)
+                .and_then(|c| c.tsp.projection.as_ref())
+                .is_some_and(|p| p.inline);
         let transaction = match piece.stream(limit, &token) {
             Ok((bytes, chunks)) => {
-                ProtocolTransaction::stream(bytes, chunks).projection(generation)
+                match server.clients.get(id).and_then(|c| c.tty.as_ref()) {
+                    // An inline surface on the alternate screen is an error. The
+                    // saved cursor marks the row under the anchor for the close.
+                    Some(tty) if leave_alternate => {
+                        let leave = tty.alternate_screen(false);
+                        let size = leave.len() + bytes + SAVE_CURSOR.len();
+                        let chunks = std::iter::once(leave)
+                            .chain(chunks)
+                            .chain(std::iter::once(SAVE_CURSOR.to_vec()));
+                        ProtocolTransaction::stream(size, chunks)
+                    }
+                    _ => ProtocolTransaction::stream(bytes, chunks),
+                }
+                .projection(generation)
             }
             Err(error) => {
                 if let Some(c) = server.clients.get_mut(id) {
@@ -240,11 +282,19 @@ fn send_pending(
                 return;
             }
         };
-        let queued = server
-            .clients
-            .get_mut(id)
-            .and_then(|c| c.tty.as_mut())
-            .map(|tty| tty.queue_protocol(transaction));
+        let queued = server.clients.get_mut(id).and_then(|c| {
+            let tty = c.tty.as_mut()?;
+            let queued = tty.queue_protocol(transaction);
+            if queued.is_ok() && leave_alternate {
+                let outer = &c.tsp.projection.as_ref()?.outer;
+                let mut teardown =
+                    WireMessage::json(b'x', &serde_json::json!({"id": outer, "keep": false}))
+                        .encode();
+                teardown.extend(back_to_grid(tty));
+                tty.set_teardown(teardown);
+            }
+            Some(queued)
+        });
         match queued {
             Some(Ok(())) => {
                 let finished = server

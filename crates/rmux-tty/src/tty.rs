@@ -239,6 +239,9 @@ pub struct Tty {
     protocol_close: bool,
     read_limit: Option<usize>,
     read_paused: bool,
+    /// Bytes that must reach the terminal before the restore when the tty
+    /// stops, while a TSP surface owns the main screen.
+    teardown: Vec<u8>,
 }
 
 impl Tty {
@@ -290,6 +293,7 @@ impl Tty {
             protocol_close: false,
             read_limit: None,
             read_paused: false,
+            teardown: Vec::new(),
         }
     }
 
@@ -377,6 +381,10 @@ impl Tty {
     pub fn stop(&mut self, state: &mut TparmState, opts: &TtyOptions) {
         if !self.flags.contains(TtyFlags::STARTED) {
             return;
+        }
+        let teardown = std::mem::take(&mut self.teardown);
+        if !teardown.is_empty() {
+            let _ = self.close_protocol(protocol::ProtocolTransaction::new(teardown).teardown());
         }
         if !self.protocol_out.is_empty() {
             self.stop_after_protocol(state, opts);

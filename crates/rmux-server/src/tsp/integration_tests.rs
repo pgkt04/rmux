@@ -374,7 +374,14 @@ impl FakeTerminal {
                             self.tree.is_none(),
                             "two simultaneous outer screen surfaces"
                         );
-                        assert_eq!(body["mode"], "screen");
+                        match body["mode"].as_str() {
+                            Some("inline") => assert!(
+                                !self.alternate(),
+                                "an inline surface opened on the alternate screen"
+                            ),
+                            Some("screen") => {}
+                            mode => panic!("outer surface mode {mode:?}"),
+                        }
                         self.tree = Some(json!({"id":body["id"],"k":"surface","c":[]}));
                         self.opens += 1;
                     }
@@ -435,6 +442,15 @@ impl FakeTerminal {
         .unwrap()
         .trim_end()
         .to_owned()
+    }
+
+    fn alternate(&self) -> bool {
+        self.grid
+            .panes
+            .get(self.grid_pane)
+            .unwrap()
+            .base
+            .is_alternate()
     }
 
     fn detach(&self, server: &mut Server) {
@@ -766,6 +782,10 @@ fn native_child_keeps_pid_across_ansi_and_back() {
         "native viewer received the program tree"
     );
     assert_eq!(tern.text("transcript"), "transcript:0");
+    assert!(
+        !tern.alternate(),
+        "the inline projection sits on the main screen"
+    );
     assert_eq!(tern.text("draft"), "unsent draft");
     let mut plain = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), false);
     fixture.settle(&mut plain);
@@ -776,6 +796,10 @@ fn native_child_keeps_pid_across_ansi_and_back() {
     assert_eq!(fixture.state()["pid"].as_u64().unwrap(), pid);
     tern.pump(&mut fixture.server);
     assert!(tern.tree.is_none(), "mixed viewers leave native rendering");
+    assert!(
+        tern.alternate(),
+        "the cell view is back on the alternate screen"
+    );
     let fd = fixture
         .server
         .panes
@@ -802,8 +826,29 @@ fn native_child_keeps_pid_across_ansi_and_back() {
         "native rendering returns without restarting the child"
     );
     assert_eq!(tern.text("transcript"), "transcript:1");
+    assert!(!tern.alternate());
     assert_eq!(tern.text("draft"), "unsent draft");
     assert_eq!(fixture.state()["generation"], 1);
+}
+
+#[test]
+fn stopping_the_tty_closes_an_inline_projection_first() {
+    let mut fixture = Fixture::new();
+    let mut tern = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
+    fixture.settle(&mut tern);
+    assert!(tern.tree.is_some());
+    let server = &mut fixture.server;
+    server
+        .clients
+        .get_mut(tern.client)
+        .unwrap()
+        .tty
+        .as_mut()
+        .unwrap()
+        .stop(&mut server.tparm, &TtyOptions::default());
+    tern.pump(&mut fixture.server);
+    assert!(tern.tree.is_none(), "Tern got the close before the restore");
+    assert!(!tern.alternate(), "the restore leaves the alternate screen");
 }
 
 #[test]

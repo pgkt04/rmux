@@ -155,6 +155,24 @@ fn stop_drains_partial_apc_before_termios_restore() {
 }
 
 #[test]
+fn stop_sends_a_queued_teardown_before_the_restore() {
+    let (mut tty, _master, mut state) = fixture();
+    tty.flags.insert(TtyFlags::STARTED);
+    let close = b"\x1b_tsp;x;{}\x1b\\";
+    tty.queue_protocol(ProtocolTransaction::new(b"\x1b_tsp;f;{}\x1b\\".to_vec()).projection(9))
+        .unwrap();
+    tty.close_protocol(ProtocolTransaction::new(close.to_vec()).teardown())
+        .unwrap();
+    tty.queue_protocol(ProtocolTransaction::new(b"late".to_vec()))
+        .unwrap();
+    tty.stop(&mut state, &TtyOptions::default());
+    let emitted = drain(&mut tty, 4096);
+    assert!(emitted.starts_with(close), "{emitted:?}");
+    assert!(emitted.len() > close.len(), "restore follows the teardown");
+    assert!(!emitted.windows(4).any(|w| w == b"late" || w == b"sp;f"));
+}
+
+#[test]
 fn bounded_reads_include_pending_input_and_pause() {
     let (master, slave, _) = rmux_sys::pty::openpty().unwrap();
     let tio = TermiosState::get(slave.as_fd()).unwrap();

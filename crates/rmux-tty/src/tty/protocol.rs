@@ -27,6 +27,7 @@ pub struct ProtocolTransaction {
     started: bool,
     projection: Option<u64>,
     control: bool,
+    teardown: bool,
     da1: Option<Da1Owner>,
 }
 
@@ -44,6 +45,7 @@ impl ProtocolTransaction {
             started: false,
             projection: None,
             control: false,
+            teardown: false,
             da1: None,
         }
     }
@@ -64,6 +66,14 @@ impl ProtocolTransaction {
 
     pub fn control(mut self) -> Self {
         self.control = true;
+        self
+    }
+
+    /// A close the terminal must see even when the tty stops before it drains,
+    /// for example a TSP `x` that hands the main screen back.
+    pub fn teardown(mut self) -> Self {
+        self.control = true;
+        self.teardown = true;
         self
     }
 
@@ -264,10 +274,29 @@ impl Tty {
         self.protocol_generation
     }
 
+    /// `smcup` when `enter`, else `rmcup`, if the tty started on the alternate
+    /// screen; empty otherwise.
+    pub fn alternate_screen(&self, enter: bool) -> Vec<u8> {
+        use crate::term::TtyCodeCode as C;
+        match &self.term {
+            Some(term) if self.opts.clear_on_attach => {
+                rmux_util::bytes::cstr(term.string(if enter { C::Smcup } else { C::Rmcup }))
+                    .to_vec()
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Replaces the bytes `stop` sends ahead of its restore; empty for none.
+    pub fn set_teardown(&mut self, bytes: Vec<u8>) {
+        self.teardown = bytes;
+    }
+
     /// Hard tty loss/reset: forget protocol bytes and all late query owners.
     pub fn reset_protocol(&mut self) {
         self.protocol_generation = self.protocol_generation.wrapping_add(1);
         self.protocol_out.clear();
+        self.teardown.clear();
         self.keys.reset_protocol();
         self.timer(TtyTimer::Protocol, None);
         self.effects.push(TtyEffect::ProtocolInvalidated {
@@ -346,28 +375,33 @@ impl Tty {
         if self.term().flags().contains(F::VT100LIKE) {
             restore.extend_from_slice(b"\x1b[?2031l");
         }
+        let keep = |entry: &QueuedProtocol| entry.transaction.started || entry.transaction.teardown;
         for entry in self
             .protocol_out
             .transactions
             .iter()
-            .filter(|entry| !entry.transaction.started)
+            .filter(|entry| !keep(entry))
         {
             if let Some(owner) = entry.transaction.da1 {
                 self.keys.cancel_da1(owner);
             }
         }
-        self.protocol_out
-            .transactions
-            .retain(|entry| entry.transaction.started);
+        self.protocol_out.transactions.retain(keep);
+        self.out.clear();
+        self.protocol_out.discard_cells();
+        let restore = ProtocolTransaction::new(restore).control();
         self.protocol_out.bytes = self
             .protocol_out
             .transactions
             .iter()
             .map(|entry| entry.transaction.remaining)
-            .sum();
-        self.protocol_out.closing = false;
-        self.close_protocol(ProtocolTransaction::new(restore))
-            .expect("tty restoration fits control reserve");
+            .sum::<usize>()
+            + restore.remaining;
+        self.protocol_out.transactions.push_back(QueuedProtocol {
+            cells_before: 0,
+            transaction: restore,
+        });
+        self.write_pending = true;
         self.protocol_out.closing = true;
         self.protocol_generation = self.protocol_generation.wrapping_add(1);
         self.effects.push(TtyEffect::ProtocolInvalidated {

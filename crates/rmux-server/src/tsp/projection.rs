@@ -93,6 +93,9 @@ pub struct Projection {
     pub generation: u64,
     pub drawn_revision: u64,
     pub failed: bool,
+    /// The outer surface is `inline`, on the client's main screen, as the
+    /// program's own surface; otherwise `screen`.
+    pub inline: bool,
     credits: usize,
     next_sequence: u64,
     last_ack: Option<u64>,
@@ -142,6 +145,7 @@ impl Projection {
             generation,
             drawn_revision: 0,
             failed: false,
+            inline: false,
             credits,
             next_sequence: 1,
             last_ack: None,
@@ -496,6 +500,9 @@ impl Projection {
                 }
             };
         replay::set_open_metadata(&mut plan.messages, open);
+        if self.inline {
+            replay::set_open_mode(&mut plan.messages, "inline");
+        }
         if self.opened {
             plan.messages.retain(|message| message.verb != b'o');
         }
