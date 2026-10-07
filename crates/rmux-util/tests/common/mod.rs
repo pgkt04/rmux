@@ -79,24 +79,28 @@ fn extract_pinned() -> Option<PathBuf> {
     let checkout = tmux_checkout()?;
     let dir = std::env::temp_dir().join(format!("rmux-util-cref-{}-{}", PIN, std::process::id()));
     std::fs::create_dir_all(&dir).ok()?;
+    // bsdtar stops reading at the end-of-archive blocks, so a pipe into it
+    // breaks for the writer. Go through a file.
+    let tarball = dir.join("pinned.tar");
     let archive = Command::new("git")
         .arg("-C")
         .arg(&checkout)
-        .args(["archive", PIN])
-        .output()
+        .args(["archive", "-o"])
+        .arg(&tarball)
+        .arg(PIN)
+        .status()
         .ok()?;
-    if !archive.status.success() {
+    if !archive.success() {
         return None;
     }
-    let mut tar = Command::new("tar")
-        .arg("-x")
+    let tar = Command::new("tar")
+        .arg("-xf")
+        .arg(&tarball)
         .arg("-C")
         .arg(&dir)
-        .stdin(std::process::Stdio::piped())
-        .spawn()
+        .status()
         .ok()?;
-    std::io::Write::write_all(tar.stdin.as_mut()?, &archive.stdout).ok()?;
-    tar.wait().ok()?.success().then_some(dir)
+    tar.success().then_some(dir)
 }
 
 static PINNED: LazyLock<Option<PathBuf>> = LazyLock::new(extract_pinned);
@@ -142,7 +146,11 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
     let partial = src.join(format!("cref-{name}.{}.tmp", std::process::id()));
     let mut cc = Command::new(std::env::var("CC").unwrap_or_else(|_| "cc".into()));
     cc.args(["-std=gnu99", "-w", "-O1", "-o"]).arg(&partial);
-    cc.args(HEADER_DEFINES.iter()).args(defines);
+    // Libraries go after the sources: GNU ld with --as-needed (Ubuntu's
+    // default) drops a library that comes before the objects that use it.
+    let (libs, flags): (Vec<&str>, Vec<&str>) =
+        defines.iter().copied().partition(|f| f.starts_with("-l"));
+    cc.args(HEADER_DEFINES.iter()).args(&flags);
     cc.arg("-I").arg(src);
     let mut libevent = pkg_config(&["--cflags", "libevent"]);
     if libevent.is_empty() && Path::new("/opt/homebrew/opt/libevent/include").exists() {
@@ -168,6 +176,7 @@ pub fn build_c(name: &str, sources: &[&Path], defines: &[&str], utf8proc: bool) 
             cc.arg(src.join(s));
         }
     }
+    cc.args(&libs);
     // colour.c uses round(); glibc keeps libm separate.
     cc.arg("-lm");
     let output = match cc.output() {
