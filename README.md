@@ -2,16 +2,11 @@ rmux
 
 A Rust port of tmux.
 
-Same commands, key bindings, config files and formats as tmux (pinned to
-tmux `8f25579c`, `next-3.9`). It passes all 201 of tmux's own regress tests
-on macOS and Linux. rmux keeps its own sockets (`/tmp/rmux-<uid>/`, or
-`$RMUX_TMPDIR`) and `$RMUX` variable, so it runs beside tmux and never
-talks to a tmux server.
+It works just like tmux, with the same commands, keys and config, and it
+can run alongside tmux without getting in its way.
 
-Supports the [Tern](https://stencil.so/tern) terminal: a program that
-speaks the Tern Surface Protocol, such as omp, renders natively when it
-runs in an rmux pane inside Tern. While a plain terminal is also attached,
-every viewer sees only the normal grid, without the native view.
+It also passes the [Tern](https://stencil.so/tern) Surface Protocol
+through, so apps like omp render natively when you use rmux in Tern.
 
 Runs on Linux and macOS.
 
