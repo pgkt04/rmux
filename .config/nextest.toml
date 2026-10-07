@@ -4,6 +4,8 @@
 
 [profile.default]
 # Skipped by default (each 90 s or more, or a whole grid of them); -P full runs them.
+# The two clock styles with seconds need both captures inside one wall second,
+# which a slow CI runner cannot promise, so they also run only with -P full.
 default-filter = """
 not (
     binary(=copy_core_oracle)
@@ -11,6 +13,7 @@ not (
     | test(=session_and_window_preview_strip_matrix)
     | test(=tree_prefix_three_levels_forty_lines)
     | test(=client_screen_matches_oracle)
+    | (binary(=g19_modes_rest) & (test(=clock_compact_style_2) | test(=clock_style_3)))
 )
 """
 test-threads = 4

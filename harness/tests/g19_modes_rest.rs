@@ -218,13 +218,21 @@ impl AttachedFixture {
             "-E",
             &end_row,
         ];
+        // A slow machine can pause in the middle of a redraw, so a screen
+        // counts as settled only after it stays the same for three reads.
         let mut previous = self.outer.require(&args);
+        let mut unchanged = 0;
         let start = Instant::now();
         loop {
-            thread::sleep(Duration::from_millis(10));
+            thread::sleep(Duration::from_millis(20));
             let current = self.outer.require(&args);
             if current == previous {
-                return current;
+                unchanged += 1;
+                if unchanged == 2 {
+                    return current;
+                }
+            } else {
+                unchanged = 0;
             }
             assert!(
                 start.elapsed() < Duration::from_secs(5),
@@ -502,41 +510,52 @@ fn clock_differential(style: &str) {
             inner.require(&["resize-window", "-t", "m:0", "-x", sx, "-y", sy]);
             terminal.resize(sx, sy);
         }
-        let mut sample = None;
-        for _ in 0..8 {
-            // Re-entering forces both renderers to obtain the current local time.
-            // Only a witnessed wall-second change discards a sample; differences
-            // inside one second are never retried or normalized.
-            let alignment_start = Instant::now();
-            while SystemTime::now()
+        // A clock without seconds changes once a minute.
+        let period = if style.ends_with("-with-seconds") {
+            1
+        } else {
+            60
+        };
+        let mut matched = false;
+        for _ in 0..20 {
+            // Start near the top of a second, so the time is less likely to
+            // change during the sample. Re-entering clock mode makes both
+            // renderers read the current local time.
+            let subsec = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .expect("clock after epoch")
-                .subsec_millis()
-                > 100
-            {
-                assert!(
-                    alignment_start.elapsed() < Duration::from_secs(2),
-                    "unable to align live clock sample",
-                );
-                thread::sleep(Duration::from_millis(10));
+                .subsec_millis();
+            if subsec > 100 {
+                thread::sleep(Duration::from_millis(u64::from(1000 - subsec)));
             }
-            let before = wall_second();
+            let before = wall_second() / period;
             left.require(&["clock-mode", "-t", "m:0"]);
             right.require(&["clock-mode", "-t", "m:0"]);
             let a = left_terminal.capture(&left, sy);
-            let b = right_terminal.capture(&right, sy);
+            let mut b = right_terminal.capture(&right, sy);
+            if std::env::var_os("RMUX_G19_MUTATE").is_some() {
+                b.stdout.extend_from_slice(b"__mutated_render__\n");
+            }
+            // rmux is captured after the oracle. If the clock ticked between
+            // the two, a second oracle capture shows the time that rmux drew.
+            let same = a == b || left_terminal.capture(&left, sy) == b;
+            let moved = wall_second() / period != before;
             left.require(&["send-keys", "-t", "m:0", "x"]);
             right.require(&["send-keys", "-t", "m:0", "x"]);
-            if wall_second() == before {
-                sample = Some((a, b));
+            if same {
+                matched = true;
                 break;
             }
+            // A difference is excused, and sampled again, only when the shown
+            // time may have changed during the sample.
+            if !moved {
+                assert_eq!(a, b, "clock style {style}, {sx}x{sy}");
+            }
         }
-        let (a, mut b) = sample.expect("unable to capture both clock screens within one second");
-        if std::env::var_os("RMUX_G19_MUTATE").is_some() {
-            b.stdout.extend_from_slice(b"__mutated_render__\n");
-        }
-        assert_eq!(a, b, "clock style {style}, {sx}x{sy}");
+        assert!(
+            matched,
+            "clock style {style}, {sx}x{sy}: the time changed in each of 20 samples"
+        );
         assert_eq!(
             left.require(&["display-message", "-p", "-t", "m:0", "#{pane_mode}"]),
             right.require(&["display-message", "-p", "-t", "m:0", "#{pane_mode}"]),
