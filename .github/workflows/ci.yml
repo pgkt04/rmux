@@ -1,33 +1,54 @@
 name: CI
-# Manual only (Actions tab -> Run workflow); push/PR runs used too many minutes.
 on:
+  push:
+    branches: [main]
+  pull_request:
   workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   rust:
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - uses: actions/checkout@v4
         with:
           repository: tmux/tmux
           ref: 8f25579c5aef8d93924a20681f394e2a582fd3ad
           path: upstream-tmux
+      - if: runner.os == 'macOS'
+        run: brew install autoconf automake pkg-config libevent ncurses utf8proc
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y autoconf automake pkg-config libevent-dev libncurses-dev libutf8proc-dev
+      - run: sh scripts/build-oracle.sh
+        env:
+          TMUX_SRC: ${{ github.workspace }}/upstream-tmux
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # Oracle tests run the built rmux binary; nextest does not build it.
+      - run: cargo build -p rmux
+      - run: cargo nextest run --workspace
         env:
           TMUX_SRC: ${{ github.workspace }}/upstream-tmux
       - run: cargo run -p rmux-sys --example readiness
 
   oracle:
     strategy:
+      fail-fast: false
       matrix:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
