@@ -145,7 +145,6 @@ impl TspDocument {
             Some(p) => p.as_object().ok_or("props must be object")?.clone(),
         };
         props.retain(|_, v| !v.is_null());
-        validate_props(&props)?;
         let children = match o.get("c") {
             None => &[][..],
             Some(c) => c.as_array().ok_or("children must be array")?.as_slice(),
@@ -278,7 +277,6 @@ impl TspDocument {
         match verb {
             "set" => {
                 let p = a[2].as_object().ok_or("set props must be object")?;
-                validate_props(p)?;
                 let n = self.nodes.get_mut(id).unwrap();
                 let unchanged: HashMap<String, u64> = age_paths()
                     .into_iter()
@@ -581,23 +579,6 @@ fn collect_blobs(v: &Value, out: &mut BTreeSet<String>) {
         _ => {}
     }
 }
-fn validate_props(p: &Map<String, Value>) -> Result<(), String> {
-    for k in ["text", "role", "title", "aria", "href"] {
-        if let Some(v) = p.get(k) {
-            if !v.is_null() && !v.is_string() {
-                return Err(format!("{k} must be string"));
-            }
-        }
-    }
-    for k in ["hidden", "collapsed", "collapsible", "selected"] {
-        if let Some(v) = p.get(k) {
-            if !v.is_null() && !v.is_boolean() {
-                return Err(format!("{k} must be boolean"));
-            }
-        }
-    }
-    Ok(())
-}
 fn age_paths() -> [&'static str; 5] {
     [
         "age",
@@ -712,6 +693,22 @@ mod tests {
         );
         assert!(!d.has("bad"));
         assert_eq!(d.get("t", 0).unwrap()["p"], json!({"future":true}));
+    }
+    #[test]
+    fn props_keep_the_types_their_kind_gives_them() {
+        // A list's `selected` is an item id and a picker's `title` is spans;
+        // a `card`'s `selected` is a boolean. Only Tern knows which is which.
+        let mut d = TspDocument::new("s");
+        let r = d.apply_frame(&Frame { sf: "s".into(), s: 1, ops: vec![
+            json!(["add","list","s",null,{"id":"list","k":"list","p":{"selected":"a"},"c":[
+                {"id":"a","k":"item"},{"id":"b","k":"item"}]}]),
+            json!(["add","pick","s",null,{"id":"pick","k":"picker","p":{"title":[{"t":"Model"}]}}]),
+            json!(["add","card","s",null,{"id":"card","k":"card","p":{"selected":true}}]),
+            json!(["set","list",{"selected":"b"}]),
+        ]}, 0).unwrap();
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+        assert_eq!(d.get("list", 0).unwrap()["p"]["selected"], "b");
+        assert_eq!(d.get("pick", 0).unwrap()["p"]["title"][0]["t"], "Model");
     }
     #[test]
     fn reference_randomized_common_ops() {
