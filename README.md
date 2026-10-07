@@ -2,8 +2,6 @@ rmux
 
 A Rust port of tmux.
 
-![omp inside rmux, rendered natively by Tern](media/tern.png)
-
 Same commands, key bindings, config files and formats as tmux (pinned to
 tmux `8f25579c`, `next-3.9`). It passes all 201 of tmux's own regress tests
 on macOS and Linux. rmux keeps its own sockets (`/tmp/rmux-<uid>/`, or
