@@ -1790,10 +1790,17 @@ fn redraw_draw_pane_native(
     let mut first = b"#[align=centre,bright]".to_vec();
     first.extend_from_slice(title.as_bytes());
     first.extend_from_slice(b": native view");
-    let lines = [
-        first,
-        b"#[align=centre,dim]zoom this pane or close the others to see it".to_vec(),
-    ];
+    let split = srv.windows.get(p.window).is_some_and(|w| {
+        w.panes
+            .iter()
+            .any(|id| *id != wp && pane_is_visible(srv, *id))
+    });
+    let hint: &[u8] = if split {
+        b"#[align=centre,dim]zoom this pane or close the others to see it"
+    } else {
+        b"#[align=centre,dim]restore a full-pane TSP view to see it"
+    };
+    let lines = [first, hint.to_vec()];
     let mut registry = rmux_emu::hyperlinks::HyperlinkRegistry::new();
     let Ok(mut screen) = Screen::new(
         psx as u32,

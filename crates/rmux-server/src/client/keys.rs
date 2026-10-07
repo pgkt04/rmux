@@ -767,6 +767,12 @@ pub fn key_callback(server: &mut Server, item: QueueItemId, mut ev: KeyEvent) {
 
     // Check for mouse keys (server-client.c:1344-1366).
     ev.target.valid = false;
+    if key.0 == SpecialKey::MOUSE
+        && rmux_util::key::MouseButtonBits(ev.mouse.b).is_wheel()
+        && crate::tsp::broker::native_client(server, id)
+    {
+        return key_out(server, id, ec, true, key);
+    }
     if key.0 == SpecialKey::MOUSE || key.0 == SpecialKey::DOUBLECLICK {
         if client_flags(server, id).intersects(ClientFlags::READONLY) {
             return key_out(server, id, ec, true, key);

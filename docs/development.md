@@ -323,8 +323,13 @@ only eligible TSP viewers and a sole visible or zoomed pane, without cropping,
 panning, floating panes, popups, pane modes, menus, or command prompts. Its one
 outer screen surface covers the tty, temporarily hiding rmux status, borders,
 titles, and scrollbars without changing saved options or layout. Prefix keys
-remain rmux input. UI entry first requests a complete ANSI paint; leaving the
-ineligible view can return the same live program to a fresh native document.
+remain rmux input. Opening a native projection clears cell mouse reporting
+before the surface open, letting Tern scroll locally without a resize. Cell UI
+restores its own mouse modes; stray native wheel reports do not enter copy mode.
+Surface visibility is reported to the program, not used as projection eligibility:
+an offscreen surface stays open so its next visible event can still be routed.
+For broker-aware programs, UI entry first requests a complete ANSI paint;
+leaving the ineligible view can return the same live program to a fresh native document.
 This is not simultaneous native/ANSI rendering or a TSP-to-cells converter.
 
 A program whose `hello` lacks the broker feature (any TSP program, released omp
@@ -337,6 +342,10 @@ viewer is attached or the pane is otherwise ineligible, viewers see the plain
 grid, which a native program does not paint; keys still reach the program, and
 native rendering resumes once the pane is eligible again. rmux acknowledges a
 stock program's frames itself whenever no viewer draws them.
+Stock programs enter cell modes and menus immediately on the existing grid,
+without waiting for an ANSI repaint they cannot provide. Leaving the cell UI
+replays the retained native document; copy-mode commands never block later
+prefix keys such as detach.
 
 Transitions hold pane input until matching ready, with a 64 KiB admission bound
 and tty backpressure. A missing completion after five seconds closes projections

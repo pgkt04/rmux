@@ -194,7 +194,7 @@ pub fn pane_cell_ready(server: &Server, pane: PaneId) -> bool {
         .panes
         .get(pane)
         .and_then(|p| p.tsp.as_ref())
-        .is_none_or(|s| s.renderer == Renderer::Ansi)
+        .is_none_or(|s| s.stock || s.renderer == Renderer::Ansi)
 }
 pub fn defer_cell_ui(
     server: &mut Server,

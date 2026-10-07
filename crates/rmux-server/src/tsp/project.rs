@@ -251,7 +251,8 @@ fn send_pending(
             .and_then(|p| p.pending_sequence())
             .unwrap_or(0);
         let token = format!("{sequence}-{}", piece.token());
-        let leave_alternate = piece.is_open()
+        let opening = piece.is_open();
+        let leave_alternate = opening
             && server
                 .clients
                 .get(id)
@@ -284,6 +285,10 @@ fn send_pending(
         };
         let queued = server.clients.get_mut(id).and_then(|c| {
             let tty = c.tty.as_mut()?;
+            if opening {
+                let mode = tty.mode() & !rmux_emu::screen::ScreenMode::ALL_MOUSE_MODES;
+                tty.update_mode(&mut server.tparm, mode, None);
+            }
             let queued = tty.queue_protocol(transaction);
             if queued.is_ok() && leave_alternate {
                 let outer = &c.tsp.projection.as_ref()?.outer;

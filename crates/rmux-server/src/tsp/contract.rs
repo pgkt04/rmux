@@ -192,7 +192,6 @@ fn viewer_eligible(server: &Server, pane: PaneId, id: ClientId) -> bool {
         && sy >= w.sy
         && !c.prompt.is_some()
         && c.message.text.is_none()
-        && c.tsp.visible
         && c.tsp
             .hello()
             .is_some_and(|h| h.v == 1 && h.credits > 0 && h.apc >= 64)
