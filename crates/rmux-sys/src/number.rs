@@ -1,6 +1,8 @@
-// Ported from tmux format.c, cmd-run-shell.c @ 8f25579c
-//! `strtod` with its end offset and `%.*f` through libc `snprintf`.
+// Ported from tmux format.c, cmd-run-shell.c, colour.c @ 8f25579c
+//! `strtod` with its end offset, `%.*f` through libc `snprintf`, and the
+//! libc `sscanf` calls of `colour_parseX11`.
 
+use std::ffi::{c_char, c_int, c_uint};
 use std::io;
 use std::ptr;
 
@@ -70,6 +72,89 @@ pub fn format_integer_operand(value: f64) -> f64 {
     {
         (value as i64) as f64
     }
+}
+
+/// The three-integer `sscanf` formats of `colour_parseX11`
+/// (`colour.c:1184-1190`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RgbScan {
+    /// `rgb:%02x/%02x/%02x`
+    Rgb2,
+    /// `#%02x%02x%02x`
+    Hash2,
+    /// `%d,%d,%d`
+    Decimal,
+    /// `rgb:%04x/%04x/%04x`
+    Rgb4,
+    /// `#%04x%04x%04x`
+    Hash4,
+}
+
+// tmux leaves these to the host libc, and libcs disagree on input such as
+// `0x` or `1e+`. Calling sscanf keeps rmux in step with each one.
+
+/// `sscanf(input, form, &r, &g, &b) == 3`. `input` stops at its first NUL.
+#[must_use]
+pub fn scan_rgb(input: &[u8], form: RgbScan) -> Option<[u32; 3]> {
+    let format = match form {
+        RgbScan::Rgb2 => c"rgb:%02x/%02x/%02x",
+        RgbScan::Hash2 => c"#%02x%02x%02x",
+        RgbScan::Decimal => c"%d,%d,%d",
+        RgbScan::Rgb4 => c"rgb:%04x/%04x/%04x",
+        RgbScan::Hash4 => c"#%04x%04x%04x",
+    };
+    let copy = nul_terminated(input);
+    let mut rgb: [c_uint; 3] = [0; 3];
+    let [r, g, b] = &mut rgb;
+    // SAFETY: `copy` is NUL-terminated. Each format has three conversions,
+    // and each writes one `unsigned int` (`%d` writes a same-sized `int`
+    // into it, as tmux does).
+    let converted = unsafe {
+        sscanf(
+            copy.as_ptr().cast(),
+            format.as_ptr(),
+            ptr::from_mut(r),
+            ptr::from_mut(g),
+            ptr::from_mut(b),
+        )
+    };
+    (converted == 3).then_some(rgb)
+}
+
+/// `sscanf(input, "cmyk:%lf/%lf/%lf/%lf", ...) == 4` when `four`, else
+/// `sscanf(input, "cmy:%lf/%lf/%lf", ...) == 3` with `k` left at 0.
+#[must_use]
+pub fn scan_cmyk(input: &[u8], four: bool) -> Option<[f64; 4]> {
+    let copy = nul_terminated(input);
+    let mut cmyk = [0.0_f64; 4];
+    let [c, m, y, k] = &mut cmyk;
+    let (c, m, y, k) = (
+        ptr::from_mut(c),
+        ptr::from_mut(m),
+        ptr::from_mut(y),
+        ptr::from_mut(k),
+    );
+    // SAFETY: `copy` is NUL-terminated, and each `%lf` writes one double
+    // through the matching pointer.
+    let converted = unsafe {
+        if four {
+            sscanf(
+                copy.as_ptr().cast(),
+                c"cmyk:%lf/%lf/%lf/%lf".as_ptr(),
+                c,
+                m,
+                y,
+                k,
+            )
+        } else {
+            sscanf(copy.as_ptr().cast(), c"cmy:%lf/%lf/%lf".as_ptr(), c, m, y)
+        }
+    };
+    (converted == if four { 4 } else { 3 }).then_some(cmyk)
+}
+
+unsafe extern "C" {
+    fn sscanf(s: *const c_char, format: *const c_char, ...) -> c_int;
 }
 
 #[cfg(test)]

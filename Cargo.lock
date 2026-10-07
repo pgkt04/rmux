@@ -204,6 +204,7 @@ dependencies = [
 name = "rmux-emu"
 version = "0.1.0"
 dependencies = [
+ "rmux-sys",
  "rmux-util",
 ]
 

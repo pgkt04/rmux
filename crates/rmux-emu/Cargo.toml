@@ -9,6 +9,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+rmux-sys.workspace = true
 rmux-util.workspace = true
 
 [features]
