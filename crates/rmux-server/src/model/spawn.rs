@@ -91,7 +91,6 @@ pub struct SpawnContext {
     pub client_cwd: Option<Vec<u8>>,
     pub client_environment: Option<Environment>,
     pub client_attached: bool,
-    pub clients: Vec<super::resize::ResizeClient>,
     pub initial_size: Option<super::resize::WindowSize>,
     pub argv: Vec<Vec<u8>>,
     pub environment: Environment,
@@ -114,7 +113,6 @@ impl SpawnContext {
             client_cwd: None,
             client_environment: None,
             client_attached: false,
-            clients: Vec::new(),
             initial_size: None,
             argv: Vec::new(),
             environment: Environment::new(),
@@ -537,6 +535,7 @@ pub fn spawn_window(server: &mut Server, sc: &mut SpawnContext) -> Result<Winlin
             }
             super::window::winlink_remove(server, old);
         }
+        let clients = crate::server::run::resize_clients(server);
         let s = server.sessions.get(sc.session).ok_or(ModelError::StaleId)?;
         let policy = super::WindowSizePolicy::try_from(
             server
@@ -546,7 +545,7 @@ pub fn spawn_window(server: &mut Server, sc: &mut SpawnContext) -> Result<Winlin
         .map_err(|_| ModelError::message(b"invalid window size policy"))?;
         let size = sc.initial_size.unwrap_or_else(|| {
             super::resize::default_window_size(
-                &sc.clients,
+                &clients,
                 sc.client,
                 sc.session,
                 None,
@@ -769,6 +768,37 @@ pub fn spawn_editor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_window_takes_the_size_of_the_creating_client() {
+        let mut server = Server::new();
+        let options = server.options.create(Some(server.options.global_s));
+        let session = super::super::session::session_create(
+            &mut server,
+            super::super::session::SessionCreate {
+                prefix: None,
+                name: Some(b"size".to_vec()),
+                cwd: b"/tmp".to_vec(),
+                environment: Environment::new(),
+                options,
+                termios: None,
+            },
+        );
+        server.sessions.get_mut(session).unwrap().statuslines = 1;
+        let mut client = crate::client::Client::new(None, (0, 0));
+        client.session = Some(session);
+        client.tty_sx = 120;
+        client.tty_sy = 40;
+        let client = server.clients.insert(client).unwrap();
+        server.client_order.push_back(client);
+        let mut context = SpawnContext::new(session);
+        context.client = Some(client);
+        context.flags = SpawnFlags::EMPTY;
+        let link = spawn_window(&mut server, &mut context).unwrap();
+        let window = server.winlinks.get(link).unwrap().window;
+        let window = server.windows.get(window).unwrap();
+        assert_eq!((window.sx, window.sy), (120, 39));
+    }
 
     #[test]
     fn pane_environment_uses_start_broker_flag_not_inherited_capabilities() {
