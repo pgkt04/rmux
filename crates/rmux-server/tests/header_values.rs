@@ -1,8 +1,5 @@
 // Ported from tmux tmux.h @ 8f25579c
-use std::{
-    fs,
-    process::{Command, Stdio},
-};
+use std::{fs, process::Command};
 #[test]
 fn pinned_header_values() {
     let source = std::env::var_os("RMUX_TMUX_SOURCE")
@@ -14,22 +11,25 @@ fn pinned_header_values() {
     }
     let dir = std::env::temp_dir().join(format!("rmux-g00-values-{}", std::process::id()));
     fs::create_dir_all(&dir).unwrap();
-    let mut archive = Command::new("git")
+    // bsdtar stops reading at the end-of-archive blocks; a pipe breaks.
+    let tarball = dir.join("pinned.tar");
+    let archive = Command::new("git")
         .arg("-C")
         .arg(&source)
-        .args(["archive", "8f25579c"])
-        .stdout(Stdio::piped())
-        .spawn()
+        .args(["archive", "-o"])
+        .arg(&tarball)
+        .arg("8f25579c")
+        .status()
         .unwrap();
+    assert!(archive.success());
     let status = Command::new("tar")
-        .arg("-x")
+        .arg("-xf")
+        .arg(&tarball)
         .arg("-C")
         .arg(&dir)
-        .stdin(archive.stdout.take().unwrap())
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(archive.wait().unwrap().success());
     let values: &[(&str, i64)] = &[
         (
             "KEYC_TYPE_UNICODE",

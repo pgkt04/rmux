@@ -305,18 +305,22 @@ fn table_matches_fresh_c_dump() {
     let dir = std::env::temp_dir().join(format!("rmux-options-table-{}", std::process::id()));
     let src = dir.join("src");
     std::fs::create_dir_all(&src).unwrap();
+    // bsdtar stops reading at the end-of-archive blocks; a pipe breaks.
+    let tarball = dir.join("pinned.tar");
     let archive = Command::new("git")
-        .args(["-C", tree.to_str().unwrap(), "archive", "8f25579c"])
-        .output()
+        .args(["-C", tree.to_str().unwrap(), "archive", "-o"])
+        .arg(&tarball)
+        .arg("8f25579c")
+        .status()
         .expect("git archive");
-    assert!(archive.status.success(), "git archive failed");
-    let mut tar = Command::new("tar")
-        .args(["-x", "-C", src.to_str().unwrap()])
-        .stdin(std::process::Stdio::piped())
-        .spawn()
+    assert!(archive.success(), "git archive failed");
+    let tar = Command::new("tar")
+        .arg("-xf")
+        .arg(&tarball)
+        .args(["-C", src.to_str().unwrap()])
+        .status()
         .unwrap();
-    std::io::Write::write_all(tar.stdin.as_mut().unwrap(), &archive.stdout).unwrap();
-    assert!(tar.wait().unwrap().success());
+    assert!(tar.success());
     let exe = dir.join("dump");
     let mut cc = Command::new("cc");
     cc.args(test_common::HEADER_DEFINES.iter())

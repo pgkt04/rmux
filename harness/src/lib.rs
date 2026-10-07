@@ -36,27 +36,29 @@ pub fn manifest() -> Result<Manifest, toml::de::Error> {
 }
 
 pub fn extract(source: &Path, destination: &Path) -> io::Result<()> {
+    // bsdtar stops reading at the end-of-archive blocks, so a pipe into it
+    // breaks for the writer. Go through a file.
+    let tarball = destination.join("pinned.tar");
     let archive = Command::new("git")
         .arg("-C")
         .arg(source)
-        .args(["archive", PIN.trim(), "regress", "tmux-protocol.h"])
+        .args(["archive", "-o"])
+        .arg(&tarball)
+        .args([PIN.trim(), "regress", "tmux-protocol.h"])
         .output()?;
     if !archive.status.success() {
         return Err(io::Error::other(
             String::from_utf8_lossy(&archive.stderr).into_owned(),
         ));
     }
-    let mut tar = Command::new("tar")
-        .args(["-x", "-C"])
+    let tar = Command::new("tar")
+        .arg("-xf")
+        .arg(&tarball)
+        .arg("-C")
         .arg(destination)
-        .stdin(Stdio::piped())
-        .spawn()?;
-    use std::io::Write;
-    tar.stdin
-        .take()
-        .ok_or_else(|| io::Error::other("tar stdin missing"))?
-        .write_all(&archive.stdout)?;
-    if !tar.wait()?.success() {
+        .status()?;
+    fs::remove_file(&tarball)?;
+    if !tar.success() {
         return Err(io::Error::other("git archive extraction failed"));
     }
     Ok(())
