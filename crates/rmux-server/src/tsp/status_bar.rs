@@ -14,6 +14,10 @@ use rmux_emu::{
 use serde_json::{Map, Value, json};
 
 pub const BAR_ID: &str = "rmux:bar";
+pub const BAR_SHEET: &str = "rmux-bar";
+/// The chat skins hold dock strips to the transcript measure; the bar spans
+/// the pane like a status line.
+pub const BAR_CSS: &str = "[data-id='rmux:bar']>.sf-status{max-width:none!important;width:100%!important;margin:0!important}";
 
 pub fn supported(hello: &Hello) -> bool {
     hello.features.contains("dock")
@@ -33,6 +37,7 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
     }
     let wanted =
         !c.tsp.bar_failed && c.status.active.is_none() && c.tsp.hello().is_some_and(supported);
+    let styles = c.tsp.hello().is_some_and(|h| h.features.contains("styles"));
     let bar = if wanted {
         status_redraw(server, id);
         build(server, id)
@@ -43,7 +48,10 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
         .clients
         .get_mut(id)
         .and_then(|c| c.tsp.projection.as_mut())
-        .is_some_and(|p| p.set_bar(bar))
+        .is_some_and(|p| {
+            p.bar_styles = styles;
+            p.set_bar(bar)
+        })
 }
 
 /// The native half of `check_redraw`: of the client's cells, only the status

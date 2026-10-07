@@ -4,7 +4,7 @@ use super::{
     blobs::TspBlobStore,
     document::{ApplyResult, TspDocument},
     replay,
-    status_bar::BAR_ID,
+    status_bar::{BAR_CSS, BAR_ID, BAR_SHEET},
     wire::{Frame, JOINED_LIMIT, WireMessage},
 };
 use crate::ids::PaneId;
@@ -73,6 +73,7 @@ struct ReplayCursor {
     root_props: BTreeSet<String>,
     sheets: BTreeSet<String>,
     bar_dock: bool,
+    bar_sheet: bool,
     /// Next `replay_piece` index. The frame is last and is the only piece that
     /// publishes ack coverage.
     sent_prefix: usize,
@@ -121,6 +122,10 @@ pub struct Projection {
     bar_dirty: bool,
     /// The outer `dock` exists only to hold the bar: the document has none.
     bar_dock: bool,
+    /// The client takes program sheets, so the bar can span the pane.
+    pub bar_styles: bool,
+    /// The bar's sheet is installed on the outer surface.
+    bar_sheet: bool,
 }
 impl Projection {
     pub fn new(
@@ -161,6 +166,8 @@ impl Projection {
             bar: None,
             bar_dirty: false,
             bar_dock: false,
+            bar_styles: false,
+            bar_sheet: false,
         }
     }
 
@@ -184,6 +191,22 @@ impl Projection {
         self.bar = bar;
         self.bar_dirty = true;
         true
+    }
+
+    /// The bar's sheet goes with the first frame that adds the bar.
+    fn bar_sheet_due(&self, bar_ops: &[usize]) -> bool {
+        self.bar_styles && !self.bar_sheet && self.bar.is_some() && !bar_ops.is_empty()
+    }
+
+    fn push_before_frame(&self, messages: &mut Vec<WireMessage>) {
+        let at = messages.len() - usize::from(messages.last().is_some_and(|m| m.verb == b'f'));
+        messages.insert(
+            at,
+            WireMessage::json(
+                b's',
+                &json!({"sf": self.outer, "name": BAR_SHEET, "css": BAR_CSS}),
+            ),
+        );
     }
 
     pub fn reconcile(&mut self) {
@@ -491,6 +514,10 @@ impl Projection {
             plan.messages.append(&mut deletions);
             plan.messages.push(frame);
         }
+        let bar_sheet = self.bar_sheet || self.bar_sheet_due(&bar_ops);
+        if bar_sheet && !self.bar_sheet {
+            self.push_before_frame(&mut plan.messages);
+        }
         // The canonical metadata at this revision subsumes the pending batch.
         self.pending_palette = None;
         self.pending_sheets.clear();
@@ -526,6 +553,7 @@ impl Projection {
             root_props,
             sheets,
             bar_dock,
+            bar_sheet,
             sent_prefix: 0,
         });
         self.awaiting_frame = Some(sequence);
@@ -584,6 +612,10 @@ impl Projection {
         }
         let frame_bytes = frame.body.len();
         messages.push(frame);
+        let bar_sheet = self.bar_sheet || self.bar_sheet_due(&bar_ops);
+        if bar_sheet && !self.bar_sheet {
+            self.push_before_frame(&mut messages);
+        }
         let mut sheets = self.sheets.clone();
         for (name, css) in &self.pending_sheets {
             if css.is_some() {
@@ -616,6 +648,7 @@ impl Projection {
             root_props,
             sheets,
             bar_dock,
+            bar_sheet,
             sent_prefix: 0,
         });
         self.awaiting_frame = Some(sequence);
@@ -767,6 +800,7 @@ impl Projection {
         self.root_props = cursor.root_props;
         self.sheets = cursor.sheets;
         self.bar_dock = cursor.bar_dock;
+        self.bar_sheet = cursor.bar_sheet;
         self.listening = cursor.listening;
         if self.listening {
             self.sent.push_back(cursor.coverage);
@@ -848,6 +882,9 @@ impl Projection {
         self.available()?;
         if !self.listening || event.get("sf").and_then(Value::as_str) != Some(&self.outer) {
             return Ok(None);
+        }
+        if event.get("sheet").and_then(Value::as_str) == Some(BAR_SHEET) {
+            return Err(ProjectionError::StatusBar);
         }
         let sequence = event
             .get("s")
@@ -1987,14 +2024,31 @@ mod tests {
                     .collect()
             })
         }
+        fn bar_sheets(messages: &[WireMessage]) -> usize {
+            messages
+                .iter()
+                .filter(|m| m.verb == b's')
+                .filter(|m| serde_json::from_slice::<Value>(&m.body).unwrap()["name"] == BAR_SHEET)
+                .count()
+        }
         let mut p = projection(2);
+        p.bar_styles = true;
         let mut d = TspDocument::new("s");
         let mut view = TspDocument::new("outer");
         assert!(p.set_bar(Some(bar("0:edit*"))));
         assert!(!p.set_bar(Some(bar("0:edit*"))));
-        let opened = draw(&mut p, &d, &mut view);
+        let (messages, opened) = send(&mut p, &d);
         assert!(opened.replay);
+        assert_eq!(bar_sheets(&messages), 1);
+        assert_eq!(messages.last().unwrap().verb, b'f');
+        view.apply_frame(&serde_json::from_value(frame(&messages)).unwrap(), 0)
+            .unwrap();
+        p.ack(opened.sequence).unwrap();
         assert_eq!(dock(&view), [BAR_ID]);
+        assert_eq!(
+            p.map_error(&json!({"ev":"error","sf":"outer","sheet":BAR_SHEET,"msg":"bad"})),
+            Err(ProjectionError::StatusBar)
+        );
 
         apply(
             &mut p,
@@ -2025,6 +2079,7 @@ mod tests {
 
         apply(&mut p, &mut d, 5, vec![json!(["del", "dock"])]);
         let (messages, removed) = send(&mut p, &d);
+        assert_eq!(bar_sheets(&messages), 0);
         view.apply_frame(&serde_json::from_value(frame(&messages)).unwrap(), 0)
             .unwrap();
         assert_eq!(dock(&view), [BAR_ID]);
