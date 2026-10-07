@@ -127,8 +127,13 @@ pub fn event(server: &mut Server, pane: PaneId, value: &serde_json::Value) {
 /// A stock program draws only its native view, so its pane grid stays empty;
 /// cell views of the pane show this name over it.
 pub fn native_only(server: &Server, pane: PaneId) -> Option<String> {
-    let state = server.panes.get(pane)?.tsp.as_ref()?;
-    if !state.stock || !matches!(state.renderer, Renderer::Native | Renderer::Detached) {
+    let p = server.panes.get(pane)?;
+    let state = p.tsp.as_ref()?;
+    if !p.modes.is_empty()
+        || p.prompt.is_some()
+        || !state.stock
+        || !matches!(state.renderer, Renderer::Native | Renderer::Detached)
+    {
         return None;
     }
     let title = state.surfaces.selected()?.open.get("title");

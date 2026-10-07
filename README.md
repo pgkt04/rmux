@@ -45,6 +45,11 @@ The native view needs the pane to be alone in its window (or zoomed). In a
 split, a native omp pane shows a short note instead; keys still reach omp, and
 zooming the pane brings the native view back.
 
+Scrolling stays in Tern's native view without resizing first, including when
+its surface scrolls offscreen.
+`C-b [` opens rmux copy mode on the saved text grid (which may be empty for
+a native-only app); `q` returns to the native view. `C-b d` detaches normally.
+
 `#{pane_tsp}` and `#{client_tsp}` show the state (`rmux display -p
 '#{pane_tsp}'`). Start the server with `RMUX_TSP_BROKER=0` to turn native
 rendering off, or set `PI_TUI_NATIVE=0` to keep omp on its text renderer.

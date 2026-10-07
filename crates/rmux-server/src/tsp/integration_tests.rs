@@ -247,6 +247,7 @@ impl FakeTerminal {
             "csr=\x1b[%i%p1%d;%p2%dr",
             "smcup=\x1b[?1049h",
             "rmcup=\x1b[?1049l",
+            "kmous=\x1b[M",
             "cnorm=\x1b[?25h",
             "civis=\x1b[?25l",
             "sgr0=\x1b[0m",
@@ -767,6 +768,146 @@ impl Drop for Fixture {
         let _ = rmux_sys::proc::terminate_process(self.pid);
         let _ = rmux_sys::proc::wait_process(self.pid, false);
     }
+}
+
+fn stock_native() -> (Server, PaneId, FakeTerminal) {
+    let (mut server, pane, session) = model();
+    let mut terminal = FakeTerminal::attach(&mut server, Some(session), true);
+    crate::client::tick::reset_state(&mut server, terminal.client);
+    terminal.pump(&mut server);
+    assert!(
+        terminal
+            .grid
+            .panes
+            .get(terminal.grid_pane)
+            .unwrap()
+            .base
+            .mode
+            .intersects(rmux_emu::screen::ScreenMode::ALL_MOUSE_MODES)
+    );
+    let mut bytes = apc(b'q', &json!({"q":"hello","v":[1],"app":"omp"}));
+    bytes.extend(apc(
+        b'o',
+        &json!({"id":"program","mode":"inline","title":"omp"}),
+    ));
+    bytes.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":1,"ops":[["add","transcript","program",null,{"id":"transcript","k":"text","p":{"text":"retained transcript"}}]]}),
+    ));
+    pane_runtime::pane_parse_buffer(&mut server, pane, &bytes).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    crate::cmd::key_bindings::init(&mut server).unwrap();
+    crate::cmd::queue::next(&mut server, None);
+    crate::client::lifecycle::update_offset(&mut server, terminal.client);
+    (server, pane, terminal)
+}
+
+#[test]
+fn native_open_releases_cell_mouse_capture_without_resize() {
+    let (mut server, _, mut terminal) = stock_native();
+    let mouse_captured = |terminal: &FakeTerminal| {
+        terminal
+            .grid
+            .panes
+            .get(terminal.grid_pane)
+            .unwrap()
+            .base
+            .mode
+            .intersects(rmux_emu::screen::ScreenMode::ALL_MOUSE_MODES)
+    };
+    assert!(!mouse_captured(&terminal));
+    terminal.send(&mut server, b"\x02[");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    broker::recompute(&mut server);
+    crate::client::tick::reset_state(&mut server, terminal.client);
+    terminal.pump(&mut server);
+    assert!(mouse_captured(&terminal));
+    terminal.send(&mut server, b"q");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    broker::recompute(&mut server);
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert!(!mouse_captured(&terminal));
+}
+
+#[test]
+fn stock_native_wheel_keeps_view_and_prefix_detach_works() {
+    let (mut server, pane, mut terminal) = stock_native();
+    terminal.send(&mut server, b"\x1b[<64;10;10M");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    terminal.pump(&mut server);
+    assert!(
+        terminal.tree.is_some(),
+        "scrolling must not close the native view"
+    );
+    assert!(server.panes.get(pane).unwrap().modes.is_empty());
+    terminal.send(&mut server, b"\x02d");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    assert!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .flags
+            .contains(ClientFlags::EXIT)
+    );
+}
+
+#[test]
+fn stock_native_copy_mode_can_cancel_and_detach() {
+    let (mut server, pane, mut terminal) = stock_native();
+    terminal.send(&mut server, b"\x02[");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    broker::recompute(&mut server);
+    terminal.pump(&mut server);
+    assert_eq!(
+        server.panes.get(pane).unwrap().modes.first().unwrap().name,
+        b"copy-mode"
+    );
+    assert!(terminal.tree.is_none());
+    terminal.send(&mut server, b"q");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    broker::recompute(&mut server);
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert!(server.panes.get(pane).unwrap().modes.is_empty());
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    terminal.send(&mut server, b"\x02d");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    assert!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .flags
+            .contains(ClientFlags::EXIT)
+    );
+}
+
+#[test]
+fn scrolling_native_surface_offscreen_keeps_visibility_events_routable() {
+    let (mut server, _, mut terminal) = stock_native();
+    let outer = terminal.tree.as_ref().unwrap()["id"].clone();
+    terminal.send(
+        &mut server,
+        &apc(b'e', &json!({"ev":"visible","sf":outer,"visible":false})),
+    );
+    terminal.pump(&mut server);
+    assert!(!server.clients.get(terminal.client).unwrap().tsp.visible);
+    assert!(
+        terminal.tree.is_some(),
+        "an offscreen surface must stay open"
+    );
+    terminal.send(
+        &mut server,
+        &apc(b'e', &json!({"ev":"visible","sf":outer,"visible":true})),
+    );
+    terminal.pump(&mut server);
+    assert!(server.clients.get(terminal.client).unwrap().tsp.visible);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
 }
 
 #[test]
