@@ -1752,6 +1752,105 @@ fn redraw_draw_pane_prompt(
     );
 }
 
+/// Draw a note over a pane whose program draws only natively, so the empty
+/// grid does not look like a hung program.
+fn redraw_draw_pane_native(
+    srv: &mut Server,
+    t: &mut DrawTarget,
+    dctx: &RedrawDrawCtx,
+    scene: &RedrawScene,
+    wp: PaneId,
+) {
+    let Some(title) = crate::tsp::broker::native_only(srv, wp) else {
+        return;
+    };
+    let Some(p) = srv.panes.get(wp) else {
+        return;
+    };
+    if p.sx == 0 || p.sy == 0 {
+        return;
+    }
+    let (xoff, yoff, psx, psy) = (p.xoff, p.yoff, p.sx as i32, p.sy as i32);
+    let (ox, oy, sx, sy) = (
+        scene.ox as i32,
+        scene.oy as i32,
+        scene.sx as i32,
+        scene.sy as i32,
+    );
+    if xoff + psx <= ox || xoff >= ox + sx {
+        return;
+    }
+    let (offset, px) = if xoff < ox {
+        (ox - xoff, 0)
+    } else {
+        (0, xoff - ox)
+    };
+    let width = (psx - offset).min(sx - px);
+    let title = status::status_message_escape(title.as_bytes());
+    let mut first = b"#[align=centre,bright]".to_vec();
+    first.extend_from_slice(title.as_bytes());
+    first.extend_from_slice(b": native view");
+    let lines = [
+        first,
+        b"#[align=centre,dim]zoom this pane or close the others to see it".to_vec(),
+    ];
+    let mut registry = rmux_emu::hyperlinks::HyperlinkRegistry::new();
+    let Ok(mut screen) = Screen::new(
+        psx as u32,
+        lines.len() as u32,
+        0,
+        ScreenResetPolicy::default(),
+        &mut registry,
+    ) else {
+        return;
+    };
+    {
+        let mut sink = ScreenOnlySink;
+        let mut ctx = ScreenWriteCtx::start(
+            &mut screen,
+            &mut sink,
+            ScreenWritePolicy::default(),
+            &mut registry,
+            #[cfg(feature = "sixel")]
+            None,
+        );
+        for (i, line) in lines.iter().enumerate() {
+            ctx.cursormove(0, i as i32, false);
+            crate::format::draw::draw(&mut ctx, &DEFAULT_CELL, psx as u32, line, None, false);
+        }
+        ctx.finish();
+    }
+    let top = yoff + (psy - lines.len() as i32) / 2;
+    for i in 0..lines.len() {
+        let wy = top + i as i32;
+        if wy < oy || wy >= oy + sy {
+            continue;
+        }
+        let line = wy - oy;
+        let cy = if dctx.status_top {
+            dctx.status_lines as i32 + line
+        } else {
+            line
+        };
+        t.tty.draw_line(
+            &mut t.tparm,
+            &registry,
+            &screen,
+            offset as u32,
+            i as u32,
+            width as u32,
+            px as u32,
+            cy as u32,
+            None,
+        );
+    }
+    let _ = screen.release(
+        &mut registry,
+        #[cfg(feature = "sixel")]
+        None,
+    );
+}
+
 /// Draw scene to client.
 fn redraw_draw(srv: &mut Server, c: ClientId, wp: Option<PaneId>, mut flags: RedrawOps) {
     if crate::tsp::broker::native_client(srv, c) {
@@ -1892,10 +1991,14 @@ fn redraw_draw(srv: &mut Server, c: ClientId, wp: Option<PaneId>, mut flags: Red
 
     if flags.intersects(RedrawOps::PANE) {
         match wp {
-            Some(wp) => redraw_draw_pane_prompt(srv, &mut t, &dctx, &scene, wp),
+            Some(wp) => {
+                redraw_draw_pane_native(srv, &mut t, &dctx, &scene, wp);
+                redraw_draw_pane_prompt(srv, &mut t, &dctx, &scene, wp);
+            }
             None => {
                 for loop_wp in &panes {
                     if pane_is_visible(srv, *loop_wp) {
+                        redraw_draw_pane_native(srv, &mut t, &dctx, &scene, *loop_wp);
                         redraw_draw_pane_prompt(srv, &mut t, &dctx, &scene, *loop_wp);
                     }
                 }

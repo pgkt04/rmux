@@ -64,6 +64,8 @@ pub struct PaneTspState {
     pub reported_view: Option<serde_json::Value>,
     pub reported_theme: Option<bool>,
     pub reported_motion: Option<bool>,
+    /// Cell views draw the `native_only` note over this pane.
+    pub native_note: bool,
 }
 impl Default for PaneTspState {
     fn default() -> Self {
@@ -95,6 +97,7 @@ impl Default for PaneTspState {
             reported_view: None,
             reported_theme: None,
             reported_motion: None,
+            native_note: false,
         }
     }
 }
@@ -117,6 +120,21 @@ pub fn reply(server: &mut Server, pane: PaneId, message: WireMessage) {
 }
 pub fn event(server: &mut Server, pane: PaneId, value: &serde_json::Value) {
     reply(server, pane, WireMessage::json(b'e', value));
+}
+/// A stock program draws only its native view, so its pane grid stays empty;
+/// cell views of the pane show this name over it.
+pub fn native_only(server: &Server, pane: PaneId) -> Option<String> {
+    let state = server.panes.get(pane)?.tsp.as_ref()?;
+    if !state.stock || !matches!(state.renderer, Renderer::Native | Renderer::Detached) {
+        return None;
+    }
+    let title = state.surfaces.selected()?.open.get("title");
+    Some(
+        title
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("This program")
+            .to_owned(),
+    )
 }
 pub use super::client_runtime::{
     client_message, client_protocol_fault, client_sentinel, client_sync, probe_client,

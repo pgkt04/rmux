@@ -465,6 +465,14 @@ pub fn recompute(server: &mut Server) {
     let panes: Vec<_> = server.pane_ids.values().copied().collect();
     for pane in panes {
         recompute_pane(server, pane, false);
+        let note = broker::native_only(server, pane).is_some();
+        if let Some(p) = server.panes.get_mut(pane)
+            && let Some(state) = p.tsp.as_mut()
+            && state.native_note != note
+        {
+            state.native_note = note;
+            p.flags.insert(crate::model::PaneFlags::REDRAW);
+        }
     }
 }
 
@@ -984,6 +992,37 @@ mod tests {
         assert_eq!(state(&server, pane).renderer, Renderer::Native);
         assert_eq!(state(&server, pane).epoch, epoch);
         assert_eq!(broker_messages(&replies(&mut server, pane)), 0);
+    }
+
+    #[test]
+    fn native_only_pane_note_lasts_while_the_surface_is_live() {
+        let (mut server, pane, session) = fixture();
+        client(&mut server, session, true, false);
+        stock_hello(&mut server, pane);
+        let redraw = |server: &mut Server| {
+            let p = server.panes.get_mut(pane).unwrap();
+            let set = p.flags.contains(crate::model::PaneFlags::REDRAW);
+            p.flags.remove(crate::model::PaneFlags::REDRAW);
+            set
+        };
+        recompute(&mut server);
+        redraw(&mut server);
+        assert_eq!(broker::native_only(&server, pane), None);
+        pane_send(
+            &mut server,
+            pane,
+            b'o',
+            json!({"id":"view","mode":"inline","title":"omp"}),
+        );
+        recompute(&mut server);
+        assert_eq!(broker::native_only(&server, pane).as_deref(), Some("omp"));
+        assert!(redraw(&mut server), "the note needs a pane redraw");
+        recompute(&mut server);
+        assert!(!redraw(&mut server));
+        pane_send(&mut server, pane, b'x', json!({"id":"view","keep":false}));
+        recompute(&mut server);
+        assert_eq!(broker::native_only(&server, pane), None);
+        assert!(redraw(&mut server), "the grid comes back without the note");
     }
 
     #[test]
