@@ -69,7 +69,9 @@ impl Server {
             .args(args)
             .current_dir(self.directory.path())
             .env_remove("TMUX")
+            .env_remove("TMUX_PANE")
             .env_remove("RMUX")
+            .env_remove("RMUX_PANE")
             .stdout(Stdio::from(stdout.try_clone()?))
             .stderr(Stdio::from(stderr.try_clone()?))
             .spawn()?;
