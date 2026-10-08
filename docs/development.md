@@ -356,6 +356,14 @@ Stock programs enter cell modes and menus immediately on the existing grid,
 without waiting for an ANSI repaint they cannot provide. Leaving the cell UI
 replays the retained native document; copy-mode commands never block later
 prefix keys such as detach.
+OSC 133 prompt zones do not end a registered reader while its captured process
+group still owns the pane PTY. omp's text user-message renderer emits these
+zones too; treating them as a shell handoff erased the hello and prevented
+split-to-native recovery. Actual foreground-group changes still retire the
+reader, and prompt markers without an identifiable live group keep the existing
+teardown behavior. Regression coverage uses a real PTY foreground program;
+real-omp prefix split/kill recovery preserves the PID/draft and epoch after
+the same prompt-zone sequence.
 Native prompts use generation-bound `rmux:prompt:*` input nodes and the existing
 tmux prompt engine. UTF-16 edit events validate pre-edit length and scalar
 boundaries, map the raw host cursor through C0/DEL sanitization, and resynchronize

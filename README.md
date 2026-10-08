@@ -91,6 +91,8 @@ sole pane to native.
 Native rendering still covers only one sole or zoomed pane, not both splits.
 Automatic switching waits while an external editor owns omp's terminal and
 resumes after the editor exits; in-flight terminal negotiation is not restarted.
+Prompt markers emitted by the foreground app's text renderer do not end its
+native registration; closing a split can still return that same app to native.
 
 Native prefix prompts stay in the dock beneath omp: `C-b ,` renames the window,
 `C-b $` the session, `C-b T` the pane title, and `C-b :` runs a command. Editing,

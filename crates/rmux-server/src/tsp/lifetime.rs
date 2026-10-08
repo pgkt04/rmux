@@ -148,6 +148,19 @@ fn end_reader(server: &mut Server, pane: PaneId, kind: u8) {
     }
 }
 pub fn pane_prompt(server: &mut Server, pane: PaneId) {
+    if let Some(p) = server.panes.get(pane)
+        && let Some(group) = p
+            .tsp
+            .as_ref()
+            .filter(|state| state.registered)
+            .and_then(|state| state.program_pgrp)
+        && p.fd
+            .as_ref()
+            .and_then(|fd| rmux_sys::pty::tcgetpgrp(std::os::fd::AsFd::as_fd(fd)))
+            == Some(group)
+    {
+        return;
+    }
     end_reader(server, pane, 0)
 }
 /// End the reader of each program that left without closing its surfaces, as

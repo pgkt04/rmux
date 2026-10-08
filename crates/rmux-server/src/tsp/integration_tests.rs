@@ -1377,6 +1377,48 @@ fn scrolling_native_surface_offscreen_keeps_visibility_events_routable() {
 }
 
 #[test]
+fn app_prompt_markers_during_text_view_preserve_native_recovery() {
+    let mut fixture = Fixture::new();
+    let mut native = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
+    fixture.settle(&mut native);
+    let pid = fixture.state()["pid"].clone();
+    let mut plain = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), false);
+    fixture.settle(&mut plain);
+    assert_eq!(
+        fixture
+            .server
+            .panes
+            .get(fixture.pane)
+            .unwrap()
+            .tsp
+            .as_ref()
+            .unwrap()
+            .renderer,
+        broker::Renderer::Ansi
+    );
+    fixture
+        .emit(b"\x1b]133;A\x07user message\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07".to_vec());
+    fixture.drive();
+    assert!(
+        fixture
+            .server
+            .panes
+            .get(fixture.pane)
+            .unwrap()
+            .tsp
+            .as_ref()
+            .unwrap()
+            .registered,
+        "foreground application prompt zones are not a shell handoff"
+    );
+    plain.detach(&mut fixture.server);
+    fixture.settle(&mut native);
+    assert_eq!(fixture.state()["pid"], pid);
+    assert_eq!(native.text("draft"), "unsent draft");
+    assert_eq!(native.text("transcript"), "transcript:0");
+}
+
+#[test]
 fn native_child_keeps_pid_across_ansi_and_back() {
     let mut fixture = Fixture::new();
     let mut tern = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
