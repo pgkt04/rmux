@@ -23,7 +23,7 @@ pub fn pane_message(server: &mut Server, pane: PaneId, payload: &[u8]) {
         if !matches!(message.verb, b'q' | b'o') {
             return;
         }
-        if message.verb == b'q' && !message.params.get("m").is_some_and(|more| more == "1") {
+        if message.verb == b'q' && message.params.get("m").is_none_or(|more| more != "1") {
             let Ok(value) = serde_json::from_slice::<Value>(&message.body) else {
                 return;
             };

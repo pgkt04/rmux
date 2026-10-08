@@ -7,6 +7,7 @@ export default function (pi: ExtensionAPI) {
 	let observer: Subprocess<"pipe", "pipe", "pipe"> | undefined;
 	let generation = 0;
 	let disabled = false;
+	let disposeReconciliation: (() => void) | undefined;
 
 	function reprobe(view: "native" | "ansi") {
 		if (!ui) throw new Error("rmux terminal UI is unavailable");
@@ -26,6 +27,8 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async (_event, ctx) => {
 		generation++;
 		const current = generation;
+		disposeReconciliation?.();
+		disposeReconciliation = undefined;
 		observer?.kill();
 		observer = undefined;
 		ui = undefined;
@@ -55,13 +58,19 @@ export default function (pi: ExtensionAPI) {
 		observer = child;
 		child.stdin.write(`refresh-client -B 'rmux-omp:${pane}:#{pane_tsp_view}'\n`);
 		child.stdin.flush();
+		let latestView: string | undefined;
+		const timer = ctx.setInterval(() => {
+			if (current !== generation || !ui || process.stdin.isPaused() || ui.terminal.tspProbePending) return;
+			if (latestView !== "native" && latestView !== "ansi") return;
+			if (ui.nativeRendering !== (latestView === "native")) reprobe(latestView);
+		}, 250);
+		disposeReconciliation = () => ctx.clearTimer(timer);
 
 		const errors = new Response(child.stderr).text();
 		void (async () => {
 			const reader = child.stdout.getReader();
 			const decoder = new TextDecoder();
 			let pending = "";
-			let latestView: string | undefined;
 			try {
 				while (current === generation) {
 					const { value, done } = await reader.read();
@@ -77,14 +86,11 @@ export default function (pi: ExtensionAPI) {
 							throw new Error("rmux server does not support pane_tsp_view; restart it with the updated binary");
 						}
 						latestView = view;
-						if (view !== "native" && view !== "ansi") continue;
-						ctx.setTimeout(() => {
-							if (current !== generation || latestView !== view || !ui || ui.nativeRendering === (view === "native")) return;
-							reprobe(view);
-						}, 0);
 					}
 				}
 			} finally {
+				latestView = undefined;
+				ctx.clearTimer(timer);
 				reader.releaseLock();
 			}
 			const code = await child.exited;
@@ -125,6 +131,8 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_shutdown", () => {
 		generation++;
+		disposeReconciliation?.();
+		disposeReconciliation = undefined;
 		observer?.kill();
 		observer = undefined;
 		ui = undefined;

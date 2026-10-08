@@ -1285,7 +1285,7 @@ pub fn prompt_end_word(pr: &mut Prompt, size: usize, separators: &[u8]) {
         if idx == size {
             break;
         }
-        if !(!sp(idx) && word_is_separators == in_list(idx)) {
+        if sp(idx) || word_is_separators != in_list(idx) {
             break;
         }
     }

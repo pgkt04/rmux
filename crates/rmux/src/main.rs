@@ -337,7 +337,10 @@ fn main() {
                 errx(error.to_string().as_bytes());
             }
             for (name, contents) in [
-                ("package.json", include_bytes!("../omp/package.json").as_slice()),
+                (
+                    "package.json",
+                    include_bytes!("../omp/package.json").as_slice(),
+                ),
                 ("rmux.ts", include_bytes!("../omp/rmux.ts").as_slice()),
             ] {
                 if let Err(error) = std::fs::write(directory.join(name), contents) {

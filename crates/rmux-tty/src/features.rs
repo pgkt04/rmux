@@ -198,9 +198,9 @@ fn parse(s: &[u8], sep: &[u8], enabled: &mut u32, mut disabled: Option<&mut u32>
             if let Some(disabled) = disabled.as_mut() {
                 **disabled |= bit;
             }
-        } else if !disabled
+        } else if disabled
             .as_ref()
-            .is_some_and(|disabled| **disabled & bit != 0)
+            .is_none_or(|disabled| **disabled & bit == 0)
         {
             *enabled |= bit;
         }

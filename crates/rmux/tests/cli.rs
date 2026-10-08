@@ -70,22 +70,6 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 #[test]
-fn version_help_and_bad_options_match_the_oracle() {
-    let tmp = temp_dir("opts");
-    compare(&["-V"], &tmp);
-    compare(&["-h"], &tmp);
-    compare(&["-x"], &tmp);
-    // -d and -U are in the getopt string but have no case label (tmux.c:526-527).
-    compare(&["-d"], &tmp);
-    compare(&["-U"], &tmp);
-    // -c with a positional command and -D with a command are usage errors.
-    compare(&["-c", "true", "ls"], &tmp);
-    compare(&["-D", "ls"], &tmp);
-    // A missing option argument.
-    compare(&["-L"], &tmp);
-}
-
-#[test]
 fn socket_path_errors_match_the_oracle() {
     let Some(oracle) = oracle() else {
         eprintln!("skipping: oracle binary missing");

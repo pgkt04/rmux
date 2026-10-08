@@ -231,10 +231,10 @@ pub fn session_release(server: &mut Server, session: SessionId) -> bool {
 }
 
 pub fn session_free(server: &mut Server, session: SessionId) -> bool {
-    if !server
+    if server
         .sessions
         .get(session)
-        .is_some_and(|s| s.references == 0)
+        .is_none_or(|s| s.references != 0)
     {
         return false;
     }
@@ -552,10 +552,10 @@ pub fn session_set_current(
             window::window_update_focus(server, old_window);
         }
         window::window_update_focus(server, new_window);
-        if !server
+        if server
             .sessions
             .get(session)
-            .is_some_and(|s| s.current == Some(destination))
+            .is_none_or(|s| s.current != Some(destination))
             || server.winlinks.get(destination).is_none()
         {
             return SelectOutcome::Changed;

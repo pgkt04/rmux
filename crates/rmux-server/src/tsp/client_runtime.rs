@@ -88,10 +88,9 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
                 return;
             };
             if c.tsp.generation != generation
-                || !c
-                    .tty
+                || c.tty
                     .as_ref()
-                    .is_some_and(|tty| tty.protocol_generation() == generation)
+                    .is_none_or(|tty| tty.protocol_generation() != generation)
             {
                 return;
             }

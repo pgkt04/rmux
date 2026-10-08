@@ -299,10 +299,10 @@ pub fn server_kill_window(
 }
 
 pub fn server_renumber_session(server: &mut Server, id: SessionId) {
-    if !server
+    if server
         .sessions
         .get(id)
-        .is_some_and(|s| server.options.get_number(s.options, b"renumber-windows") != 0)
+        .is_none_or(|s| server.options.get_number(s.options, b"renumber-windows") == 0)
     {
         return;
     }
