@@ -17,6 +17,7 @@ pub enum ProtocolFault {
 pub enum Da1Owner {
     Discovery,
     Token(u64),
+    Stop,
 }
 
 #[derive(Clone, Debug, Default)]

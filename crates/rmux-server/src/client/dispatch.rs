@@ -165,13 +165,25 @@ fn exiting(server: &mut Server, id: ClientId) {
     let Some(c) = clients.get_mut(id) else {
         return;
     };
+    c.exit_pending = true;
     if let Some(tty) = c.tty.as_mut() {
         tty.close(tparm);
     }
     crate::client::tty_io::sync(server, id);
+}
+
+pub(crate) fn finish_exiting(server: &mut Server, id: ClientId) {
     let Some(c) = server.clients.get_mut(id) else {
         return;
     };
+    if !c.exit_pending
+        || c.tty
+            .as_ref()
+            .is_some_and(|tty| tty.flags().contains(rmux_tty::tty::TtyFlags::OPENED))
+    {
+        return;
+    }
+    c.exit_pending = false;
     if let Some(peer) = c.peer {
         let _ = proc_send(server, peer, ProtocolMessage::new(Kind::Exited, Vec::new()));
     }

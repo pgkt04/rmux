@@ -24,7 +24,7 @@ mod paths;
 mod version;
 
 use std::io::Write;
-use std::os::unix::ffi::OsStringExt;
+use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
 use rmux_server::client::ClientFlags;
 use rmux_server::options::environment::EnvironmentFlags;
@@ -37,7 +37,7 @@ use rmux_util::bytes::find_case_insensitive;
 pub const PROGNAME: &str = "rmux";
 
 /// `usage` text (`tmux.c:73-76`) with the rmux program name.
-pub const USAGE: &str = "usage: rmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n            [-S socket-path] [-T features] [command [flags]]\n";
+pub const USAGE: &str = "usage: rmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n            [-S socket-path] [-T features] [command [flags]]\n       rmux omp-plugin [directory]    export the bundled omp plugin\n";
 
 /// Internal reexec marker for the server child (replaces the `fork` in
 /// `server_start`, `server.c:189-193`).
@@ -325,6 +325,35 @@ fn main() {
         .is_some_and(|a| a == INTERNAL_SERVER_FLAG.as_bytes())
     {
         internal_server(&args[1..]);
+    }
+
+    if args.first().is_some_and(|arg| arg == b"omp-plugin") {
+        if args.len() > 2 {
+            errx(b"usage: rmux omp-plugin [directory]");
+        }
+        if let Some(directory) = args.get(1) {
+            let directory = std::path::Path::new(std::ffi::OsStr::from_bytes(directory));
+            if let Err(error) = std::fs::create_dir_all(directory) {
+                errx(error.to_string().as_bytes());
+            }
+            for (name, contents) in [
+                ("package.json", include_bytes!("../omp/package.json").as_slice()),
+                ("rmux.ts", include_bytes!("../omp/rmux.ts").as_slice()),
+            ] {
+                if let Err(error) = std::fs::write(directory.join(name), contents) {
+                    errx(error.to_string().as_bytes());
+                }
+            }
+            println!("{}", directory.display());
+            return;
+        }
+        if let Err(error) = std::io::stdout()
+            .lock()
+            .write_all(include_bytes!("../omp/rmux.ts"))
+        {
+            errx(error.to_string().as_bytes());
+        }
+        return;
     }
 
     // tmux.c:445-455

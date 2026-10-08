@@ -188,7 +188,7 @@ pub fn client_sentinel(server: &mut Server, client: ClientId, raw: &[u8]) {
                 broker::recompute(server);
             }
         }
-        None => {}
+        Some(Da1Owner::Stop) | None => {}
     }
 }
 
