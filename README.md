@@ -69,7 +69,16 @@ The plugin automatically switches the same running omp between native and
 text rendering when you reattach from a different terminal. Mixed TSP/plain
 viewers and split panes use text; returning to a sole or zoomed TSP pane uses
 native. The app process, conversation, transcript, and unsent draft are retained.
-Detection uses a read-only, no-output control client and can take about a second.
+Detection uses a read-only, no-output control client; renderer changes are
+delivered immediately instead of waiting for periodic polling. Native window
+switches reuse terminal negotiation, and resizing updates the existing native
+document rather than rebuilding it when the pane remains eligible.
+Brief native-to-text changes settle for 150 ms so rapid resize/layout changes
+do not repeatedly restart the renderer. Failed negotiation retries are bounded
+and report a warning instead of looping.
+Returning to a native window serializes the retained document without copying
+a temporary JSON tree; this reduces rmux preparation work for large transcripts.
+The terminal still receives a complete replay and must draw it.
 `/terminal-reprobe` manually repeats negotiation. `PI_TUI_NATIVE=0` keeps text
 rendering and disables automatic switching.
 
@@ -82,6 +91,12 @@ sole pane to native.
 Native rendering still covers only one sole or zoomed pane, not both splits.
 Automatic switching waits while an external editor owns omp's terminal and
 resumes after the editor exits; in-flight terminal negotiation is not restarted.
+
+Native prefix prompts stay in the dock beneath omp: `C-b ,` renames the window,
+`C-b $` the session, `C-b T` the pane title, and `C-b :` runs a command. Editing,
+Enter, and cancel use the normal rmux prompt behavior without restarting omp's
+renderer. `C-b {` / `C-b }` swap panes and `C-b !` breaks a pane into a window.
+Splits, full-screen modes, menus, and popups still use the text view.
 
 For an omp profile, run `omp --profile NAME plugin install /path/to/package`.
 `rmux omp-plugin` without a directory still prints the standalone extension for
@@ -97,6 +112,33 @@ your existing sessions:
     rmux -L updated attach
 
 Restart an old server only after saving work: server restart ends its sessions.
+
+debugging:
+
+Panic and fatal-error reports are saved even without verbose logging in
+`${XDG_STATE_HOME:-$HOME/.local/state}/rmux/rmux-crash-*.log`. Reports contain the
+process role/PID, executable, working directory, error/location, and a forced
+backtrace; files are private (0600). Release builds retain source line tables.
+This does not capture `SIGKILL`, OOM kills, or native faults such as `SIGSEGV`;
+those need OS/kernel logs or a core dump. Reports require a writable state directory.
+
+For detailed event logs, start a separate server from a writable directory:
+
+    rmux -vv -L debug new-session
+
+`-v` writes `rmux-client-PID.log` and `rmux-server-PID.log` in each process's
+working directory; `-vv` also records raw terminal output in `rmux-out-PID.log`.
+An existing server's debug log can be toggled without ending sessions:
+
+    kill -USR2 "$(rmux display-message -p '#{pid}')"
+
+The server log appears in the directory where that server started, not the
+directory of a later client. A second signal disables it. Debug/raw logs can
+contain terminal content and are not rotated: treat them as sensitive and
+enable them only while diagnosing a problem.
+
+Existing servers do not gain crash reporting or fixes from a new binary. Save
+work before restarting, or use the separate `-L debug` server above.
 
 development: build, tests, the tmux oracle and the regress harness are in
 [docs/development.md](docs/development.md).

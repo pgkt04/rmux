@@ -242,6 +242,7 @@ pub struct Prompt {
 
     hindex: [u32; PROMPT_NTYPES],
     copied: Option<Utf8String>,
+    native_undo: std::collections::VecDeque<(Utf8String, usize)>,
 
     complete_list: Vec<ByteString>,
     complete_display: Option<ByteString>,
@@ -440,6 +441,7 @@ pub fn prompt_create(srv: &mut Server, pd: PromptCreateData, host: Box<dyn Promp
         closed: false,
         hindex: [0; PROMPT_NTYPES],
         copied: None,
+        native_undo: std::collections::VecDeque::new(),
         complete_list: Vec::new(),
         complete_display: None,
         complete_display_ud: None,
@@ -507,6 +509,7 @@ pub fn prompt_update(pr: &mut Prompt, srv: &mut Server, msg: &[u8], input: Optio
     pr.index = pr.buffer.len();
     pr.hindex = [0; PROMPT_NTYPES];
     pr.closed = false;
+    pr.native_undo.clear();
     prompt_clear_complete(pr);
     ft.release(srv);
 }
@@ -1160,6 +1163,7 @@ fn prompt_paste(pr: &mut Prompt, srv: &Server) -> bool {
     let n = ud.len();
     if n != 0 {
         let idx = pr.index.min(size);
+        pr.native_undo.clear();
         let tail = pr.buffer.0.split_off(idx);
         pr.buffer.0.extend(ud);
         pr.buffer.0.extend(tail);
@@ -1219,6 +1223,7 @@ fn prompt_replace_complete(pr: &mut Prompt, srv: &Server, s: Option<&[u8]>) -> b
     };
 
     // Trim out the word and insert the new one, one byte per cell as C does.
+    pr.native_undo.clear();
     let tail = pr.buffer.0.split_off(last);
     pr.buffer.0.truncate(first);
     pr.buffer.0.extend(s.iter().map(|&b| Utf8Data::set(b)));
@@ -1354,8 +1359,141 @@ fn prompt_check_move(srv: &mut Server, pr: &mut Prompt, key: KeyCode) -> PromptK
 }
 
 fn set_buffer(pr: &mut Prompt, s: &[u8]) {
+    pr.native_undo.clear();
     pr.buffer = utf8::from_cstr(s);
     pr.index = pr.buffer.len();
+}
+
+pub(crate) fn prompt_native_edit(srv: &mut Server, pr: &mut Prompt, event: &serde_json::Value) {
+    if prompt_native_readonly(pr) {
+        return;
+    }
+    let offset = |field: &str| usize::try_from(event.get(field)?.as_u64()?).ok();
+    let (Some(from), Some(to), Some(cursor), Some(len)) = (
+        offset("from"),
+        offset("to"),
+        offset("cursor"),
+        offset("len"),
+    ) else {
+        return;
+    };
+    let Some(insert) = event.get("text").and_then(serde_json::Value::as_str) else {
+        return;
+    };
+    let input = pr.buffer.to_bytes();
+    let Ok(text) = std::str::from_utf8(&input) else {
+        return;
+    };
+    if text.encode_utf16().count() != len || from > to || to > len {
+        return;
+    }
+    let Some(start) = prompt_utf16_index(text, from) else {
+        return;
+    };
+    let Some(end) = prompt_utf16_index(text, to) else {
+        return;
+    };
+    let Some(raw_len) = (len - (to - from)).checked_add(insert.encode_utf16().count()) else {
+        return;
+    };
+    if cursor > raw_len {
+        return;
+    }
+    let mut offset = 0;
+    let mut index = 0;
+    for (ch, keep) in text
+        .chars()
+        .take(start)
+        .map(|ch| (ch, true))
+        .chain(insert.chars().map(|ch| (ch, prompt_native_safe_char(ch))))
+        .chain(text.chars().skip(end).map(|ch| (ch, true)))
+    {
+        if offset == cursor {
+            break;
+        }
+        offset += ch.len_utf16();
+        index += usize::from(keep);
+        if offset > cursor {
+            return;
+        }
+    }
+    if offset != cursor {
+        return;
+    }
+    let insert: String = insert
+        .chars()
+        .filter(|&ch| prompt_native_safe_char(ch))
+        .collect();
+    let replacement = utf8::from_cstr(insert.as_bytes());
+    if pr.buffer.0[start..end] != replacement.0 {
+        if pr.native_undo.len() == 100 {
+            pr.native_undo.pop_front();
+        }
+        pr.native_undo.push_back((pr.buffer.clone(), pr.index));
+    }
+    prompt_clear_complete(pr);
+    pr.buffer.0.splice(start..end, replacement.0);
+    pr.index = index;
+    if pr.flags.contains(PromptFlags::INCREMENTAL) {
+        let cp = prefixed(b'=', &pr.buffer.to_bytes());
+        prompt_fire_callback(srv, pr, Some(&cp), PromptKeyResult::Handled, None);
+    }
+}
+
+pub(crate) fn prompt_native_readonly(pr: &Prompt) -> bool {
+    pr.flags.intersects(
+        PromptFlags::KEY
+            | PromptFlags::SINGLE
+            | PromptFlags::NUMERIC
+            | PromptFlags::QUOTENEXT
+            | PromptFlags::COMMANDMODE,
+    ) || (pr.flags.contains(PromptFlags::BSPACE_EXIT) && pr.buffer.is_empty())
+}
+
+fn prompt_native_safe_char(ch: char) -> bool {
+    ch > '\u{1f}' && ch != '\u{7f}'
+}
+
+pub(crate) fn prompt_native_undo(srv: &mut Server, pr: &mut Prompt) {
+    if prompt_native_readonly(pr) {
+        return;
+    }
+    let Some((buffer, index)) = pr.native_undo.pop_back() else {
+        return;
+    };
+    prompt_clear_complete(pr);
+    pr.buffer = buffer;
+    pr.index = index;
+    if pr.flags.contains(PromptFlags::INCREMENTAL) {
+        let cp = prefixed(b'=', &pr.buffer.to_bytes());
+        prompt_fire_callback(srv, pr, Some(&cp), PromptKeyResult::Handled, None);
+    }
+}
+
+pub(crate) fn prompt_native_send(srv: &mut Server, pr: &mut Prompt, text: &str, redraw: &mut bool) {
+    if prompt_native_readonly(pr) {
+        return;
+    }
+    let text: String = text
+        .chars()
+        .filter(|&ch| prompt_native_safe_char(ch))
+        .collect();
+    set_buffer(pr, text.as_bytes());
+    prompt_key(srv, pr, KeyCode(CR), redraw);
+}
+
+fn prompt_utf16_index(text: &str, target: usize) -> Option<usize> {
+    let mut offset = 0;
+    for (index, ch) in text.chars().enumerate() {
+        if offset == target {
+            return Some(index);
+        }
+        offset += ch.len_utf16();
+        if offset > target {
+            return None;
+        }
+    }
+    (offset == target).then(|| text.chars().count())
 }
 
 enum KeyStep {
@@ -1579,6 +1717,9 @@ pub fn prompt_key(
         } else {
             append = true;
         }
+        if changed {
+            pr.native_undo.clear();
+        }
         if !changed && !append {
             *redraw = true;
             return PromptKeyResult::Handled;
@@ -1605,6 +1746,7 @@ pub fn prompt_key(
         } else {
             return PromptKeyResult::Handled;
         };
+        pr.native_undo.clear();
         let idx = pr.index.min(pr.buffer.len());
         pr.buffer.0.insert(idx, tmp);
         pr.index = idx + 1;
@@ -1965,10 +2107,90 @@ mod tests {
             closed: false,
             hindex: [0; PROMPT_NTYPES],
             copied: None,
+            native_undo: std::collections::VecDeque::new(),
             complete_list: Vec::new(),
             complete_display: None,
             complete_display_ud: None,
         }
+    }
+
+    #[test]
+    fn native_edit_uses_utf16_offsets_and_rejects_stale_or_split_surrogates() {
+        let mut server = Server::new();
+        let mut pr = prompt("a😀b".as_bytes(), PromptFlags::default());
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":1, "to":3, "text":"中", "cursor":2, "len":4
+            }),
+        );
+        assert_eq!(pr.input(), "a中b".as_bytes());
+        assert_eq!(pr.index(), 2);
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":0, "to":3, "text":"stale", "cursor":5, "len":4
+            }),
+        );
+        assert_eq!(pr.input(), "a中b".as_bytes());
+        let mut pr = prompt("a😀b".as_bytes(), PromptFlags::default());
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":2, "to":3, "text":"split", "cursor":6, "len":4
+            }),
+        );
+        assert_eq!(pr.input(), "a😀b".as_bytes());
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":1, "to":3, "text":"bye\nnow", "cursor":8, "len":4
+            }),
+        );
+        assert_eq!(pr.input(), b"abyenowb");
+        assert_eq!(pr.index(), 7);
+    }
+
+    #[test]
+    fn native_paste_maps_raw_cursor_and_strips_all_c0_and_del() {
+        let mut server = Server::new();
+        let mut pr = prompt(b"", PromptFlags::default());
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":0,"to":0,"text":"foo\n","cursor":4,"len":0
+            }),
+        );
+        assert_eq!(pr.input(), b"foo");
+        assert_eq!(pr.index(), 3);
+        prompt_native_undo(&mut server, &mut pr);
+        assert!(pr.input().is_empty());
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":0,"to":0,"text":"\u{0}a\t\r\n\u{1b}😀\u{7f}b","cursor":9,"len":0
+            }),
+        );
+        assert_eq!(pr.input(), "a😀b".as_bytes());
+        assert_eq!(pr.index(), 2);
+        prompt_native_edit(
+            &mut server,
+            &mut pr,
+            &serde_json::json!({
+                "from":0,"to":0,"text":"😀","cursor":1,"len":4
+            }),
+        );
+        assert_eq!(pr.input(), "a😀b".as_bytes());
+        let mut redraw = false;
+        prompt_key(&mut server, &mut pr, KeyCode(b'x' as u64), &mut redraw);
+        prompt_native_undo(&mut server, &mut pr);
+        assert_eq!(pr.input(), "a😀xb".as_bytes());
     }
 
     #[test]

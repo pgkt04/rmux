@@ -82,6 +82,7 @@ pub fn tick(server: &mut Server) {
     }
     crate::tsp::lifetime::reap_programs(server);
     crate::tsp::broker::recompute(server);
+    crate::control::monitor::check_tsp(server);
 
     // Notify modes that pane styles may have changed.
     for w in window_ids(server) {

@@ -33,6 +33,7 @@ pub struct ClientTspState {
     pub projection: Option<super::projection::Projection>,
     pub projection_generation: u64,
     pub confirmed_blobs: BTreeSet<String>,
+    pub(crate) projection_hello: Option<serde_json::Value>,
     pub visible: bool,
     pub diagnostic: Option<String>,
     pub rebuild_attempted: bool,
@@ -52,6 +53,7 @@ impl Default for ClientTspState {
             projection: None,
             projection_generation: 0,
             confirmed_blobs: BTreeSet::new(),
+            projection_hello: None,
             visible: true,
             diagnostic: None,
             rebuild_attempted: false,
@@ -82,6 +84,7 @@ impl ClientTspState {
         self.capability = Capability::Unknown;
         self.requests.clear();
         self.confirmed_blobs.clear();
+        self.projection_hello = None;
         self.projection = None;
         self.visible = true;
         self.diagnostic = None;
@@ -173,8 +176,10 @@ mod tests {
         assert_eq!(c.sentinel(token + 1), None);
         c.sentinel(token);
         assert_eq!(c.format(), "v1");
+        c.projection_hello = Some(json!({"q":"hello","app":"omp"}));
         c.invalidate(2);
         assert_eq!(c.format(), "unknown");
+        assert!(c.projection_hello.is_none());
         assert_eq!(c.sentinel(token), None);
     }
 }

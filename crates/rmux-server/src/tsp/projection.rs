@@ -197,6 +197,14 @@ impl Projection {
         true
     }
 
+    pub(crate) fn invalidate_bar(&mut self) {
+        self.bar_dirty = true;
+    }
+
+    pub(crate) fn bar_pending(&self) -> bool {
+        self.bar_dirty
+    }
+
     /// The bar's sheet goes with the first frame that adds the bar.
     fn bar_sheet_due(&self, bar_ops: &[usize]) -> bool {
         self.bar_styles && !self.bar_sheet && self.bar.is_some() && !bar_ops.is_empty()
@@ -462,15 +470,15 @@ impl Projection {
         next_sequence: u64,
     ) -> Result<Option<PreparedSend>, ProjectionError> {
         let sequence = self.next_sequence;
-        let mut frame = OuterOps::new(&self.outer, HashMap::new(), BTreeSet::new(), false);
-        if self.opened {
-            for op in self.reset_ops() {
-                frame.push(op, Vec::new());
-            }
-        }
-        for op in replay::snapshot_ops(document, &self.outer, now_ms) {
-            frame.push(op, Vec::new());
-        }
+        let before = if self.opened {
+            self.reset_ops()
+        } else {
+            Vec::new()
+        };
+        let (canonical_parents, canonical_props, canonical_ops) =
+            document.replay_topology(&self.outer);
+        let prefix_ops = before.len() + canonical_ops;
+        let mut frame = OuterOps::new(&self.outer, canonical_parents, canonical_props, false);
         frame.place_bar(self.bar.as_ref(), true);
         for pending in &self.pending {
             if !is_transient_view(&pending.value)
@@ -482,27 +490,40 @@ impl Projection {
             rewrite_operation(&mut value, &self.logical, &self.outer);
             frame.push(value, pending.sources.clone());
         }
+        frame.focus_status(self.bar.as_ref(), false, document.focus.as_deref());
         let OuterOps {
             ops,
             operations,
-            bar_ops,
+            mut bar_ops,
             parents,
             root_props,
             bar_dock,
             ..
         } = frame;
+        let encoded = document.replay_frame(&self.outer, sequence, now_ms, &before, &ops);
+        let message = WireMessage {
+            verb: b'f',
+            params: Default::default(),
+            body: encoded,
+        };
         let mut plan =
-            match replay::plan_with_ops(document, blobs, confirmed, &self.outer, sequence, ops) {
+            match replay::plan_with_frame(document, blobs, confirmed, &self.outer, message) {
                 Ok(plan) => plan,
                 Err(error) => {
                     self.failed = true;
                     return Err(ProjectionError::Replay(error));
                 }
             };
-        replay::set_open_metadata(&mut plan.messages, open);
-        if self.inline {
-            replay::set_open_mode(&mut plan.messages, "inline");
+        let mut replay_operations = vec![Vec::new(); prefix_ops];
+        replay_operations.extend(operations);
+        for index in &mut bar_ops {
+            *index += prefix_ops;
         }
+        replay::set_open_metadata_and_mode(
+            &mut plan.messages,
+            open,
+            if self.inline { "inline" } else { "screen" },
+        );
         if self.opened {
             plan.messages.retain(|message| message.verb != b'o');
         }
@@ -547,7 +568,7 @@ impl Projection {
             sequence,
             revision: document.revision,
             replay: true,
-            operations,
+            operations: replay_operations,
             bar_ops,
         };
         self.replay = Some(ReplayCursor {
@@ -589,7 +610,12 @@ impl Projection {
             rewrite_operation(&mut value, &self.logical, &self.outer);
             frame.push_program(value, pending.sources.clone());
         }
+        let had_prompt = frame
+            .parents
+            .keys()
+            .any(|id| id.starts_with("rmux:prompt:"));
         frame.place_bar(self.bar.as_ref(), self.bar_dirty);
+        frame.focus_status(self.bar.as_ref(), had_prompt, document.focus.as_deref());
         let OuterOps {
             ops,
             operations,
@@ -1068,6 +1094,52 @@ impl<'a> OuterOps<'a> {
     fn place_bar(&mut self, bar: Option<&Value>, replace: bool) {
         let present = self.child_of(BAR_ID, "dock");
         match bar {
+            Some(bar)
+                if present
+                    && replace
+                    && bar
+                        .get("c")
+                        .and_then(Value::as_array)
+                        .is_some_and(|children| {
+                            children.iter().any(|node| {
+                                node["k"] == "input"
+                                    && node["id"]
+                                        .as_str()
+                                        .is_some_and(|id| self.child_of(id, BAR_ID))
+                            })
+                        }) =>
+            {
+                let children = bar["c"].as_array().expect("bar children checked");
+                let removed: Vec<_> = self
+                    .parents
+                    .iter()
+                    .filter(|(id, parent)| {
+                        parent.as_str() == BAR_ID
+                            && !children
+                                .iter()
+                                .any(|node| node["k"] == "input" && node["id"] == id.as_str())
+                    })
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in removed {
+                    self.push_bar(json!(["del", id]));
+                }
+                let mut before = children
+                    .iter()
+                    .find(|node| node["k"] == "input")
+                    .map_or(Value::Null, |node| node["id"].clone());
+                for node in children {
+                    let Some(id) = node["id"].as_str() else {
+                        continue;
+                    };
+                    if node["k"] == "input" && self.child_of(id, BAR_ID) {
+                        self.push_bar(json!(["set", id, node["p"]]));
+                        before = Value::Null;
+                    } else {
+                        self.push_bar(json!(["add", id, BAR_ID, before, node]));
+                    }
+                }
+            }
             Some(_) if present && !replace => {}
             Some(bar) => {
                 if present {
@@ -1087,6 +1159,27 @@ impl<'a> OuterOps<'a> {
             }
             None if present => self.push_bar(json!(["del", BAR_ID])),
             None => {}
+        }
+    }
+
+    fn focus_status(&mut self, bar: Option<&Value>, restore: bool, focus: Option<&str>) {
+        let prompt = bar
+            .and_then(|bar| bar.get("c").and_then(Value::as_array))
+            .and_then(|children| children.iter().find(|node| node["k"] == "input"))
+            .and_then(|node| node["id"].as_str());
+        if let Some(prompt) = prompt {
+            self.push_bar(json!(["focus", prompt]));
+        } else if restore {
+            self.push_bar(json!([
+                "focus",
+                focus.map(|id| {
+                    if self.parents.contains_key(id) {
+                        id
+                    } else {
+                        self.outer
+                    }
+                })
+            ]));
         }
     }
 }

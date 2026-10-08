@@ -106,6 +106,7 @@ pub fn add_sub(server: &mut Server, client: ClientId, mut spec: MonitorSpec) {
     spec.flags.insert(MonitorFlags::INITIAL);
     let mut runtime = MonitorAdapter::new(server);
     monitor::monitor_add(server, set, spec, &mut runtime).expect("live control monitor set");
+    monitor::monitor_check_tsp(server, set, &mut runtime).expect("live control monitor set");
     runtime.apply(server);
 }
 pub fn remove_sub(server: &mut Server, client: ClientId, name: &[u8]) {
@@ -130,5 +131,27 @@ pub fn monitor_timer(server: &mut Server, set: MonitorSetId) {
     }
     let mut runtime = MonitorAdapter::new(server);
     monitor::monitor_check(server, set, &mut runtime).expect("live monitor timer set");
+    runtime.apply(server);
+}
+
+pub(crate) fn check_tsp(server: &mut Server) {
+    let sets: Vec<_> = server
+        .client_order
+        .iter()
+        .filter_map(|id| {
+            let set = server.clients.get(*id)?.control.as_ref()?.monitors?;
+            server.monitors.get(set)?.has_tsp_view.then_some(set)
+        })
+        .collect();
+    if sets.is_empty() {
+        return;
+    }
+    let mut runtime = MonitorAdapter::new(server);
+    for set in sets {
+        if server.monitors.get(set).is_some() {
+            monitor::monitor_check_tsp(server, set, &mut runtime)
+                .expect("live control monitor set");
+        }
+    }
     runtime.apply(server);
 }

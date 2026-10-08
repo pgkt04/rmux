@@ -156,20 +156,36 @@ fn node_mut<'a>(tree: &'a mut Value, id: &str) -> Option<&'a mut Value> {
     None
 }
 
+fn take_node(tree: &mut Value, id: &str) -> Option<Value> {
+    let children = tree.get_mut("c").and_then(Value::as_array_mut)?;
+    if let Some(index) = children.iter().position(|child| child["id"] == id) {
+        return Some(children.remove(index));
+    }
+    children.iter_mut().find_map(|child| take_node(child, id))
+}
+
+fn insert_node(tree: &mut Value, parent: &str, before: &Value, node: Value) {
+    let children = node_mut(tree, parent)
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .entry("c")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+        .unwrap();
+    let index = before.as_str().map_or(children.len(), |id| {
+        children.iter().position(|child| child["id"] == id).unwrap()
+    });
+    children.insert(index, node);
+}
+
 fn apply_independent(tree: &mut Value, op: &Value, focus: &mut Option<String>) {
     let args = op.as_array().unwrap();
     match args[0].as_str().unwrap() {
-        "add" => {
-            let parent = node_mut(tree, args[2].as_str().unwrap()).unwrap();
-            assert!(args[3].is_null(), "fixture only appends children");
-            parent
-                .as_object_mut()
-                .unwrap()
-                .entry("c")
-                .or_insert_with(|| json!([]))
-                .as_array_mut()
-                .unwrap()
-                .push(args[4].clone());
+        "add" => insert_node(tree, args[2].as_str().unwrap(), &args[3], args[4].clone()),
+        "move" => {
+            let node = take_node(tree, args[1].as_str().unwrap()).unwrap();
+            insert_node(tree, args[2].as_str().unwrap(), &args[3], node);
         }
         "set" => {
             let node = node_mut(tree, args[1].as_str().unwrap()).unwrap();
@@ -188,6 +204,9 @@ fn apply_independent(tree: &mut Value, op: &Value, focus: &mut Option<String>) {
                 }
             }
         }
+        "del" => {
+            assert!(take_node(tree, args[1].as_str().unwrap()).is_some());
+        }
         "focus" => *focus = args[1].as_str().map(str::to_owned),
         "settle" | "suspend" | "resume" => {}
         verb => panic!("unimplemented fixture operation {verb}"),
@@ -198,6 +217,7 @@ struct FakeTerminal {
     client: ClientId,
     master: OwnedFd,
     native: bool,
+    hello: Value,
     framing: Framing,
     packets: Vec<(u8, Value)>,
     bytes: Vec<u8>,
@@ -235,6 +255,15 @@ fn model() -> (Server, PaneId, SessionId) {
 
 impl FakeTerminal {
     fn attach(server: &mut Server, session: Option<SessionId>, native: bool) -> Self {
+        Self::attach_with_hello(server, session, native, terminal_hello())
+    }
+
+    fn attach_with_hello(
+        server: &mut Server,
+        session: Option<SessionId>,
+        native: bool,
+        hello: Value,
+    ) -> Self {
         let (master, slave, _) = rmux_sys::pty::openpty().unwrap();
         rmux_sys::fd::set_blocking(master.as_fd(), false);
         let tio = rmux_sys::TermiosState::get(slave.as_fd()).unwrap();
@@ -276,6 +305,7 @@ impl FakeTerminal {
             client: id,
             master,
             native,
+            hello,
             framing: Framing::default(),
             packets: vec![],
             bytes: vec![],
@@ -368,7 +398,7 @@ impl FakeTerminal {
                 }
                 match verb {
                     b'q' if body["q"] == "hello" && self.native => {
-                        response.extend(apc(b'r', &terminal_hello()))
+                        response.extend(apc(b'r', &self.hello))
                     }
                     b'o' => {
                         assert!(
@@ -771,8 +801,16 @@ impl Drop for Fixture {
 }
 
 fn stock_native() -> (Server, PaneId, FakeTerminal) {
+    stock_native_with_hello(terminal_hello())
+}
+
+fn stock_native_with_hello(hello: Value) -> (Server, PaneId, FakeTerminal) {
+    stock_native_with_program(hello, json!([]))
+}
+
+fn stock_native_with_program(hello: Value, features: Value) -> (Server, PaneId, FakeTerminal) {
     let (mut server, pane, session) = model();
-    let mut terminal = FakeTerminal::attach(&mut server, Some(session), true);
+    let mut terminal = FakeTerminal::attach_with_hello(&mut server, Some(session), true, hello);
     crate::client::tick::reset_state(&mut server, terminal.client);
     terminal.pump(&mut server);
     assert!(
@@ -785,7 +823,10 @@ fn stock_native() -> (Server, PaneId, FakeTerminal) {
             .mode
             .intersects(rmux_emu::screen::ScreenMode::ALL_MOUSE_MODES)
     );
-    let mut bytes = apc(b'q', &json!({"q":"hello","v":[1],"app":"omp"}));
+    let mut bytes = apc(
+        b'q',
+        &json!({"q":"hello","v":[1],"app":"omp","features":features}),
+    );
     bytes.extend(apc(
         b'o',
         &json!({"id":"program","mode":"inline","title":"omp"}),
@@ -802,6 +843,431 @@ fn stock_native() -> (Server, PaneId, FakeTerminal) {
     crate::cmd::queue::next(&mut server, None);
     crate::client::lifecycle::update_offset(&mut server, terminal.client);
     (server, pane, terminal)
+}
+
+fn native_status_terminal() -> (Server, PaneId, FakeTerminal) {
+    stock_native_with_program(
+        json!({"r":"hello","v":1,"kinds":["col","text","editor","input","status","seg"],
+        "features":["edit","undo","send","settle","dock"],"credits":2}),
+        json!(["edit", "undo", "send"]),
+    )
+}
+
+fn native_keys(server: &mut Server, terminal: &mut FakeTerminal, keys: &[u8]) {
+    if !keys.is_empty() {
+        terminal.send(server, keys);
+    }
+    crate::cmd::queue::next(server, Some(terminal.client));
+    broker::recompute(server);
+    crate::tsp::status_bar::redraw(server, terminal.client);
+    terminal.pump(server);
+    terminal.draw(server);
+}
+
+fn native_event(server: &mut Server, terminal: &mut FakeTerminal, mut event: Value) {
+    event["sf"] = terminal.tree.as_ref().unwrap()["id"].clone();
+    native_keys(server, terminal, &apc(b'e', &event));
+}
+
+fn native_prompt_props(terminal: &mut FakeTerminal) -> Value {
+    let id = terminal.focus.as_ref().unwrap().clone();
+    assert!(id.starts_with("rmux:prompt:"));
+    node_mut(terminal.tree.as_mut().unwrap(), &id).unwrap()["p"].clone()
+}
+
+fn native_app_draft(server: &mut Server, pane: PaneId, terminal: &mut FakeTerminal) {
+    pane_runtime::pane_parse_buffer(server, pane, &apc(b'f', &json!({
+        "sf":"program", "s":2, "ops":[
+            ["add","draft","program",null,{"id":"draft","k":"editor","p":{"text":"app draft"}}],
+            ["focus","draft"]
+        ]
+    }))).unwrap();
+    terminal.pump(server);
+    terminal.draw(server);
+    assert_eq!(terminal.focus.as_deref(), Some("draft"));
+}
+
+#[test]
+fn native_prompt_apc_edit_undo_send_reject_stale_and_restore_app_focus() {
+    let (mut server, pane, mut terminal) = native_status_terminal();
+    native_app_draft(&mut server, pane, &mut terminal);
+    let window = server.panes.get(pane).unwrap().window;
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    let stale = terminal.focus.clone().unwrap();
+    native_keys(&mut server, &mut terminal, b"\x03");
+    assert_eq!(terminal.focus.as_deref(), Some("draft"));
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    native_keys(&mut server, &mut terminal, b"\x15");
+    let id = terminal.focus.clone().unwrap();
+    native_event(&mut server, &mut terminal, json!({"ev":"undo","id":stale}));
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":stale,"from":0,"to":0,"text":"stale","cursor":5,"len":0}),
+    );
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"send","id":stale,"text":"stale"}),
+    );
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "");
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":"draft","from":0,"to":9,"text":"wrong","cursor":5,"len":9}),
+    );
+    assert_eq!(terminal.text("draft"), "app draft");
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":0,"to":0,"text":"foo\n","cursor":4,"len":0}),
+    );
+    let props = native_prompt_props(&mut terminal);
+    assert_eq!(props["text"], "foo");
+    assert_eq!(props["cursor"], 3);
+    assert!(props.get("anchor").is_none_or(Value::is_null));
+    native_event(&mut server, &mut terminal, json!({"ev":"undo","id":id}));
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "");
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":0,"to":0,"text":"a😀b","cursor":4,"len":0}),
+    );
+    node_mut(terminal.tree.as_mut().unwrap(), &id).unwrap()["p"]["text"] = "host-diverged".into();
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":2,"to":3,"text":"split","cursor":6,"len":4}),
+    );
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "a😀b");
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":1,"to":3,"text":"bye\nnow","cursor":8,"len":4}),
+    );
+    let props = native_prompt_props(&mut terminal);
+    assert_eq!(props["text"], "abyenowb");
+    assert_eq!(props["cursor"], 7);
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":0,"to":0,"text":"stale","cursor":5,"len":4}),
+    );
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "abyenowb");
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"send","id":id,"text":"host\n-name"}),
+    );
+    assert_eq!(server.windows.get(window).unwrap().name, b"host-name");
+    assert!(
+        !server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .prompt
+            .is_some()
+    );
+    assert_eq!(terminal.focus.as_deref(), Some("draft"));
+    assert_eq!(terminal.text("draft"), "app draft");
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    native_keys(&mut server, &mut terminal, b"\x15");
+    let id = terminal.focus.clone().unwrap();
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":0,"to":0,"text":"foo\n","cursor":4,"len":0}),
+    );
+    native_keys(&mut server, &mut terminal, b"\r");
+    assert_eq!(server.windows.get(window).unwrap().name, b"foo");
+    assert_eq!(terminal.focus.as_deref(), Some("draft"));
+}
+
+#[test]
+fn native_message_keeps_readonly_prompt_focus_and_multiline_order() {
+    let (mut server, pane, mut terminal) = native_status_terminal();
+    native_app_draft(&mut server, pane, &mut terminal);
+    let session = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .session
+        .unwrap();
+    let options = server.sessions.get(session).unwrap().options;
+    server.options.set_number_value(options, b"status", 3);
+    crate::ui::status::status_update_cache(&mut server, session);
+    server.options.set_number_value(options, b"message-line", 1);
+    server
+        .clients
+        .get_mut(terminal.client)
+        .unwrap()
+        .flags
+        .insert(ClientFlags::REDRAWSTATUS);
+    native_keys(&mut server, &mut terminal, b"");
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    native_keys(&mut server, &mut terminal, b"\x15keep");
+    let id = terminal.focus.clone().unwrap();
+    let order = |terminal: &mut FakeTerminal| -> Vec<String> {
+        node_mut(terminal.tree.as_mut().unwrap(), "rmux:bar").unwrap()["c"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|node| node["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        order(&mut terminal),
+        vec!["rmux:bar:0".to_owned(), id.clone(), "rmux:bar:2".to_owned()]
+    );
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":4,"to":4,"text":"!","cursor":5,"len":4}),
+    );
+    assert_eq!(
+        order(&mut terminal),
+        vec!["rmux:bar:0".to_owned(), id.clone(), "rmux:bar:2".to_owned()]
+    );
+    crate::ui::status::status_message_set(
+        &mut server,
+        Some(terminal.client),
+        0,
+        true,
+        true,
+        false,
+        b"notice",
+    );
+    crate::tsp::status_bar::redraw(&mut server, terminal.client);
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(terminal.focus.as_deref(), Some(id.as_str()));
+    assert_eq!(native_prompt_props(&mut terminal)["readonly"], true);
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "keep!");
+    assert_eq!(
+        order(&mut terminal),
+        vec![
+            "rmux:bar:0".to_owned(),
+            id.clone(),
+            "rmux:bar:1".to_owned(),
+            "rmux:bar:2".to_owned()
+        ]
+    );
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"send","id":id,"text":"blocked"}),
+    );
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "keep!");
+    assert_eq!(terminal.text("draft"), "app draft");
+    crate::ui::status::status_message_clear(&mut server, terminal.client);
+    native_keys(&mut server, &mut terminal, b"");
+    assert_eq!(native_prompt_props(&mut terminal)["readonly"], false);
+    assert_eq!(
+        order(&mut terminal),
+        vec!["rmux:bar:0".to_owned(), id, "rmux:bar:2".to_owned()]
+    );
+    native_keys(&mut server, &mut terminal, b"\x03");
+    assert_eq!(terminal.focus.as_deref(), Some("draft"));
+    assert_eq!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .status
+            .references,
+        0
+    );
+    assert!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .status
+            .active
+            .is_none()
+    );
+}
+
+#[test]
+fn native_vi_command_prompt_rejects_host_edit_and_keeps_raw_vi_keys() {
+    let (mut server, _, mut terminal) = native_status_terminal();
+    let session = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .session
+        .unwrap();
+    let options = server.sessions.get(session).unwrap().options;
+    server.options.set_number_value(options, b"status-keys", 1);
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    native_keys(&mut server, &mut terminal, b"\x15abc");
+    terminal.send(&mut server, b"\x1b");
+    crate::client::tty_io::on_timer(&mut server, terminal.client, rmux_tty::tty::TtyTimer::Key);
+    native_keys(&mut server, &mut terminal, b"h");
+    let props = native_prompt_props(&mut terminal);
+    assert_eq!(props["mode"], "COMMAND");
+    assert_eq!(props["readonly"], true);
+    let id = terminal.focus.clone().unwrap();
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"edit","id":id,"from":0,"to":3,"text":"wrong","cursor":5,"len":3}),
+    );
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "abc");
+    native_keys(&mut server, &mut terminal, b"xiZ");
+    let props = native_prompt_props(&mut terminal);
+    assert_eq!(props["text"], "aZc");
+    assert_eq!(props["readonly"], false);
+    native_keys(&mut server, &mut terminal, b"\x03");
+}
+
+#[test]
+fn native_empty_backspace_exit_prompt_uses_raw_keys_until_text_exists() {
+    let (mut server, _, mut terminal) = native_status_terminal();
+    native_keys(&mut server, &mut terminal, b"\x02:");
+    native_keys(
+        &mut server,
+        &mut terminal,
+        b"command-prompt -e 'display-message %%'\r",
+    );
+    assert_eq!(native_prompt_props(&mut terminal)["readonly"], true);
+    native_keys(&mut server, &mut terminal, b"a");
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "a");
+    assert_eq!(native_prompt_props(&mut terminal)["readonly"], false);
+    native_keys(&mut server, &mut terminal, b"\x15");
+    assert_eq!(native_prompt_props(&mut terminal)["readonly"], true);
+    native_keys(&mut server, &mut terminal, b"\x7f");
+    assert!(
+        !server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .prompt
+            .is_some()
+    );
+}
+
+#[test]
+fn native_send_advances_multianswer_command_prompt_like_enter() {
+    let (mut server, pane, mut terminal) = native_status_terminal();
+    native_keys(&mut server, &mut terminal, b"\x02:");
+    native_keys(
+        &mut server,
+        &mut terminal,
+        b"command-prompt -p 'first,second' -I ',seed' 'select-pane -T %1-%2'\r",
+    );
+    let id = terminal.focus.clone().unwrap();
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"send","id":id,"text":"one"}),
+    );
+    assert_eq!(terminal.focus.as_deref(), Some(id.as_str()));
+    assert_eq!(native_prompt_props(&mut terminal)["text"], "seed");
+    native_event(
+        &mut server,
+        &mut terminal,
+        json!({"ev":"send","id":id,"text":"two"}),
+    );
+    assert_eq!(server.panes.get(pane).unwrap().base.title, b"one-two");
+    assert!(
+        !server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .prompt
+            .is_some()
+    );
+}
+
+#[test]
+fn generic_program_without_edit_keeps_original_hello_and_raw_prompt_keys() {
+    let hello = json!({"r":"hello","v":1,"kinds":["col","text","editor","input","status","seg"],"features":["edit","undo","send","dock"],"credits":2});
+    let (mut server, pane, mut terminal) = stock_native_with_program(hello, json!([]));
+    assert_eq!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .tsp
+            .projection_hello
+            .as_ref()
+            .unwrap()["features"],
+        json!([])
+    );
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    native_keys(&mut server, &mut terminal, b"\x15raw");
+    assert_eq!(native_prompt_props(&mut terminal)["readonly"], true);
+    let window = server.panes.get(pane).unwrap().window;
+    native_keys(&mut server, &mut terminal, b"\r");
+    assert_eq!(server.windows.get(window).unwrap().name, b"raw");
+}
+
+#[test]
+fn native_prefix_rename_submit_cancel_and_command_keep_transcript() {
+    let (mut server, pane, mut terminal) = native_status_terminal();
+    let window = server.panes.get(pane).unwrap().window;
+    let session = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .session
+        .unwrap();
+    let original_surface = terminal.tree.as_ref().unwrap()["id"].clone();
+    for (prefix, name) in [
+        (b',', b"native-window".as_slice()),
+        (b'$', b"native-session"),
+        (b'T', b"native-pane"),
+    ] {
+        native_keys(&mut server, &mut terminal, &[2, prefix]);
+        assert!(
+            server
+                .clients
+                .get(terminal.client)
+                .unwrap()
+                .prompt
+                .is_some()
+        );
+        assert_eq!(terminal.tree.as_ref().unwrap()["id"], original_surface);
+        assert!(
+            terminal
+                .focus
+                .as_ref()
+                .is_some_and(|id| id.starts_with("rmux:prompt:"))
+        );
+        let mut keys = vec![21];
+        keys.extend(name);
+        keys.push(b'\r');
+        native_keys(&mut server, &mut terminal, &keys);
+        assert!(
+            !server
+                .clients
+                .get(terminal.client)
+                .unwrap()
+                .prompt
+                .is_some()
+        );
+        assert_eq!(terminal.text("transcript"), "retained transcript");
+    }
+    assert_eq!(server.windows.get(window).unwrap().name, b"native-window");
+    assert_eq!(
+        server.sessions.get(session).unwrap().name,
+        b"native-session"
+    );
+    assert_eq!(server.panes.get(pane).unwrap().base.title, b"native-pane");
+    native_keys(&mut server, &mut terminal, b"\x02,");
+    native_keys(&mut server, &mut terminal, b"\x15discarded\x03");
+    assert_eq!(server.windows.get(window).unwrap().name, b"native-window");
+    native_keys(&mut server, &mut terminal, b"\x02:");
+    native_keys(
+        &mut server,
+        &mut terminal,
+        b"select-pane -T command-title\r",
+    );
+    assert_eq!(server.panes.get(pane).unwrap().base.title, b"command-title");
+    assert_eq!(terminal.tree.as_ref().unwrap()["id"], original_surface);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
 }
 
 #[test]

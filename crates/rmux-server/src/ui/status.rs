@@ -616,9 +616,8 @@ fn status_message_area(srv: &mut Server, c: ClientId) -> (u32, u32) {
     (area_x, w)
 }
 
-/// Reset the overlay screen to the client size. Returns the previous
-/// overlay for comparison; None when no screen was pushed.
-fn status_begin_overlay(sl: &mut StatusLine, tty_sx: u32, lines: u32) -> Option<Screen> {
+/// Reset the pushed overlay screen to the client size.
+fn status_begin_overlay(sl: &mut StatusLine, tty_sx: u32, lines: u32) -> Screen {
     let fresh = Screen::new(
         tty_sx,
         lines,
@@ -627,7 +626,12 @@ fn status_begin_overlay(sl: &mut StatusLine, tty_sx: u32, lines: u32) -> Option<
         &mut sl.registry,
     )
     .expect("status overlay screen");
-    Some(std::mem::replace(sl.active.as_mut()?, fresh))
+    std::mem::replace(
+        sl.active
+            .as_mut()
+            .expect("overlay owns a pushed status screen"),
+        fresh,
+    )
 }
 
 fn status_finish_overlay(sl: &mut StatusLine, mut old: Screen) -> bool {
@@ -681,9 +685,7 @@ pub fn status_message_redraw(srv: &mut Server, c: ClientId) -> bool {
         return false;
     };
     let sl = &mut client.status;
-    let Some(old) = status_begin_overlay(sl, tty_sx, lines) else {
-        return false;
-    };
+    let old = status_begin_overlay(sl, tty_sx, lines);
     {
         let StatusLine {
             registry,
@@ -691,9 +693,9 @@ pub fn status_message_redraw(srv: &mut Server, c: ClientId) -> bool {
             active,
             ..
         } = sl;
-        let Some(active) = active.as_mut() else {
-            return false;
-        };
+        let active = active
+            .as_mut()
+            .expect("message owns a pushed status screen");
         let mut sink = ScreenOnlySink;
         let mut ctx = ScreenWriteCtx::start(
             active,
@@ -902,10 +904,7 @@ pub fn status_prompt_redraw(srv: &mut Server, c: ClientId) -> bool {
         return false;
     };
     let sl = &mut client.status;
-    let Some(old) = status_begin_overlay(sl, tty_sx, lines) else {
-        status_slot_restore(srv, c, prompt, generation);
-        return false;
-    };
+    let old = status_begin_overlay(sl, tty_sx, lines);
     let mut cursor_x = 0;
     {
         let StatusLine {
@@ -914,9 +913,7 @@ pub fn status_prompt_redraw(srv: &mut Server, c: ClientId) -> bool {
             active,
             ..
         } = sl;
-        let Some(active) = active.as_mut() else {
-            return false;
-        };
+        let active = active.as_mut().expect("prompt owns a pushed status screen");
         let mut sink = ScreenOnlySink;
         let mut ctx = ScreenWriteCtx::start(
             active,
@@ -940,6 +937,91 @@ pub fn status_prompt_redraw(srv: &mut Server, c: ClientId) -> bool {
     let changed = status_finish_overlay(sl, old);
     status_slot_restore(srv, c, prompt, generation);
     changed
+}
+
+pub(crate) fn status_prompt_native(srv: &mut Server, c: ClientId) -> Option<serde_json::Value> {
+    let (ax, aw) = status_message_area(srv, c);
+    let line = status_prompt_line_at(srv, c);
+    let (prompt, generation) = srv.clients.get_mut(c)?.prompt.take_value()?;
+    let layout = prompt_draw(&prompt, srv, ax, aw).layout();
+    let input = prompt.input();
+    let text = String::from_utf8_lossy(&input);
+    let cursor: usize = text.chars().take(prompt.index()).map(char::len_utf16).sum();
+    let label = srv.clients.get(c).map(|client| {
+        let grid = &client.status.active().grid;
+        let cells = grid.view_string_cells(
+            layout.content_x,
+            line.min(grid.sy().saturating_sub(1)),
+            layout.label_width,
+        );
+        String::from_utf8_lossy(&cells).into_owned()
+    });
+    let mut props = serde_json::json!({
+        "text": text,
+        "cursor": cursor,
+        "anchor": null,
+        "prompt": label.unwrap_or_default(),
+        "ghost": null,
+        "mode": null,
+        "readonly": false,
+    });
+    if let Some(ghost) = prompt
+        .complete_display()
+        .filter(|_| cursor == text.encode_utf16().count())
+    {
+        props["ghost"] = String::from_utf8_lossy(ghost).into_owned().into();
+    }
+    props["readonly"] = crate::ui::prompt::prompt_native_readonly(&prompt).into();
+    if prompt.flags().contains(PromptFlags::COMMANDMODE) {
+        props["mode"] = "COMMAND".into();
+    }
+    status_slot_restore(srv, c, prompt, generation);
+    Some(props)
+}
+
+pub(crate) fn status_prompt_native_event(
+    srv: &mut Server,
+    c: ClientId,
+    name: &str,
+    event: &serde_json::Value,
+) {
+    let Some((mut prompt, generation)) =
+        srv.clients.get_mut(c).and_then(|cl| cl.prompt.take_value())
+    else {
+        return;
+    };
+    let mut redraw = false;
+    if srv
+        .clients
+        .get(c)
+        .is_some_and(|cl| cl.message.text.is_none())
+    {
+        match name {
+            "edit" => crate::ui::prompt::prompt_native_edit(srv, &mut prompt, event),
+            "undo" => crate::ui::prompt::prompt_native_undo(srv, &mut prompt),
+            "send" => {
+                if let Some(text) = event.get("text").and_then(serde_json::Value::as_str) {
+                    crate::ui::prompt::prompt_native_send(srv, &mut prompt, text, &mut redraw);
+                }
+            }
+            _ => {}
+        }
+    }
+    status_slot_restore(srv, c, prompt, generation);
+    if let Some(client) = srv.clients.get_mut(c) {
+        client.flags.insert(ClientFlags::REDRAWSTATUS);
+        if let Some(projection) = client.tsp.projection.as_mut() {
+            projection.invalidate_bar();
+        }
+    }
+    if srv
+        .clients
+        .get(c)
+        .and_then(|cl| cl.prompt.as_ref())
+        .is_some_and(prompt_closed)
+    {
+        status_prompt_clear(srv, c);
+    }
 }
 
 /// Work out the tty cursor position for the prompt.
