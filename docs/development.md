@@ -168,6 +168,10 @@ cargo nextest run --workspace -P full
 cargo test --workspace --doc
 ```
 
+Before publishing changes, run the formatting and full-workspace Clippy gates
+above as well as the tests. CI uses the current stable toolchain on Linux and
+macOS; a passing targeted test does not cover formatting or new stable lints.
+
 Tests run under [cargo-nextest](https://nexte.st) (`brew install cargo-nextest`),
 configured in `.config/nextest.toml`. The default profile skips the copy-mode
 oracle grids (`copy_core_oracle`, `copy_commands_oracle`) and three oracle
@@ -364,14 +368,26 @@ The extension uses omp's public widget factory to obtain the live TUI and
 stops/starts only that UI to repeat
 the stock program's `hello`, never restarting the agent or changing sessions.
 A read-only `rmux -C` observer with `no-output,ignore-size` subscribes to
-`pane_tsp_view`. The extension ignores detached/probing states and switches
-only when the desired native/text renderer differs from the UI's renderer.
+`pane_tsp_view`. A generation-bound managed timer reconciles the latest desired
+renderer with the actual UI every 250 ms, without polling the server. It ignores
+detached/probing states, waits for `tspProbePending` to settle, and does not
+restart while `process.stdin.isPaused()` indicates an external UI owns the tty.
+This also retries a mismatched completed negotiation even when the control
+subscription's desired value is unchanged. Timers are disposed on session
+replacement, shutdown, and observer completion/failure.
 `/terminal-reprobe` repeats negotiation manually. The extension leaves the
 caller environment unchanged, honors startup `PI_TUI_NATIVE=0`, and terminates
 its observer on session shutdown. No omp source changes or private-field
 patches are required. Real omp 18.8.3 PTY acceptance covers automatic native
 to ANSI to native, mixed viewers, split/zoom, retained app PID/session/draft,
-and an existing transcript entry rendered by both backends.
+and an existing transcript entry rendered by both backends. Two real omp
+instances were exercised in side-by-side and top/bottom layouts: both text,
+zoom either pane to native, unzoom back to text, then close one and restore the
+remaining pane to native, with independent session/draft/transcript retention.
+Real external-editor acceptance reproduced the old plugin reclaiming input
+while the editor was live and confirmed the corrected plugin waits for exit.
+A controlled transient split during hello negotiation reproduced `ansi/native`
+actual/desired mismatch before and `native/native` convergence after the fix.
 
 Transitions hold pane input until matching ready, with a 64 KiB admission bound
 and tty backpressure. A missing completion after five seconds closes projections

@@ -64,7 +64,7 @@ pub fn viewers(server: &Server, pane: PaneId) -> Vec<ClientId> {
                 .session
                 .and_then(|s| server.sessions.get(s)?.current)
                 .and_then(|l| server.winlinks.get(l));
-            if !selected.is_some_and(|l| l.window == p.window) {
+            if selected.is_none_or(|l| l.window != p.window) {
                 return false;
             }
             let (_, mut ox, mut oy, _, _) = tty.window_offset();
@@ -778,6 +778,7 @@ mod tests {
     use crate::{
         client::Client,
         ids::SessionId,
+        layout::{self, LayoutType},
         model::{session, spawn::SpawnFlags, window},
     };
     use rmux_tty::tty::{Tty, TtyHostInfo};
@@ -1066,7 +1067,12 @@ mod tests {
         let hello =
             serde_json::from_value::<Hello>(json!({"v":1,"kinds":["col","text"],"credits":2}))
                 .unwrap();
-        server.clients.get_mut(viewer).unwrap().tsp.accept_hello(hello);
+        server
+            .clients
+            .get_mut(viewer)
+            .unwrap()
+            .tsp
+            .accept_hello(hello);
         assert_desired_view(&mut server, pane, "pending");
         server.clients.get_mut(viewer).unwrap().tsp.sentinel(token);
         recompute(&mut server);
@@ -1096,6 +1102,112 @@ mod tests {
         assert_desired_view(&mut server, pane, "native");
         state_mut(&mut server, pane).ui_pending = true;
         assert_desired_view(&mut server, pane, "ansi");
+    }
+
+    #[test]
+    fn desired_view_tracks_two_stock_panes_through_split_zoom_and_close() {
+        for kind in [LayoutType::Leftright, LayoutType::Topbottom] {
+            let (mut server, a, session) = fixture();
+            server.tsp_broker_enabled = true;
+            let window = server.panes.get(a).unwrap().window;
+            layout::init(&mut server, window, a);
+            let (viewer, _viewer_master) = client_with_master(&mut server, session, true, false);
+            let (observer, _observer_master) =
+                client_with_master(&mut server, session, false, false);
+            server
+                .clients
+                .get_mut(observer)
+                .unwrap()
+                .flags
+                .insert(ClientFlags::CONTROL);
+            stock_hello(&mut server, a);
+            assert_desired_view(&mut server, a, "native");
+            assert_eq!(state(&server, a).renderer, Renderer::Native);
+            assert_eq!(replies(&mut server, a)[0]["r"], "hello");
+
+            let cell = layout::split_pane(&mut server, a, kind, -1, SpawnFlags::default())
+                .expect("space for second stock pane");
+            let b = window::window_add_pane(&mut server, window, Some(a), 0, SpawnFlags::default())
+                .unwrap();
+            layout::assign_pane(&mut server, cell, b, false);
+            assert!(window::window_set_active_pane(&mut server, window, b, true).unwrap());
+            stock_hello(&mut server, b);
+            assert_eq!(state(&server, b).renderer, Renderer::Ansi);
+            assert!(replies(&mut server, b).is_empty());
+            let a_hello = state(&server, a).program_hello.clone();
+            let b_hello = state(&server, b).program_hello.clone();
+            assert_eq!(b_hello, a_hello);
+            let a_epoch = state(&server, a).epoch;
+            let b_epoch = state(&server, b).epoch;
+            let a_generation = state(&server, a).generation;
+            let b_generation = state(&server, b).generation;
+
+            let assert_views = |server: &mut Server, a_view: &str, b_view: &str| {
+                recompute(server);
+                for (pane, view, hello, epoch, generation) in [
+                    (a, a_view, &a_hello, a_epoch, a_generation),
+                    (b, b_view, &b_hello, b_epoch, b_generation),
+                ] {
+                    assert_desired_view(server, pane, view);
+                    assert_eq!(
+                        viewers(server, pane),
+                        if view == "detached" {
+                            vec![]
+                        } else {
+                            vec![viewer]
+                        }
+                    );
+                    assert_eq!(display_contract(server, pane).0.is_some(), view == "native");
+                    let state = state(server, pane);
+                    assert!(state.stock && state.registered);
+                    assert_eq!(&state.program_hello, hello);
+                    assert_eq!(state.epoch, epoch);
+                    assert_eq!(state.generation, generation);
+                    assert!(state.switch.is_none());
+                    assert_eq!(broker_messages(&replies(server, pane)), 0);
+                }
+                assert_eq!(
+                    state(server, a).renderer,
+                    if a_view == "detached" {
+                        Renderer::Detached
+                    } else {
+                        Renderer::Native
+                    }
+                );
+                // ANSI hello metadata must still permit a later native reprobe.
+                assert_eq!(state(server, b).renderer, Renderer::Ansi);
+            };
+            assert_views(&mut server, "ansi", "ansi");
+            assert!(window::window_zoom(&mut server, window, a).unwrap());
+            assert_views(&mut server, "native", "detached");
+            assert!(window::window_unzoom(&mut server, window, true).unwrap());
+            assert_views(&mut server, "ansi", "ansi");
+            assert!(window::window_zoom(&mut server, window, b).unwrap());
+            assert_views(&mut server, "detached", "native");
+            assert!(window::window_unzoom(&mut server, window, true).unwrap());
+            assert_views(&mut server, "ansi", "ansi");
+
+            layout::close_pane(&mut server, a);
+            window::window_remove_pane(&mut server, window, a).unwrap();
+            recompute(&mut server);
+            assert_desired_view(&mut server, b, "native");
+            assert_eq!(viewers(&server, b), vec![viewer]);
+            assert!(display_contract(&server, b).0.is_some());
+            assert_eq!(state(&server, b).renderer, Renderer::Ansi);
+            assert_eq!(state(&server, b).program_hello, b_hello);
+            assert!(state(&server, b).registered);
+            assert!(state(&server, b).switch.is_none());
+            assert!(replies(&mut server, b).is_empty());
+
+            pane_send(&mut server, b, b'q', b_hello);
+            assert_desired_view(&mut server, b, "native");
+            assert_eq!(state(&server, b).renderer, Renderer::Native);
+            assert_eq!(state(&server, b).epoch, b_epoch);
+            assert_eq!(state(&server, b).generation, b_generation);
+            let hello = replies(&mut server, b);
+            assert_eq!(hello.len(), 1);
+            assert_eq!(hello[0]["r"], "hello");
+        }
     }
 
     #[test]

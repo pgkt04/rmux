@@ -642,10 +642,10 @@ pub fn apply_effect(
     id: PaneId,
     effect: OwnedInputEffect,
 ) -> Result<(), ModelError> {
-    if !server
+    if server
         .panes
         .get(id)
-        .is_some_and(|p| !p.flags.contains(PaneFlags::DESTROYED))
+        .is_none_or(|p| p.flags.contains(PaneFlags::DESTROYED))
     {
         return Ok(());
     }

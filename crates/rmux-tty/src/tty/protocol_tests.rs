@@ -182,10 +182,8 @@ fn stop_timeout_releases_raw_tty_after_draining_late_reply() {
     raw.set(tty.fd()).unwrap();
     rmux_sys::fd::set_blocking(tty.fd(), false);
     tty.flags.insert(TtyFlags::STARTED);
-    tty.close_protocol(
-        ProtocolTransaction::new(b"\x1b_tsp;x;{}\x1b\\".to_vec()).teardown(),
-    )
-    .unwrap();
+    tty.close_protocol(ProtocolTransaction::new(b"\x1b_tsp;x;{}\x1b\\".to_vec()).teardown())
+        .unwrap();
     tty.close(&mut state);
     drain(&mut tty, 4096);
     tty.finish_protocol_stop();
@@ -200,7 +198,9 @@ fn stop_timeout_releases_raw_tty_after_draining_late_reply() {
     rmux_sys::fd::set_blocking(tty.fd(), false);
     let mut pending = [0; 128];
     assert_eq!(
-        rmux_sys::fd::read(tty.fd(), &mut pending).unwrap_err().kind(),
+        rmux_sys::fd::read(tty.fd(), &mut pending)
+            .unwrap_err()
+            .kind(),
         io::ErrorKind::WouldBlock
     );
 }

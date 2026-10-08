@@ -73,6 +73,16 @@ Detection uses a read-only, no-output control client and can take about a second
 `/terminal-reprobe` manually repeats negotiation. `PI_TUI_NATIVE=0` keeps text
 rendering and disables automatic switching.
 
+To use two omp instances, start omp, press `C-b %` for a side-by-side split
+(or `C-b "` for top/bottom), and start omp in the new pane. Both panes render
+as text automatically. `C-b o` selects the next pane; `C-b z` zooms the selected
+pane into a native view in Tern, and pressing it again returns to text splits.
+Close the other pane (quit omp, then exit its shell) to return the remaining
+sole pane to native.
+Native rendering still covers only one sole or zoomed pane, not both splits.
+Automatic switching waits while an external editor owns omp's terminal and
+resumes after the editor exits; in-flight terminal negotiation is not restarted.
+
 For an omp profile, run `omp --profile NAME plugin install /path/to/package`.
 `rmux omp-plugin` without a directory still prints the standalone extension for
 `omp -e /path/to/rmux.ts`. Re-export the package after updating rmux.

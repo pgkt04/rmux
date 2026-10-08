@@ -1517,7 +1517,7 @@ impl ModeTreeData {
 }
 impl<B: ModeTreeCallbacks> TreeModeState<B> {
     pub fn zoom(&mut self, s: &mut Server, wp: PaneId, args: Option<&crate::cmd::arguments::Args>) {
-        if !args.is_some_and(|a| a.has(b'Z') > 0) {
+        if args.is_none_or(|a| a.has(b'Z') == 0) {
             return;
         }
         let Some(window) = s.panes.get(wp).map(|p| p.window) else {
