@@ -309,7 +309,10 @@ TSP probe under a tmux `TERM` unless that override asks for it, and an explicit
 `PI_TUI_NATIVE=0` still wins. Read-only formats
 `client_tsp` (`unknown`, `no`, `v1`), `pane_tsp` (`ansi`, `switching`, `native`,
 `detached`), and `pane_tsp_epoch` report broker state, not terminal-environment
-guesses. Changes expose an ordered `OptionsChange` plan for the G14 host;
+guesses. `pane_tsp_view` reports the desired renderer independently of the app's
+chosen renderer: `native`, `ansi`, `detached` (no physical viewers), or `pending`
+(a visible client's TSP probe is unresolved). Control observers do not count as
+viewers. Changes expose an ordered `OptionsChange` plan for the G14 host;
 monitor removal releases values before monitor cleanup and option unlink.
 TSP replay holds one immutable revision across tty queue-full retries; subsequent
 frames and latest palette/sheet updates stay pending until that revision is
@@ -346,6 +349,29 @@ Stock programs enter cell modes and menus immediately on the existing grid,
 without waiting for an ANSI repaint they cannot provide. Leaving the cell UI
 replays the retained native document; copy-mode commands never block later
 prefix keys such as detach.
+Native tty teardown closes the outer surface and restores terminal modes before
+a final owned DA1 barrier. rmux keeps raw input active to consume delayed TSP
+replies and delays `MSG_EXITED` until the barrier completes. If the terminal
+does not answer, a one-second timeout after output drains releases the tty;
+pending replies are drained before restoring the shell's termios.
+
+`crates/rmux/omp/{package.json,rmux.ts}` is embedded in the executable;
+`rmux omp-plugin DIRECTORY` exports the managed `rmux-terminal` package, while
+the command without a directory prints the standalone extension. Cargo packages
+include both files. `omp plugin install DIRECTORY` registers the package so it
+appears in `/plugins`; do not also load a loose copy of the extension.
+The extension uses omp's public widget factory to obtain the live TUI and
+stops/starts only that UI to repeat
+the stock program's `hello`, never restarting the agent or changing sessions.
+A read-only `rmux -C` observer with `no-output,ignore-size` subscribes to
+`pane_tsp_view`. The extension ignores detached/probing states and switches
+only when the desired native/text renderer differs from the UI's renderer.
+`/terminal-reprobe` repeats negotiation manually. The extension leaves the
+caller environment unchanged, honors startup `PI_TUI_NATIVE=0`, and terminates
+its observer on session shutdown. No omp source changes or private-field
+patches are required. Real omp 18.8.3 PTY acceptance covers automatic native
+to ANSI to native, mixed viewers, split/zoom, retained app PID/session/draft,
+and an existing transcript entry rendered by both backends.
 
 Transitions hold pane input until matching ready, with a 64 KiB admission bound
 and tty backpressure. A missing completion after five seconds closes projections

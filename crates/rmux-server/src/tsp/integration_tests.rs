@@ -973,6 +973,61 @@ fn native_child_keeps_pid_across_ansi_and_back() {
 }
 
 #[test]
+fn detach_waits_for_terminal_reply_barrier_before_shell_handoff() {
+    let (mut server, pane, terminal) = stock_native();
+    let outer = terminal.tree.as_ref().unwrap()["id"].clone();
+    server.panes.get_mut(pane).unwrap().output.clear();
+    crate::client::lifecycle::detach(&mut server, terminal.client, false);
+    crate::client::dispatch::on_message(
+        &mut server,
+        terminal.client,
+        crate::server::protocol::ProtocolMessage::new(
+            crate::server::protocol::ProtocolMessageKind::Exiting,
+            Vec::new(),
+        ),
+    );
+    let tty = server
+        .clients
+        .get_mut(terminal.client)
+        .unwrap()
+        .tty
+        .as_mut()
+        .unwrap();
+    while tty.out_len() != 0 {
+        tty.on_writable().unwrap();
+    }
+    let mode = rmux_sys::TermiosState::get(tty.fd()).unwrap();
+    assert_eq!(mode.lflag() & (libc::ECHO | libc::ICANON), 0);
+    assert!(tty.wants_read(), "delayed replies still belong to rmux");
+    server.panes.get_mut(pane).unwrap().output.clear();
+    let mut replies = apc(b'e', &json!({"ev":"ack","sf":outer,"s":2}));
+    let tail = replies.split_off(17);
+    terminal.send(&mut server, &replies);
+    assert!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .tty
+            .as_ref()
+            .unwrap()
+            .stopping()
+    );
+    replies = tail;
+    replies.extend_from_slice(b"\x1b[?1;2c");
+    terminal.send(&mut server, &replies);
+    let tty = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tty
+        .as_ref()
+        .unwrap();
+    assert!(!tty.flags().contains(rmux_tty::tty::TtyFlags::OPENED));
+    assert!(server.panes.get(pane).unwrap().output.is_empty());
+}
+
+#[test]
 fn stopping_the_tty_closes_an_inline_projection_first() {
     let mut fixture = Fixture::new();
     let mut tern = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);

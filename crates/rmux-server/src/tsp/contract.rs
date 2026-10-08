@@ -1,13 +1,13 @@
 // Ported from tmux server-client.c, window-visible.c @ 8f25579c
 // Renderer epochs and the ready barrier are an rmux TSP extension.
 use super::{
-    broker::{self, Renderer, SwitchState},
+    broker::{self, PaneTspState, Renderer, SwitchState},
     wire::{DisplayContract, WireMessage},
 };
 use crate::{
     client::ClientFlags,
     ids::{ClientId, PaneId},
-    model::{Server, pane::pane_is_visible},
+    model::{Pane, Server, pane::pane_is_visible},
     ui::visible::{VisibilityModel, VisibleRanges},
 };
 use rmux_tty::tty::TtyFlags;
@@ -91,6 +91,42 @@ pub fn viewers(server: &Server, pane: PaneId) -> Vec<ClientId> {
         .collect()
 }
 
+/// Desired renderer for physical viewers, independent of the program's renderer.
+pub(crate) fn desired_view(server: &Server, pane: PaneId) -> &'static str {
+    let ids = viewers(server, pane);
+    if ids.is_empty() {
+        return "detached";
+    }
+    // Disabled brokers never start a terminal probe.
+    if !server.tsp_broker_enabled {
+        return "ansi";
+    }
+    if ids.iter().any(|id| {
+        server.clients.get(*id).is_some_and(|c| {
+            matches!(
+                c.tsp.capability,
+                super::client::Capability::Unknown | super::client::Capability::Probing
+            )
+        })
+    }) {
+        return "pending";
+    }
+    let Some(p) = server.panes.get(pane) else {
+        return "detached";
+    };
+    let Some(state) = p.tsp.as_ref() else {
+        return "ansi";
+    };
+    if display_contract_for_viewers(server, pane, p, state, &ids)
+        .0
+        .is_some()
+    {
+        "native"
+    } else {
+        "ansi"
+    }
+}
+
 pub fn display_contract(
     server: &Server,
     pane: PaneId,
@@ -102,6 +138,16 @@ pub fn display_contract(
         return (None, None);
     };
     let ids = viewers(server, pane);
+    display_contract_for_viewers(server, pane, p, state, &ids)
+}
+
+fn display_contract_for_viewers(
+    server: &Server,
+    pane: PaneId,
+    p: &Pane,
+    state: &PaneTspState,
+    ids: &[ClientId],
+) -> (Option<DisplayContract>, Option<ClientId>) {
     let eligible: Vec<_> = ids
         .iter()
         .copied()
@@ -725,8 +771,7 @@ fn clear_transition_clients(server: &mut Server, pane: PaneId) {
 #[cfg(test)]
 mod tests {
     use super::super::{
-        broker::PaneTspState,
-        client::Capability,
+        client::{Capability, RequestOwner},
         wire::{Frame, Hello},
     };
     use super::*;
@@ -818,6 +863,19 @@ mod tests {
     }
     fn state_mut(server: &mut Server, pane: PaneId) -> &mut PaneTspState {
         server.panes.get_mut(pane).unwrap().tsp.as_mut().unwrap()
+    }
+
+    fn assert_desired_view(server: &mut Server, pane: PaneId, expected: &str) {
+        assert_eq!(desired_view(server, pane), expected);
+        let context = crate::format::FormatContext {
+            pane: Some(pane),
+            ..crate::format::FormatContext::default()
+        };
+        let mut tree = crate::format::create_defaults(server, None, context);
+        assert_eq!(
+            &*tree.expand(server, b"#{pane_tsp_view}"),
+            expected.as_bytes()
+        );
     }
 
     #[test]
@@ -936,6 +994,129 @@ mod tests {
             .iter()
             .filter(|m| m["r"] == "rmux-probe" || m["ev"] == "rmux-view")
             .count()
+    }
+
+    #[test]
+    fn desired_view_tracks_stock_native_viewers_without_switching_program() {
+        let (mut server, pane, session) = fixture();
+        server.tsp_broker_enabled = true;
+        let native = client(&mut server, session, true, false);
+        let observer = client(&mut server, session, false, false);
+        server
+            .clients
+            .get_mut(observer)
+            .unwrap()
+            .flags
+            .insert(ClientFlags::CONTROL);
+        stock_hello(&mut server, pane);
+        assert_desired_view(&mut server, pane, "native");
+        let epoch = state(&server, pane).epoch;
+        let generation = state(&server, pane).generation;
+
+        server.clients.get_mut(native).unwrap().session = None;
+        recompute(&mut server);
+        assert_desired_view(&mut server, pane, "detached");
+        assert_eq!(state(&server, pane).renderer, Renderer::Detached);
+
+        let plain = client(&mut server, session, false, false);
+        recompute(&mut server);
+        assert_desired_view(&mut server, pane, "pending");
+        let token = server
+            .clients
+            .get_mut(plain)
+            .unwrap()
+            .tsp
+            .request(RequestOwner::Detection);
+        assert_desired_view(&mut server, pane, "pending");
+        server.clients.get_mut(plain).unwrap().tsp.sentinel(token);
+        recompute(&mut server);
+        assert_desired_view(&mut server, pane, "ansi");
+        assert_eq!(state(&server, pane).renderer, Renderer::Native);
+
+        server.clients.get_mut(native).unwrap().session = Some(session);
+        recompute(&mut server);
+        assert_desired_view(&mut server, pane, "ansi");
+        assert_eq!(state(&server, pane).renderer, Renderer::Native);
+        server.clients.get_mut(plain).unwrap().session = None;
+        recompute(&mut server);
+        assert_desired_view(&mut server, pane, "native");
+        assert_eq!(state(&server, pane).renderer, Renderer::Native);
+        assert!(state(&server, pane).switch.is_none());
+        assert_eq!(state(&server, pane).epoch, epoch);
+        assert_eq!(state(&server, pane).generation, generation);
+        assert_eq!(broker_messages(&replies(&mut server, pane)), 0);
+    }
+
+    #[test]
+    fn desired_view_can_request_native_for_stock_ansi_program() {
+        let (mut server, pane, session) = fixture();
+        server.tsp_broker_enabled = true;
+        stock_hello(&mut server, pane);
+        assert_desired_view(&mut server, pane, "detached");
+        assert_eq!(state(&server, pane).renderer, Renderer::Ansi);
+        let epoch = state(&server, pane).epoch;
+        let viewer = client(&mut server, session, false, false);
+        assert_desired_view(&mut server, pane, "pending");
+        let token = server
+            .clients
+            .get_mut(viewer)
+            .unwrap()
+            .tsp
+            .request(RequestOwner::Detection);
+        let hello =
+            serde_json::from_value::<Hello>(json!({"v":1,"kinds":["col","text"],"credits":2}))
+                .unwrap();
+        server.clients.get_mut(viewer).unwrap().tsp.accept_hello(hello);
+        assert_desired_view(&mut server, pane, "pending");
+        server.clients.get_mut(viewer).unwrap().tsp.sentinel(token);
+        recompute(&mut server);
+        assert_desired_view(&mut server, pane, "native");
+        assert_eq!(state(&server, pane).renderer, Renderer::Ansi);
+        assert!(state(&server, pane).switch.is_none());
+        assert_eq!(state(&server, pane).epoch, epoch);
+        assert!(replies(&mut server, pane).is_empty());
+
+        server
+            .clients
+            .get_mut(viewer)
+            .unwrap()
+            .tty
+            .as_mut()
+            .unwrap()
+            .set_size(40, 25, 0, 0);
+        assert_desired_view(&mut server, pane, "ansi");
+        server
+            .clients
+            .get_mut(viewer)
+            .unwrap()
+            .tty
+            .as_mut()
+            .unwrap()
+            .set_size(80, 25, 0, 0);
+        assert_desired_view(&mut server, pane, "native");
+        state_mut(&mut server, pane).ui_pending = true;
+        assert_desired_view(&mut server, pane, "ansi");
+    }
+
+    #[test]
+    fn desired_view_resolves_expired_probe_and_disabled_broker_to_ansi() {
+        let (mut server, pane, session) = fixture();
+        server.tsp_broker_enabled = true;
+        let viewer = client(&mut server, session, false, false);
+        let token = server
+            .clients
+            .get_mut(viewer)
+            .unwrap()
+            .tsp
+            .request(RequestOwner::Detection);
+        assert_desired_view(&mut server, pane, "pending");
+        server.clients.get_mut(viewer).unwrap().tsp.expire(token);
+        assert_desired_view(&mut server, pane, "ansi");
+        server.clients.get_mut(viewer).unwrap().tsp.invalidate(2);
+        server.tsp_broker_enabled = false;
+        assert_desired_view(&mut server, pane, "ansi");
+        server.clients.get_mut(viewer).unwrap().session = None;
+        assert_desired_view(&mut server, pane, "detached");
     }
 
     #[test]

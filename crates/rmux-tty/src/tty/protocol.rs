@@ -189,6 +189,7 @@ impl Tty {
         if transaction.remaining == 0 {
             return Ok(());
         }
+        self.protocol_used = true;
         self.protocol_out.bytes += transaction.remaining;
         self.protocol_out.transactions.push_back(QueuedProtocol {
             cells_before: self.out.len(),
@@ -216,7 +217,14 @@ impl Tty {
     }
 
     pub fn resolve_da1(&mut self) -> Option<Da1Owner> {
-        self.keys.resolve_da1()
+        let owner = self.keys.resolve_da1();
+        if owner == Some(Da1Owner::Stop) {
+            self.protocol_stop_reply = false;
+            self.finish_protocol_stop();
+            None
+        } else {
+            owner
+        }
     }
 
     pub fn cancel_protocol(&mut self, projection: u64) {
@@ -248,6 +256,7 @@ impl Tty {
             return Err(QueueFull);
         }
         transaction.control = true;
+        self.protocol_used = true;
         self.protocol_out.bytes += transaction.remaining;
         let index = usize::from(
             self.protocol_out
@@ -274,6 +283,10 @@ impl Tty {
         self.protocol_generation
     }
 
+    pub fn stopping(&self) -> bool {
+        self.protocol_stop
+    }
+
     /// `smcup` when `enter`, else `rmcup`, if the tty started on the alternate
     /// screen; empty otherwise.
     pub fn alternate_screen(&self, enter: bool) -> Vec<u8> {
@@ -297,6 +310,7 @@ impl Tty {
         self.protocol_generation = self.protocol_generation.wrapping_add(1);
         self.protocol_out.clear();
         self.teardown.clear();
+        self.protocol_used = false;
         self.keys.reset_protocol();
         self.timer(TtyTimer::Protocol, None);
         self.effects.push(TtyEffect::ProtocolInvalidated {
@@ -389,7 +403,10 @@ impl Tty {
         self.protocol_out.transactions.retain(keep);
         self.out.clear();
         self.protocol_out.discard_cells();
-        let restore = ProtocolTransaction::new(restore).control();
+        restore.extend_from_slice(b"\x1b[c");
+        let mut restore = ProtocolTransaction::new(restore).control();
+        restore.da1 = Some(Da1Owner::Stop);
+        self.keys.own_da1(Da1Owner::Stop);
         self.protocol_out.bytes = self
             .protocol_out
             .transactions
@@ -408,7 +425,11 @@ impl Tty {
             generation: self.protocol_generation,
         });
         self.protocol_stop = true;
-        self.read_pending = false;
+        self.protocol_stop_reply = true;
+        self.protocol_stop_waiting = false;
+        self.read_pending = true;
+        self.read_paused = false;
+        self.read_limit = None;
         self.flags.remove(TtyFlags::STARTED | TtyFlags::BLOCK);
         for timer in [
             TtyTimer::Start,
@@ -423,7 +444,18 @@ impl Tty {
 
     pub(super) fn finish_protocol_stop(&mut self) {
         if self.protocol_stop && self.out.is_empty() && self.protocol_out.is_empty() {
+            if self.protocol_stop_reply {
+                if !self.protocol_stop_waiting {
+                    self.protocol_stop_waiting = true;
+                    self.timer(TtyTimer::Stop, Some(std::time::Duration::from_secs(1)));
+                }
+                return;
+            }
             self.protocol_stop = false;
+            self.protocol_stop_waiting = false;
+            self.read_pending = false;
+            self.timer(TtyTimer::Stop, None);
+            self.in_buf = rmux_util::buffer::ByteBuffer::new();
             let _ = self.tio.set(self.fd());
             rmux_sys::fd::set_blocking(self.fd(), true);
             self.reset_protocol();
@@ -431,7 +463,6 @@ impl Tty {
             if self.protocol_close {
                 self.protocol_close = false;
                 self.term = None;
-                self.in_buf = rmux_util::buffer::ByteBuffer::new();
                 self.keys.clear();
                 self.flags.remove(TtyFlags::OPENED);
             }

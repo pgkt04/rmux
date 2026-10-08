@@ -40,6 +40,7 @@ pub struct TtyTimers {
     block: Option<TimerId>,
     key: Option<TimerId>,
     protocol: Option<TimerId>,
+    stop: Option<TimerId>,
 }
 impl TtyTimers {
     fn slot(&mut self, timer: TtyTimer) -> &mut Option<TimerId> {
@@ -49,6 +50,7 @@ impl TtyTimers {
             TtyTimer::Block => &mut self.block,
             TtyTimer::Key => &mut self.key,
             TtyTimer::Protocol => &mut self.protocol,
+            TtyTimer::Stop => &mut self.stop,
         }
     }
     /// Cancel every timer (`tty_stop_tty`/`tty_free` `evtimer_del` calls).
@@ -59,6 +61,7 @@ impl TtyTimers {
             TtyTimer::Block,
             TtyTimer::Key,
             TtyTimer::Protocol,
+            TtyTimer::Stop,
         ] {
             if let Some(id) = self.slot(timer).take() {
                 event_loop.cancel(id);
@@ -91,6 +94,7 @@ fn apply_timer(server: &mut Server, id: ClientId, request: TimerRequest) {
 /// `event_add`/`event_del`, `tty_write` `event_add(&tty->event_out)`).
 pub fn sync(server: &mut Server, id: ClientId) {
     crate::tsp::broker::client_sync(server, id);
+    crate::client::dispatch::finish_exiting(server, id);
     let Some(c) = server.clients.get_mut(id) else {
         return;
     };
@@ -137,9 +141,9 @@ pub fn sync(server: &mut Server, id: ClientId) {
         return;
     };
     let started = tty.flags().contains(TtyFlags::STARTED);
-    let read = started && tty.wants_read();
+    let read = tty.wants_read();
     let write = tty.wants_write();
-    let active = started || write;
+    let active = started || read || write;
     match c.tty_token {
         Some(token) if active => {
             if let Err(e) = server.event_loop.reregister(token, read, write) {
@@ -240,10 +244,11 @@ fn decode_context(server: &Server, id: ClientId) -> Option<KeyDecodeContext> {
         xpixel,
         ypixel,
         has_input_requests: !c.input_requests.is_empty(),
-        tsp_input: matches!(
-            c.tsp.capability,
-            crate::tsp::client::Capability::Probing | crate::tsp::client::Capability::V1(_)
-        ),
+        tsp_input: tty.stopping()
+            || matches!(
+                c.tsp.capability,
+                crate::tsp::client::Capability::Probing | crate::tsp::client::Capability::V1(_)
+            ),
     })
 }
 

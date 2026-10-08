@@ -165,6 +165,7 @@ pub enum TtyTimer {
     Block,
     Key,
     Protocol,
+    Stop,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerRequest {
@@ -235,8 +236,11 @@ pub struct Tty {
     pub(crate) read_pending: bool,
     protocol_out: protocol::ProtocolQueue,
     protocol_generation: u64,
+    protocol_used: bool,
     protocol_stop: bool,
     protocol_close: bool,
+    protocol_stop_reply: bool,
+    protocol_stop_waiting: bool,
     read_limit: Option<usize>,
     read_paused: bool,
     /// Bytes that must reach the terminal before the restore when the tty
@@ -289,8 +293,11 @@ impl Tty {
             read_pending: false,
             protocol_out: protocol::ProtocolQueue::default(),
             protocol_generation: 0,
+            protocol_used: false,
             protocol_stop: false,
             protocol_close: false,
+            protocol_stop_reply: false,
+            protocol_stop_waiting: false,
             read_limit: None,
             read_paused: false,
             teardown: Vec::new(),
@@ -331,6 +338,8 @@ impl Tty {
         self.reset_protocol();
         self.protocol_stop = false;
         self.protocol_close = false;
+        self.protocol_stop_reply = false;
+        self.protocol_stop_waiting = false;
         self.read_paused = false;
         rmux_sys::fd::set_blocking(self.fd(), false);
         self.read_pending = true;
@@ -386,7 +395,7 @@ impl Tty {
         if !teardown.is_empty() {
             let _ = self.close_protocol(protocol::ProtocolTransaction::new(teardown).teardown());
         }
-        if !self.protocol_out.is_empty() {
+        if self.protocol_used {
             self.stop_after_protocol(state, opts);
             return;
         }
@@ -521,15 +530,12 @@ impl Tty {
     /// drain while reads fill the buffer; a short read means the fd is empty.
     /// `EAGAIN`/`EINTR` are not a closed tty.
     pub fn on_readable(&mut self) -> ReadOutcome {
-        // tty_stop_tty deletes event_in (tty.c:468): a stopped tty is never
-        // read. A ready event from the same poll can still arrive, and after
-        // the stop the fd is blocking again, so a read here could hang.
         if self.read_paused || !self.read_pending {
             return ReadOutcome::Bytes(0);
         }
         let mut bytes = [0; 4096];
         let mut total = 0;
-        let protocol = self.protocol_partial();
+        let protocol = !self.protocol_stop && self.protocol_partial();
         // Protocol bodies may exceed the ordinary-input budget. Do not read
         // even one trailing ordinary byte under that framing exemption.
         if protocol && self.in_buf.data().ends_with(b"\x1b\\") {
@@ -653,6 +659,15 @@ impl Tty {
             }
             TtyTimer::Key => self.keys.timer_fired(),
             TtyTimer::Protocol => self.keys.protocol_timer_fired(),
+            TtyTimer::Stop => {
+                if self.protocol_stop_waiting {
+                    self.in_buf = ByteBuffer::new();
+                    self.keys.reset_protocol();
+                    let _ = self.on_readable();
+                    self.protocol_stop_reply = false;
+                    self.finish_protocol_stop();
+                }
+            }
         }
     }
     pub fn send_requests(&mut self, now: SystemTime) {

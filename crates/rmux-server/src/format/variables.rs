@@ -177,6 +177,7 @@ pub const REGISTRY: &[&[u8]] = &[
     b"pane_top",
     b"pane_tsp",
     b"pane_tsp_epoch",
+    b"pane_tsp_view",
     b"pane_tty",
     b"pane_unseen_changes",
     b"pane_unzoomed_height",
@@ -791,6 +792,10 @@ pub const BUILTINS: &[Builtin] = &[
     },
     Builtin {
         key: b"pane_tsp_epoch",
+        kind: ValueKind::String,
+    },
+    Builtin {
+        key: b"pane_tsp_view",
         kind: ValueKind::String,
     },
     Builtin {
@@ -2171,6 +2176,10 @@ pub fn model_value(
                 .as_bytes(),
         ),
         b"pane_tsp_epoch" => FormatValue::Unsigned(pane?.tsp.as_ref().map_or(0, |tsp| tsp.epoch)),
+        b"pane_tsp_view" => {
+            pane?;
+            bytes(crate::tsp::contract::desired_view(server, context.pane?).as_bytes())
+        }
         b"pane_in_mode" => FormatValue::Unsigned(pane?.modes.len() as u64),
         b"pane_mode" => bytes(&pane?.modes.first()?.name),
         b"pane_floating_flag" => {
@@ -2483,7 +2492,7 @@ mod tests {
 
     #[test]
     fn registry_matches_all_pinned_names_and_types() {
-        assert_eq!(REGISTRY.len(), 217);
+        assert_eq!(REGISTRY.len(), 218);
         assert!(REGISTRY.windows(2).all(|keys| keys[0] < keys[1]));
         assert!(
             REGISTRY
@@ -2528,7 +2537,10 @@ mod tests {
         let pinned: Vec<_> = BUILTINS
             .iter()
             .filter(|builtin| {
-                !matches!(builtin.key, b"client_tsp" | b"pane_tsp" | b"pane_tsp_epoch")
+                !matches!(
+                    builtin.key,
+                    b"client_tsp" | b"pane_tsp" | b"pane_tsp_epoch" | b"pane_tsp_view"
+                )
             })
             .collect();
         assert_eq!(parsed.len(), pinned.len());
@@ -2540,7 +2552,12 @@ mod tests {
 
     #[test]
     fn broker_formats_are_read_only_string_builtins() {
-        for key in [b"client_tsp".as_slice(), b"pane_tsp", b"pane_tsp_epoch"] {
+        for key in [
+            b"client_tsp".as_slice(),
+            b"pane_tsp",
+            b"pane_tsp_epoch",
+            b"pane_tsp_view",
+        ] {
             assert!(REGISTRY.contains(&key));
             assert_eq!(
                 BUILTINS

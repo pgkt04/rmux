@@ -43,6 +43,9 @@ pub fn close_projection(server: &mut Server, id: ClientId) {
     };
     if let Some(mut projection) = c.tsp.projection.take() {
         if let Some(tty) = c.tty.as_mut() {
+            if !tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED) {
+                return;
+            }
             tty.cancel_protocol(projection.generation);
             tty.set_teardown(Vec::new());
             let mut close = projection.close().encode();
@@ -290,12 +293,14 @@ fn send_pending(
                 tty.update_mode(&mut server.tparm, mode, None);
             }
             let queued = tty.queue_protocol(transaction);
-            if queued.is_ok() && leave_alternate {
+            if queued.is_ok() && opening {
                 let outer = &c.tsp.projection.as_ref()?.outer;
                 let mut teardown =
                     WireMessage::json(b'x', &serde_json::json!({"id": outer, "keep": false}))
                         .encode();
-                teardown.extend(back_to_grid(tty));
+                if leave_alternate {
+                    teardown.extend(back_to_grid(tty));
+                }
                 tty.set_teardown(teardown);
             }
             Some(queued)

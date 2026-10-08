@@ -145,11 +145,13 @@ fn stop_drains_partial_apc_before_termios_restore() {
     tty.stop(&mut state, &TtyOptions::default());
     assert!(tty.protocol_stop);
     assert!(tty.wants_write());
-    assert!(!tty.wants_read());
+    assert!(tty.wants_read());
     assert_ne!(generation, tty.protocol_generation());
     emitted.extend(drain(&mut tty, 1));
     assert!(emitted.starts_with(b"\x1b_tsp;f;{}\x1b\\"));
     tty.finish_protocol_stop();
+    assert!(tty.protocol_stop);
+    assert_eq!(tty.resolve_da1(), None);
     assert!(!tty.protocol_stop);
     assert!(!tty.flags.contains(TtyFlags::STARTED));
 }
@@ -170,6 +172,37 @@ fn stop_sends_a_queued_teardown_before_the_restore() {
     assert!(emitted.starts_with(close), "{emitted:?}");
     assert!(emitted.len() > close.len(), "restore follows the teardown");
     assert!(!emitted.windows(4).any(|w| w == b"late" || w == b"sp;f"));
+}
+
+#[test]
+fn stop_timeout_releases_raw_tty_after_draining_late_reply() {
+    let (mut tty, master, mut state) = fixture();
+    let mut raw = tty.tio;
+    raw.make_tty_raw();
+    raw.set(tty.fd()).unwrap();
+    rmux_sys::fd::set_blocking(tty.fd(), false);
+    tty.flags.insert(TtyFlags::STARTED);
+    tty.close_protocol(
+        ProtocolTransaction::new(b"\x1b_tsp;x;{}\x1b\\".to_vec()).teardown(),
+    )
+    .unwrap();
+    tty.close(&mut state);
+    drain(&mut tty, 4096);
+    tty.finish_protocol_stop();
+    assert_eq!(TermiosState::get(tty.fd()).unwrap().lflag(), raw.lflag());
+    assert!(tty.pending_timers().any(|request| {
+        request.timer == TtyTimer::Stop && request.after == Some(Duration::from_secs(1))
+    }));
+    rmux_sys::fd::write(master.as_fd(), b"\x1b_tsp;e;{\"ev\":\"ack\"}\x1b\\").unwrap();
+    tty.on_timer(&mut state, TtyTimer::Stop);
+    assert!(!tty.flags.contains(TtyFlags::OPENED));
+    assert_ne!(TermiosState::get(tty.fd()).unwrap().lflag(), raw.lflag());
+    rmux_sys::fd::set_blocking(tty.fd(), false);
+    let mut pending = [0; 128];
+    assert_eq!(
+        rmux_sys::fd::read(tty.fd(), &mut pending).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
 }
 
 #[test]
