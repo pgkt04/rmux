@@ -236,8 +236,13 @@ fn viewer_eligible(server: &Server, pane: PaneId, id: ClientId) -> bool {
         && oy == 0
         && sx >= w.sx
         && sy >= w.sy
-        && !c.prompt.is_some()
-        && c.message.text.is_none()
+        && (!c.prompt.is_some()
+            || (!c.tsp.bar_failed
+                && c.tsp
+                    .hello()
+                    .is_some_and(|h| super::status_bar::supported(h) && h.kinds.contains("input"))))
+        && (c.message.text.is_none()
+            || (!c.tsp.bar_failed && c.tsp.hello().is_some_and(super::status_bar::supported)))
         && c.tsp
             .hello()
             .is_some_and(|h| h.v == 1 && h.credits > 0 && h.apc >= 64)
@@ -255,6 +260,12 @@ fn same_renderer_contract(a: Option<&DisplayContract>, b: Option<&DisplayContrac
         (None, None) => true,
         _ => false,
     }
+}
+
+fn same_stock_contract(a: Option<&DisplayContract>, b: &DisplayContract) -> bool {
+    a.is_some_and(|a| {
+        a.kinds == b.kinds && a.features == b.features && a.apc == b.apc && a.credits == b.credits
+    })
 }
 
 /// Close every projection of `pane`; returns the clients that had one.
@@ -458,7 +469,7 @@ fn recompute_stock(
         super::client_runtime::release_undrawn(server, pane);
         return;
     };
-    let changed = !same_renderer_contract(state.contract.as_ref(), Some(&contract));
+    let changed = !same_stock_contract(state.contract.as_ref(), &contract);
     state.contract = Some(contract);
     if changed {
         close_pane_projections(server, pane);
@@ -1284,6 +1295,59 @@ mod tests {
         assert_eq!(state(&server, pane).renderer, Renderer::Native);
         assert_eq!(state(&server, pane).epoch, epoch);
         assert_eq!(broker_messages(&replies(&mut server, pane)), 0);
+    }
+
+    #[test]
+    fn stock_resize_keeps_projection_and_reports_columns() {
+        let (mut server, pane, session) = fixture();
+        let viewer = client(&mut server, session, true, false);
+        stock_hello(&mut server, pane);
+        pane_send(
+            &mut server,
+            pane,
+            b'o',
+            json!({"id":"view","mode":"screen"}),
+        );
+        pane_send(
+            &mut server,
+            pane,
+            b'f',
+            json!({"sf":"view","s":1,"ops":[
+                ["add","main","view",null,{"id":"main","k":"col"}]
+            ]}),
+        );
+        recompute(&mut server);
+        let projection = server
+            .clients
+            .get(viewer)
+            .unwrap()
+            .tsp
+            .projection
+            .as_ref()
+            .unwrap();
+        let outer = projection.outer.clone();
+        let generation = projection.generation;
+        replies(&mut server, pane);
+        let window = server.panes.get(pane).unwrap().window;
+        server.windows.get_mut(window).unwrap().sx = 72;
+        server.panes.get_mut(pane).unwrap().sx = 72;
+        recompute(&mut server);
+        let projection = server
+            .clients
+            .get(viewer)
+            .unwrap()
+            .tsp
+            .projection
+            .as_ref()
+            .unwrap();
+        assert_eq!(projection.outer, outer);
+        assert_eq!(projection.generation, generation);
+        assert_eq!(state(&server, pane).contract.as_ref().unwrap().cols, 72);
+        assert!(
+            replies(&mut server, pane)
+                .iter()
+                .any(|message| { message["ev"] == "resize" && message["cols"] == 72 })
+        );
     }
 
     #[test]

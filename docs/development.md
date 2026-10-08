@@ -327,9 +327,12 @@ The rmux-specific `rmux-reprobe`/epoch/`rmux-ready` contract selects one rendere
 for every viewer of a pane: a plain or read-only plain attachment forces all
 viewers to ANSI; a client on another window does not. Native rendering requires
 only eligible TSP viewers and a sole visible or zoomed pane, without cropping,
-panning, floating panes, popups, pane modes, menus, or command prompts. Its one
-outer screen surface covers the tty, temporarily hiding rmux status, borders,
-titles, and scrollbars without changing saved options or layout. Prefix keys
+panning, floating panes, popups, pane modes, or menus. Client command prompts
+and messages remain native when the viewer supports the dock/status kinds
+(prompts also require `input`); other overlays retain the cell fallback. The
+outer surface hides cell status, borders, titles, and scrollbars without
+changing saved options or layout. Its native dock includes the status strip and
+active prompt/message; prefix keys
 remain rmux input. Opening a native projection clears cell mouse reporting
 before the surface open, letting Tern scroll locally without a resize. Cell UI
 restores its own mouse modes; stray native wheel reports do not enter copy mode.
@@ -353,6 +356,47 @@ Stock programs enter cell modes and menus immediately on the existing grid,
 without waiting for an ANSI repaint they cannot provide. Leaving the cell UI
 replays the retained native document; copy-mode commands never block later
 prefix keys such as detach.
+OSC 133 prompt zones do not end a registered reader while its captured process
+group still owns the pane PTY. omp's text user-message renderer emits these
+zones too; treating them as a shell handoff erased the hello and prevented
+split-to-native recovery. Actual foreground-group changes still retire the
+reader, and prompt markers without an identifiable live group keep the existing
+teardown behavior. Regression coverage uses a real PTY foreground program;
+real-omp prefix split/kill recovery preserves the PID/draft and epoch after
+the same prompt-zone sequence.
+Native prompts use generation-bound `rmux:prompt:*` input nodes and the existing
+tmux prompt engine. UTF-16 edit events validate pre-edit length and scalar
+boundaries, map the raw host cursor through C0/DEL sanitization, and resynchronize
+rejected edits. Stale IDs and app edits while the client prompt owns input are
+ignored. Host send uses normal Enter continuation; native undo keeps at most
+100 edits and raw text mutation resets it. Vi command mode and empty
+backspace-exit prompts are readonly so their keys use rmux's existing command
+engine. Messages retain readonly prompt focus; dock updates keep the input node
+in place without moving it, including multi-line status bars.
+Program hellos are forwarded unchanged: no feature is injected into generic
+apps, and prompts use raw keys when the program did not request host editing.
+Cancel/submit restore the canonical application focus without changing
+its document. Stock-native column-only changes update the contract and resize
+event in place; capability/limit changes still replace the projection.
+Exact outgoing app `hello` is cached per tty generation so retained-pane
+projection replacements skip redundant queries/DA1. Each replacement still
+closes/opens and replays the retained document; no unsupported hidden-surface
+cache is implied.
+Replay serialization reads canonical nodes/properties directly rather than
+allocating a temporary JSON document. One topology pass prepares routing and
+error coverage; root properties, child/settled order, focus/suspension, and all
+five elapsed-age paths retain their semantics. Blob discovery and the client
+send path borrow retained state instead of cloning properties, confirmed blob
+sets, and open metadata on each tick. Chunk buffers reserve their final payload
+capacity only when the tty drains them; queued replay revisions remain immutable.
+
+A release preparation benchmark with 4,100 retained nodes dropped from 6.9 to
+2.6 ms and about 23.4 to 6.1 MB of allocated bytes; 16,388 nodes dropped from
+52.2 to 23.4 ms and 93.5 to 24.3 MB. Encoded frame sizes were unchanged. Matched
+real-omp PTY switch smoke for a small document stayed about 1.7 ms to first
+frame before/after: these optimizations target large replay preparation, not
+Tern rendering time or reduced wire payload. Native rename, split/zoom, and
+500 rapid resizes retained the app/draft without protocol errors.
 Native tty teardown closes the outer surface and restores terminal modes before
 a final owned DA1 barrier. rmux keeps raw input active to consume delayed TSP
 replies and delays `MSG_EXITED` until the barrier completes. If the terminal
@@ -368,13 +412,17 @@ The extension uses omp's public widget factory to obtain the live TUI and
 stops/starts only that UI to repeat
 the stock program's `hello`, never restarting the agent or changing sessions.
 A read-only `rmux -C` observer with `no-output,ignore-size` subscribes to
-`pane_tsp_view`. A generation-bound managed timer reconciles the latest desired
-renderer with the actual UI every 250 ms, without polling the server. It ignores
-detached/probing states, waits for `tspProbePending` to settle, and does not
-restart while `process.stdin.isPaused()` indicates an external UI owns the tty.
-This also retries a mismatched completed negotiation even when the control
-subscription's desired value is unchanged. Timers are disposed on session
-replacement, shutdown, and observer completion/failure.
+`pane_tsp_view`. Those subscriptions are reevaluated immediately after broker
+recomputation; unrelated monitor formats keep their normal periodic cadence.
+The plugin coalesces subscription changes and TUI starts into a managed one-shot
+reconciliation. It ignores detached/pending desired views, settles native-to-ANSI
+changes for 150 ms, and waits for negotiation/editor ownership with a 50 ms
+one-shot. Persistent mismatch gets at most three reprobes with 100/250/1000 ms
+backoff, then a warning; transient pending/detached states do not reset that
+budget. Matched renderers have no background reconciliation timer.
+It does not restart while `process.stdin.isPaused()` indicates an external UI
+owns the tty; lookup/reprobe completions are generation-bound. Listeners/timers
+are disposed on session replacement, shutdown, and observer completion/failure.
 `/terminal-reprobe` repeats negotiation manually. The extension leaves the
 caller environment unchanged, honors startup `PI_TUI_NATIVE=0`, and terminates
 its observer on session shutdown. No omp source changes or private-field
@@ -388,6 +436,29 @@ Real external-editor acceptance reproduced the old plugin reclaiming input
 while the editor was live and confirmed the corrected plugin waits for exit.
 A controlled transient split during hello negotiation reproduced `ansi/native`
 actual/desired mismatch before and `native/native` convergence after the fix.
+Real omp 18.8.4 PTY acceptance additionally covers native window/session/pane
+rename prompts, UTF-16 prompt edits, cancel and colon commands without replacing
+the outer surface, 20 native window switches without additional hello queries,
+and prefix swap/break-pane, split/zoom/unzoom, and mixed/plain viewer removal
+returning to native. A 2,000-resize stress run (including 1x1, status messages,
+and a rename prompt) retained the app PID and ended with a live native document
+and no protocol errors; it did not reproduce the reported server crash.
+The installed rsttyd browser terminal does not advertise TSP: browser smoke
+verified its real ANSI rename prompt; native rendering was verified with the
+protocol-aware PTY surface simulator, not a visual Tern renderer.
+Post-review real-omp acceptance also verified newline/tab paste cursor mapping,
+host undo/submit, vi command mode after the escape timer, message-over-prompt
+ownership, and a transient split/zoom without restarting the TUI. A further
+2,000-resize run kept the server/native document alive with no TUI restarts.
+Deterministic observer runtime smoke verified bounded recovery across exhausted,
+pending/detached, and manual-reprobe states.
+
+The executable installs panic/fatal reporting for both process roles before
+starting the client/internal server. Reports go to an owned state directory
+under absolute `XDG_STATE_HOME` or `$HOME/.local/state`, with 0600 files and forced
+backtraces independent of `RUST_BACKTRACE`/`-v`. No env/terminal-content dump is
+included. Fatal diagnostics are saved before debug logging. Release builds
+keep line tables; OS-signal/OOM termination needs OS diagnostics/core dumps.
 
 Transitions hold pane input until matching ready, with a 64 KiB admission bound
 and tty backpressure. A missing completion after five seconds closes projections

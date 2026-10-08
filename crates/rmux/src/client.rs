@@ -202,14 +202,17 @@ fn start_server(
     activation_listener: Option<OwnedFd>,
 ) -> io::Result<OwnedFd> {
     if flags.contains(ClientFlags::NOFORK) {
-        let code = server_start(Startup {
+        let code = match server_start(Startup {
             socket_path: path.to_vec(),
             flags,
             initial_peer: None,
             lock,
             activation_listener,
             config_files: cfg_files.to_vec(),
-        })?;
+        }) {
+            Ok(code) => code,
+            Err(e) => fatal!("server failed: {e}"),
+        };
         std::process::exit(code);
     }
     // sd_listen_fds(0) sees a different PID after forking: only -D adopts activation.

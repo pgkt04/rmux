@@ -115,20 +115,22 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
             handle.0
         );
         let credits = c.tsp.hello().map_or(1, |h| h.credits.min(2));
-        let token = c.tsp.request(RequestOwner::Replay {
-            pane,
-            projection: generation,
-        });
-        if let Some(tty) = c.tty.as_mut() {
-            if tty
-                .queue_da1(
+        if c.tsp.projection_hello.as_ref() != Some(&hello) {
+            let token = c.tsp.request(RequestOwner::Replay {
+                pane,
+                projection: generation,
+            });
+            if c.tty.as_mut().is_none_or(|tty| {
+                tty.queue_da1(
                     Da1Owner::Token(token),
                     ProtocolTransaction::new(WireMessage::json(b'q', &hello).encode()),
                 )
                 .is_err()
-            {
+            }) {
+                c.tsp.requests.pop_back();
                 return;
             }
+            c.tsp.projection_hello = Some(hello);
         }
         let mut projection = Projection::new(pane, logical, outer, generation, credits);
         projection.inline = inline;
@@ -195,11 +197,6 @@ fn send_pending(
         .get(id)
         .map(|c| c.tsp.projection_generation)
         .unwrap_or(0);
-    let confirmed = server
-        .clients
-        .get(id)
-        .map(|c| c.tsp.confirmed_blobs.clone())
-        .unwrap_or_default();
     let outcome = {
         let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
             return;
@@ -207,19 +204,20 @@ fn send_pending(
         let Some(surface) = state.surfaces.get(handle) else {
             return;
         };
-        let mut open = surface.open.clone();
-        if state.program_exited {
-            open["listen"] = false.into();
-        }
         let now = now_ms();
-        let Some(projection) = server
-            .clients
-            .get_mut(id)
-            .and_then(|c| c.tsp.projection.as_mut())
-        else {
+        let Some(client) = server.clients.get_mut(id) else {
             return;
         };
-        projection.prepare_send(&surface.document, &state.blobs, &confirmed, &open, now)
+        let Some(projection) = client.tsp.projection.as_mut() else {
+            return;
+        };
+        projection.prepare_send(
+            &surface.document,
+            &state.blobs,
+            &client.tsp.confirmed_blobs,
+            &surface.open,
+            now,
+        )
     };
     let prepared = match outcome {
         Ok(prepared) => prepared,

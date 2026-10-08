@@ -1,11 +1,14 @@
 // Ported from tmux log.c @ 8f25579c
 //! Debug log file, `log_debug`, `fatal` and `fatalx`.
 
+use std::backtrace::Backtrace;
 use std::fmt;
 use std::fs::File;
 use std::io::Write;
-use std::sync::Mutex;
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::vis::{VisFlags, strvis};
@@ -16,6 +19,108 @@ pub struct LogLevel(pub u32);
 
 static LEVEL: AtomicU32 = AtomicU32::new(0);
 static FILE: Mutex<Option<File>> = Mutex::new(None);
+
+struct CrashContext {
+    directory: PathBuf,
+    role: &'static str,
+}
+
+static CRASH: OnceLock<CrashContext> = OnceLock::new();
+
+pub fn init_crash_reporting(role: &'static str) {
+    let state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .filter(|path| path.is_absolute())
+                .map(|path| path.join(".local/state"))
+        });
+    let Some(state) = state else {
+        return;
+    };
+    if CRASH
+        .set(CrashContext {
+            directory: state.join("rmux"),
+            role,
+        })
+        .is_err()
+    {
+        return;
+    }
+    let previous = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        crash_report(format_args!("{info}"));
+        previous(info);
+    }));
+}
+
+fn crash_report(reason: fmt::Arguments<'_>) {
+    let Some(context) = CRASH.get() else {
+        return;
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let path = context.directory.join(format!(
+        "rmux-crash-{}-{}-{}.log",
+        context.role,
+        std::process::id(),
+        now.as_nanos()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&context.directory)?;
+        let metadata = std::fs::symlink_metadata(&context.directory)?;
+        if !metadata.is_dir() || metadata.uid() != rmux_sys::proc::getuid().0 {
+            return Err(std::io::Error::other(
+                "crash directory is not an owned directory",
+            ));
+        }
+        let mut report = File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        writeln!(
+            report,
+            "rmux {} {} pid {} at {}.{:06}",
+            env!("CARGO_PKG_VERSION"),
+            context.role,
+            std::process::id(),
+            now.as_secs(),
+            now.subsec_micros()
+        )?;
+        writeln!(report, "executable: {:?}", std::env::current_exe())?;
+        writeln!(report, "working directory: {:?}", std::env::current_dir())?;
+        writeln!(
+            report,
+            "{reason}\nbacktrace:\n{}",
+            Backtrace::force_capture()
+        )?;
+        report.sync_all()
+    })();
+    match result {
+        Ok(()) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "rmux: crash report saved to {}",
+                path.display()
+            );
+        }
+        Err(error) => {
+            let _ = writeln!(
+                std::io::stderr().lock(),
+                "rmux: could not save crash report to {}: {error}\n{reason}\n{}",
+                path.display(),
+                Backtrace::force_capture()
+            );
+        }
+    }
+}
 
 fn file() -> std::sync::MutexGuard<'static, Option<File>> {
     FILE.lock().unwrap_or_else(|e| e.into_inner())
@@ -119,12 +224,14 @@ pub fn fatal_with(errno: i32, args: fmt::Arguments<'_>) -> ! {
     prefix.extend_from_slice(&rmux_sys::strerror(errno));
     prefix.extend_from_slice(b": ");
     prefix.truncate(255);
+    crash_report(format_args!("{}{args}", String::from_utf8_lossy(&prefix)));
     write(&String::from_utf8_lossy(&prefix), args);
     std::process::exit(1)
 }
 
 /// `fatalx`
 pub fn fatalx_with(args: fmt::Arguments<'_>) -> ! {
+    crash_report(format_args!("fatal: {args}"));
     write("fatal: ", args);
     std::process::exit(1)
 }

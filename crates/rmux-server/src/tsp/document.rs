@@ -1,4 +1,6 @@
 use super::wire::{Frame, KINDS, TEXT_KINDS};
+use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
+use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap};
 
@@ -430,6 +432,51 @@ impl TspDocument {
         }
         out
     }
+    pub(crate) fn replay_frame(
+        &self,
+        outer: &str,
+        sequence: u64,
+        now_ms: u64,
+        before: &[Value],
+        after: &[Value],
+    ) -> Vec<u8> {
+        serde_json::to_vec(&ReplayFrame {
+            document: self,
+            outer,
+            sequence,
+            now_ms,
+            before,
+            after,
+        })
+        .expect("canonical replay frame is serializable")
+    }
+
+    pub(crate) fn replay_topology(
+        &self,
+        outer: &str,
+    ) -> (HashMap<String, String>, BTreeSet<String>, usize) {
+        let root = &self.nodes[&self.surface];
+        let mut parents = HashMap::with_capacity(self.nodes.len().saturating_sub(1));
+        for node in self.nodes.values() {
+            if let Some(parent) = &node.parent {
+                parents.insert(
+                    node.id.clone(),
+                    if parent == &self.surface {
+                        outer.to_owned()
+                    } else {
+                        parent.clone()
+                    },
+                );
+            }
+        }
+        let keys = root.props.keys().cloned().collect();
+        let count = usize::from(!root.props.is_empty())
+            + root.children.len()
+            + self.settled.len()
+            + usize::from(self.focus.is_some())
+            + usize::from(self.suspended);
+        (parents, keys, count)
+    }
     pub fn set_palette(&mut self, palette: Value) -> Result<(), String> {
         let p = palette.as_object().ok_or("palette must be object")?;
         for key in ["dark", "light"] {
@@ -554,9 +601,193 @@ impl TspDocument {
     pub fn blob_references(&self) -> BTreeSet<String> {
         let mut out = BTreeSet::new();
         for n in self.nodes.values() {
-            collect_blobs(&Value::Object(n.props.clone()), &mut out);
+            for (key, value) in &n.props {
+                if matches!(key.as_str(), "blob" | "sha256") {
+                    if let Some(id) = value.as_str() {
+                        out.insert(id.to_ascii_lowercase());
+                    }
+                }
+                collect_blobs(value, &mut out);
+            }
         }
         out
+    }
+}
+
+struct ReplayFrame<'a> {
+    document: &'a TspDocument,
+    outer: &'a str,
+    sequence: u64,
+    now_ms: u64,
+    before: &'a [Value],
+    after: &'a [Value],
+}
+
+impl Serialize for ReplayFrame<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut frame = serializer.serialize_struct("Frame", 3)?;
+        frame.serialize_field("sf", self.outer)?;
+        frame.serialize_field("s", &self.sequence)?;
+        frame.serialize_field("ops", &ReplayOperations(self))?;
+        frame.end()
+    }
+}
+
+struct ReplayOperations<'a>(&'a ReplayFrame<'a>);
+
+impl Serialize for ReplayOperations<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let frame = self.0;
+        let document = frame.document;
+        let root = &document.nodes[&document.surface];
+        let mut ops = serializer.serialize_seq(None)?;
+        for op in frame.before {
+            ops.serialize_element(op)?;
+        }
+        if !root.props.is_empty() {
+            ops.serialize_element(&(
+                "set",
+                frame.outer,
+                ReplayProps {
+                    node: root,
+                    props: &root.props,
+                    path: "",
+                    now_ms: frame.now_ms,
+                },
+            ))?;
+        }
+        for id in &root.children {
+            ops.serialize_element(&(
+                "add",
+                id,
+                frame.outer,
+                Option::<()>::None,
+                ReplayNode {
+                    document,
+                    node: &document.nodes[id],
+                    now_ms: frame.now_ms,
+                },
+            ))?;
+        }
+        for id in &document.settled {
+            let reference = if id == &document.surface {
+                frame.outer
+            } else {
+                id.as_str()
+            };
+            ops.serialize_element(&("settle", reference))?;
+        }
+        if let Some(id) = &document.focus {
+            let reference = if id == &document.surface {
+                frame.outer
+            } else {
+                id.as_str()
+            };
+            ops.serialize_element(&("focus", reference))?;
+        }
+        if document.suspended {
+            ops.serialize_element(&["suspend"])?;
+        }
+        for op in frame.after {
+            ops.serialize_element(op)?;
+        }
+        ops.end()
+    }
+}
+
+struct ReplayNode<'a> {
+    document: &'a TspDocument,
+    node: &'a Node,
+    now_ms: u64,
+}
+
+impl Serialize for ReplayNode<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut node = serializer.serialize_map(Some(
+            2 + usize::from(!self.node.props.is_empty())
+                + usize::from(!self.node.children.is_empty()),
+        ))?;
+        node.serialize_entry("id", &self.node.id)?;
+        node.serialize_entry("k", &self.node.kind)?;
+        if !self.node.props.is_empty() {
+            node.serialize_entry(
+                "p",
+                &ReplayProps {
+                    node: self.node,
+                    props: &self.node.props,
+                    path: "",
+                    now_ms: self.now_ms,
+                },
+            )?;
+        }
+        if !self.node.children.is_empty() {
+            node.serialize_entry("c", &ReplayChildren(self))?;
+        }
+        node.end()
+    }
+}
+
+struct ReplayChildren<'a>(&'a ReplayNode<'a>);
+
+impl Serialize for ReplayChildren<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut children = serializer.serialize_seq(Some(self.0.node.children.len()))?;
+        for id in &self.0.node.children {
+            children.serialize_element(&ReplayNode {
+                document: self.0.document,
+                node: &self.0.document.nodes[id],
+                now_ms: self.0.now_ms,
+            })?;
+        }
+        children.end()
+    }
+}
+
+struct ReplayProps<'a> {
+    node: &'a Node,
+    props: &'a Map<String, Value>,
+    path: &'static str,
+    now_ms: u64,
+}
+
+impl Serialize for ReplayProps<'_> {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        let mut props = serializer.serialize_map(Some(self.props.len()))?;
+        for (key, value) in self.props {
+            let path = match (self.path, key.as_str()) {
+                ("", "age") => Some("age"),
+                ("", "stats") => Some("stats"),
+                ("", "tool") => Some("tool"),
+                ("", "retry") => Some("retry"),
+                ("stats", "age") => Some("stats.age"),
+                ("stats", "tool") => Some("stats.tool"),
+                ("tool", "age") => Some("tool.age"),
+                ("retry", "age") => Some("retry.age"),
+                ("stats.tool", "age") => Some("stats.tool.age"),
+                _ => None,
+            };
+            if let Some(path) = path {
+                if let (Some(base), Some(age)) = (self.node.ages.get(path), value.as_f64()) {
+                    let age = age + self.now_ms.saturating_sub(*base) as f64;
+                    props.serialize_entry(key, &age)?;
+                    continue;
+                }
+                if let Some(nested) = value.as_object() {
+                    props.serialize_entry(
+                        key,
+                        &ReplayProps {
+                            node: self.node,
+                            props: nested,
+                            path,
+                            now_ms: self.now_ms,
+                        },
+                    )?;
+                    continue;
+                }
+            }
+            props.serialize_entry(key, value)?;
+        }
+        props.end()
     }
 }
 fn collect_blobs(v: &Value, out: &mut BTreeSet<String>) {
@@ -625,6 +856,102 @@ fn utf16_byte(s: &str, offset: u64) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn borrowed_replay_preserves_ages_payloads_and_replacement_state() {
+        let mut document = TspDocument::new("logical");
+        let initial = Frame {
+            sf: "logical".into(),
+            s: 1,
+            ops: vec![
+                json!(["set", "logical", {"title":"logical", "stats":{"age":10,"tool":{"age":20}},"age":-500}]),
+                json!(["add","main","logical",null,{"id":"main","k":"col","c":[
+                    {"id":"entry","k":"elapsed","p":{"text":"escaped \\\" 😀\nlogical", "age":-20,"tool":{"age":30},"retry":{"age":40},"stats":{"age":50,"tool":{"age":60},"unknown":{"age":70}},"sha256":"ABC","nested":[{"blob":"DEF"}]}}
+                ]}]),
+                json!(["add","dock","logical",null,{"id":"dock","k":"col","c":[{"id":"draft","k":"editor","p":{"text":"unsent"}}]}]),
+                json!(["settle", "entry"]),
+                json!(["settle", "logical"]),
+                json!(["focus", "draft"]),
+                json!(["suspend"]),
+            ],
+        };
+        assert!(
+            document
+                .apply_frame(&initial, 100)
+                .unwrap()
+                .errors
+                .is_empty()
+        );
+        for now in [50, 300] {
+            let body = document.replay_frame("outer", 9, now, &[], &[]);
+            let frame: Frame = serde_json::from_slice(&body).unwrap();
+            let mut view = TspDocument::new("outer");
+            assert!(view.apply_frame(&frame, now).unwrap().errors.is_empty());
+            let delta = now.saturating_sub(100) as f64;
+            let entry = view.get("entry", now).unwrap();
+            assert_eq!(entry["p"]["age"], json!(-20.0 + delta));
+            assert_eq!(entry["p"]["tool"]["age"], json!(30.0 + delta));
+            assert_eq!(entry["p"]["retry"]["age"], json!(40.0 + delta));
+            assert_eq!(entry["p"]["stats"]["age"], json!(50.0 + delta));
+            assert_eq!(entry["p"]["stats"]["tool"]["age"], json!(60.0 + delta));
+            assert_eq!(entry["p"]["stats"]["unknown"]["age"], 70);
+            assert_eq!(entry["p"]["text"], initial.ops[1][4]["c"][0]["p"]["text"]);
+            assert_eq!(view.snapshot(now)["p"]["title"], "logical");
+            let root = view.snapshot(now);
+            assert_eq!(root["p"]["age"], json!(-500.0 + delta));
+            assert_eq!(root["p"]["stats"]["age"], json!(10.0 + delta));
+            assert_eq!(root["p"]["stats"]["tool"]["age"], json!(20.0 + delta));
+            assert_eq!(view.focus.as_deref(), Some("draft"));
+            assert!(
+                view.suspended && view.settled.contains("entry") && view.settled.contains("outer")
+            );
+        }
+        assert_eq!(
+            document.blob_references(),
+            BTreeSet::from(["abc".into(), "def".into()])
+        );
+        document
+            .apply_frame(
+                &Frame {
+                    sf: "logical".into(),
+                    s: 2,
+                    ops: vec![
+                        json!(["del", "main"]),
+                        json!(["set","draft",{"text":"edited"}]),
+                        json!(["resume"]),
+                        json!(["focus", "logical"]),
+                    ],
+                },
+                400,
+            )
+            .unwrap();
+        let reset = [
+            json!(["del", "obsolete"]),
+            json!(["set","outer",{"old":null}]),
+        ];
+        let suffix = [json!(["focus", "draft"])];
+        let frame: Frame =
+            serde_json::from_slice(&document.replay_frame("outer", 10, 500, &reset, &suffix))
+                .unwrap();
+        let mut view = TspDocument::new("outer");
+        view.apply_frame(
+            &Frame {
+                sf: "outer".into(),
+                s: 1,
+                ops: vec![
+                    json!(["add","obsolete","outer",null,{"id":"obsolete","k":"text"}]),
+                    json!(["set","outer",{"old":true}]),
+                ],
+            },
+            0,
+        )
+        .unwrap();
+        assert!(view.apply_frame(&frame, 500).unwrap().errors.is_empty());
+        assert!(!view.has("obsolete") && !view.has("main") && !view.suspended);
+        assert_eq!(view.get("draft", 500).unwrap()["p"]["text"], "edited");
+        assert!(view.snapshot(500)["p"].get("old").is_none());
+        assert_eq!(view.focus.as_deref(), Some("draft"));
+    }
     #[test]
     fn limits_styles_and_age_bases() {
         let mut d = TspDocument::new("s");

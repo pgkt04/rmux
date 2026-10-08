@@ -65,6 +65,7 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
     c.tsp.failed_logical = None;
     c.tsp.diagnostic = None;
     c.tsp.visible = true;
+    c.tsp.projection_hello = None;
     let token = c.tsp.request(RequestOwner::Detection);
     let query = WireMessage::json(b'q', &json!({"q":"hello","v":[1],"app":"rmux"}));
     if tty
@@ -247,6 +248,7 @@ pub fn client_protocol_fault(server: &mut Server, client: ClientId) {
     broker::close_projection(server, client);
     if let Some(c) = server.clients.get_mut(client) {
         c.tsp.capability = Capability::Unsupported;
+        c.tsp.projection_hello = None;
         c.tsp.confirmed_blobs.clear();
         for request in &mut c.tsp.requests {
             request.completed = true;
@@ -280,6 +282,7 @@ fn rebuild_projection(server: &mut Server, client: ClientId) {
     c.tsp.rebuild_attempted = true;
     c.tsp.failed_logical = Some(identity);
     projection.failed = true;
+    c.tsp.projection_hello = None;
     broker::close_projection(server, client);
     broker::project_pending(server, client);
 }
@@ -663,6 +666,35 @@ fn client_event(
     {
         return;
     }
+    if matches!(name, "edit" | "send" | "undo")
+        && !server
+            .panes
+            .get(pane)
+            .and_then(|p| p.tsp.as_ref())
+            .and_then(|state| state.program_hello.get("features"))
+            .and_then(Value::as_array)
+            .is_some_and(|features| features.iter().any(|feature| feature == name))
+    {
+        return;
+    }
+    if let Some(c) = server.clients.get(client) {
+        if c.prompt.is_some() {
+            let prompt_id = format!("rmux:prompt:{}", c.prompt.generation());
+            if matches!(name, "edit" | "send" | "undo")
+                && value.get("id").and_then(Value::as_str) == Some(&prompt_id)
+            {
+                crate::ui::status::status_prompt_native_event(server, client, name, value);
+            }
+            return;
+        }
+    }
+    if value.get("id").and_then(Value::as_str).is_some_and(|id| {
+        id == super::status_bar::BAR_ID
+            || id.starts_with("rmux:bar:")
+            || id.starts_with("rmux:prompt:")
+    }) {
+        return;
+    }
     let Some(routed) = server
         .clients
         .get(client)
@@ -734,7 +766,7 @@ mod tests {
         let mut state = PaneTspState {
             registered: true,
             renderer: Renderer::Native,
-            program_hello: json!({"q":"hello","v":[1],"features":[crate::tsp::wire::BROKER_FEATURE]}),
+            program_hello: json!({"q":"hello","v":[1],"features":[crate::tsp::wire::BROKER_FEATURE,"edit"]}),
             ..PaneTspState::default()
         };
         let id = state

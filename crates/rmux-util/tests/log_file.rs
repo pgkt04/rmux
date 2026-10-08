@@ -13,6 +13,8 @@ fn run_child(scenario: &str, dir: &Path) -> std::process::Output {
         .args(["--exact", "child_hook", "--nocapture", "--test-threads=1"])
         .env("RMUX_LOG_CHILD", scenario)
         .current_dir(dir)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env_remove("RUST_BACKTRACE")
         .output()
         .unwrap()
 }
@@ -104,8 +106,14 @@ fn child_hook() {
             log::open("server");
             rmux_util::fatalx!("bad {}", "thing");
         }
-        "fatal-silent" => {
-            rmux_util::fatalx!("nothing open");
+        "panic-report" => {
+            log::init_crash_reporting("server");
+            panic!("resize invariant failed");
+        }
+        "fatal-report" => {
+            log::init_crash_reporting("server");
+            let _ = std::fs::File::open("/nonexistent/rmux-fatal-test");
+            rmux_util::fatal!("resize failed");
         }
         other => panic!("unknown scenario {other}"),
     }
@@ -242,12 +250,66 @@ fn fatalx_exits_one_with_last_line() {
 }
 
 #[test]
-fn fatal_without_file_is_silent() {
+fn crash_reports_persist_without_verbose_logging_or_backtrace_env() {
+    use std::os::unix::fs::PermissionsExt;
+
+    for (scenario, reason) in [
+        ("panic-report", "resize invariant failed"),
+        ("fatal-report", "resize failed"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_child(scenario, dir.path());
+        assert!(!out.status.success());
+        let reports = dir.path().join("state/rmux");
+        let paths: Vec<_> = std::fs::read_dir(&reports)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(paths.len(), 1);
+        let report = std::fs::read_to_string(&paths[0]).unwrap();
+        assert!(report.contains(reason), "{report}");
+        assert!(
+            report.contains("child_hook"),
+            "backtrace missing caller: {report}"
+        );
+        assert_eq!(
+            std::fs::metadata(&paths[0]).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&reports).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert!(log_files(dir.path(), "server").is_empty());
+    }
+}
+
+#[test]
+fn fatal_report_survives_unwritable_stderr_without_recursive_panics() {
     let dir = tempfile::tempdir().unwrap();
-    let out = run_child("fatal-silent", dir.path());
-    assert_eq!(out.status.code(), Some(1));
-    assert!(out.stderr.is_empty());
-    assert!(log_files(dir.path(), "server").is_empty());
+    let output = dir.path().join("readonly-stderr");
+    std::fs::write(&output, b"").unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_hook", "--nocapture", "--test-threads=1"])
+        .env("RMUX_LOG_CHILD", "fatal-report")
+        .env("XDG_STATE_HOME", dir.path().join("state"))
+        .env_remove("RUST_BACKTRACE")
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::fs::File::open(output).unwrap())
+        .status()
+        .unwrap();
+    assert_eq!(status.code(), Some(1));
+    let reports: Vec<_> = std::fs::read_dir(dir.path().join("state/rmux"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(reports.len(), 1);
+    assert!(
+        std::fs::read_to_string(&reports[0])
+            .unwrap()
+            .contains("resize failed")
+    );
 }
 
 #[test]

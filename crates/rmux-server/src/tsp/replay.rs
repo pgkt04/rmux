@@ -137,6 +137,16 @@ pub fn plan_with_ops(
     ops: Vec<Value>,
 ) -> Result<ReplayPlan, ReplayError> {
     let frame = frame_message(outer_id, sequence, ops);
+    plan_with_frame(document, blobs, confirmed, outer_id, frame)
+}
+
+pub(crate) fn plan_with_frame(
+    document: &TspDocument,
+    blobs: &TspBlobStore,
+    confirmed: &std::collections::BTreeSet<String>,
+    outer_id: &str,
+    frame: WireMessage,
+) -> Result<ReplayPlan, ReplayError> {
     if frame.body.len() > JOINED_LIMIT {
         return Err(ReplayError::FullFrameTooLarge {
             bytes: frame.body.len(),
@@ -198,8 +208,12 @@ pub fn blob_message(blob: &ReplayBlob) -> WireMessage {
     }
 }
 
-/// Supplies logical surface metadata without copying daemon-only open parameters.
-pub fn set_open_metadata(messages: &mut [WireMessage], logical_open: &Value) {
+/// Copies public open metadata, not daemon-only parameters, and sets the outer mode.
+pub(crate) fn set_open_metadata_and_mode(
+    messages: &mut [WireMessage],
+    logical_open: &Value,
+    mode: &str,
+) {
     let Some(open) = messages.iter_mut().find(|m| m.verb == b'o') else {
         return;
     };
@@ -209,14 +223,6 @@ pub fn set_open_metadata(messages: &mut [WireMessage], logical_open: &Value) {
             value[key] = v.clone();
         }
     }
-    open.body = serde_json::to_vec(&value).expect("JSON value serialization");
-}
-
-pub fn set_open_mode(messages: &mut [WireMessage], mode: &str) {
-    let Some(open) = messages.iter_mut().find(|m| m.verb == b'o') else {
-        return;
-    };
-    let mut value: Value = serde_json::from_slice(&open.body).expect("generated open JSON");
     value["mode"] = mode.into();
     open.body = serde_json::to_vec(&value).expect("JSON value serialization");
 }
@@ -367,6 +373,7 @@ impl ReplayPiece {
                 start,
                 end,
             } = chunk;
+            header.reserve_exact(end - start + 2);
             match &self {
                 Self::Message { plan, index } => {
                     header.extend_from_slice(&plan.messages[*index].body[start..end])
@@ -466,13 +473,15 @@ mod tests {
         ));
         let d = TspDocument::new("s");
         let mut messages = snapshot(&d, "o", 1, 0).unwrap();
-        set_open_metadata(
+        set_open_metadata_and_mode(
             &mut messages,
             &json!({"title":"title","listen":false,"key":"private","buf":"alt","seeded":true}),
+            "inline",
         );
         let o: Value = serde_json::from_slice(&messages[0].body).unwrap();
         assert_eq!(o["listen"], false);
         assert_eq!(o["title"], "title");
+        assert_eq!(o["mode"], "inline");
         assert!(o.get("key").is_none());
     }
     #[test]

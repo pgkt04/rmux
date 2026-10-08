@@ -140,6 +140,7 @@ pub struct MonitorSet {
     pub callback: MonitorCallback,
     items: BTreeMap<ByteString, MonitorItem>,
     pub timer_pending: bool,
+    pub(crate) has_tsp_view: bool,
     generation: u32,
     next_serial: u64,
 }
@@ -225,6 +226,7 @@ fn create(
         callback,
         items: BTreeMap::new(),
         timer_pending: false,
+        has_tsp_view: false,
         generation: 0,
         next_serial: 0,
     });
@@ -291,6 +293,7 @@ pub fn monitor_add(
             fire_time: 0,
         },
     );
+    set.has_tsp_view = set.items.values().any(|item| tsp_format(&item.spec));
     if !set.timer_pending {
         set.timer_pending = true;
         runtime.timer(id, true);
@@ -306,6 +309,7 @@ pub fn monitor_remove(
 ) -> Result<(), ModelError> {
     let set = server.monitors.get_mut(id).ok_or(ModelError::StaleId)?;
     set.items.remove(cstr(name));
+    set.has_tsp_view = set.items.values().any(|item| tsp_format(&item.spec));
     if set.items.is_empty() {
         set.timer_pending = false;
         runtime.timer(id, false);
@@ -404,13 +408,13 @@ fn next_item(
     server: &Server,
     id: MonitorSetId,
     previous: Option<&[u8]>,
-    kind: impl Fn(MonitorType) -> bool,
+    selected: impl Fn(&MonitorSpec) -> bool,
 ) -> Option<(MonitorSpec, u64)> {
     let set = server.monitors.get(id)?;
     set.items
         .iter()
         .find(|(name, item)| {
-            previous.is_none_or(|previous| name.as_bytes() > previous) && kind(item.spec.kind)
+            previous.is_none_or(|previous| name.as_bytes() > previous) && selected(&item.spec)
         })
         .map(|(_, item)| (item.spec.clone(), item.serial))
 }
@@ -432,7 +436,12 @@ fn scan_item(
     );
 }
 
-fn scan(server: &mut Server, id: MonitorSetId, runtime: &mut impl MonitorRuntime) {
+fn scan(
+    server: &mut Server,
+    id: MonitorSetId,
+    runtime: &mut impl MonitorRuntime,
+    selected: impl Fn(&MonitorSpec) -> bool,
+) {
     let Some(set) = server.monitors.get(id) else {
         return;
     };
@@ -450,7 +459,7 @@ fn scan(server: &mut Server, id: MonitorSetId, runtime: &mut impl MonitorRuntime
         server,
         id,
         previous.as_deref().map(|v| v.as_slice()),
-        |kind| kind == MonitorType::Session,
+        |spec| selected(spec) && spec.kind == MonitorType::Session,
     ) {
         scan_item(server, id, &spec, serial, 0, context, None, runtime);
         previous = Some(spec.name);
@@ -460,7 +469,7 @@ fn scan(server: &mut Server, id: MonitorSetId, runtime: &mut impl MonitorRuntime
         server,
         id,
         previous.as_deref().map(|v| v.as_slice()),
-        |kind| matches!(kind, MonitorType::Pane | MonitorType::Window),
+        |spec| selected(spec) && matches!(spec.kind, MonitorType::Pane | MonitorType::Window),
     ) {
         let pane = if spec.kind == MonitorType::Pane {
             spec.target
@@ -502,7 +511,7 @@ fn scan(server: &mut Server, id: MonitorSetId, runtime: &mut impl MonitorRuntime
         previous = Some(spec.name);
     }
     for kind in [MonitorType::AllPanes, MonitorType::AllWindows] {
-        if next_item(server, id, None, |k| k == kind).is_none() {
+        if next_item(server, id, None, |spec| selected(spec) && spec.kind == kind).is_none() {
             continue;
         }
         let Some(set) = server.monitors.get_mut(id) else {
@@ -534,11 +543,12 @@ fn scan(server: &mut Server, id: MonitorSetId, runtime: &mut impl MonitorRuntime
             };
             for (target, pane) in targets {
                 previous = None;
-                while let Some((spec, serial)) =
-                    next_item(server, id, previous.as_deref().map(|v| v.as_slice()), |k| {
-                        k == kind
-                    })
-                {
+                while let Some((spec, serial)) = next_item(
+                    server,
+                    id,
+                    previous.as_deref().map(|v| v.as_slice()),
+                    |spec| selected(spec) && spec.kind == kind,
+                ) {
                     scan_item(
                         server,
                         id,
@@ -558,7 +568,11 @@ fn scan(server: &mut Server, id: MonitorSetId, runtime: &mut impl MonitorRuntime
             }
         }
         if let Some(set) = server.monitors.get_mut(id) {
-            for item in set.items.values_mut().filter(|item| item.spec.kind == kind) {
+            for item in set
+                .items
+                .values_mut()
+                .filter(|item| selected(&item.spec) && item.spec.kind == kind)
+            {
                 item.targets
                     .retain(|_, cache| cache.generation == generation);
             }
@@ -576,7 +590,27 @@ pub fn monitor_check(
         set.timer_pending = true;
     }
     runtime.timer(id, true);
-    scan(server, id, runtime);
+    scan(server, id, runtime, |_| true);
+    server.monitors.release(id)?;
+    Ok(())
+}
+
+fn tsp_format(spec: &MonitorSpec) -> bool {
+    spec.format
+        .windows(b"pane_tsp_view".len())
+        .any(|part| part == b"pane_tsp_view")
+}
+
+pub(crate) fn monitor_check_tsp(
+    server: &mut Server,
+    id: MonitorSetId,
+    runtime: &mut impl MonitorRuntime,
+) -> Result<(), ModelError> {
+    if server.monitors.get(id).is_none_or(|set| !set.has_tsp_view) {
+        return Ok(());
+    }
+    server.monitors.retain(id)?;
+    scan(server, id, runtime, tsp_format);
     server.monitors.release(id)?;
     Ok(())
 }
@@ -666,6 +700,7 @@ mod tests {
         );
         assert!(server.monitors.get(fixed).unwrap().timer_pending);
     }
+
     #[test]
     fn wildcard_dead_panes_generations_and_missing_specific_cache() {
         use super::super::{pane, session, window};

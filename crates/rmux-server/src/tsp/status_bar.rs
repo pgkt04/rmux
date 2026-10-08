@@ -5,7 +5,10 @@ use crate::{
     client::ClientFlags,
     ids::{ClientId, SessionId},
     model::{Server, WinlinkFlags},
-    ui::status::{STATUS_LINES_LIMIT, status_line_size, status_redraw},
+    ui::status::{
+        STATUS_LINES_LIMIT, status_line_size, status_message_redraw, status_prompt_line_at,
+        status_prompt_native, status_prompt_redraw, status_redraw,
+    },
 };
 use rmux_emu::{
     grid::Grid,
@@ -35,12 +38,35 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
     if c.tsp.projection.is_none() {
         return false;
     }
-    let wanted =
-        !c.tsp.bar_failed && c.status.active.is_none() && c.tsp.hello().is_some_and(supported);
+    let wanted = !c.tsp.bar_failed && c.tsp.hello().is_some_and(supported);
     let styles = c.tsp.hello().is_some_and(|h| h.features.contains("styles"));
+    let app_edit = server
+        .panes
+        .get(c.tsp.projection.as_ref().expect("projection checked").pane)
+        .and_then(|p| p.tsp.as_ref())
+        .and_then(|state| state.program_hello.get("features"))
+        .and_then(Value::as_array)
+        .is_some_and(|features| features.iter().any(|feature| feature == "edit"));
     let bar = if wanted {
-        status_redraw(server, id);
-        build(server, id)
+        let mut prompt = if server.clients.get(id).is_some_and(|c| c.prompt.is_some()) {
+            status_prompt_redraw(server, id);
+            status_prompt_native(server, id)
+        } else {
+            None
+        };
+        if !app_edit && let Some(props) = prompt.as_mut() {
+            props["readonly"] = true.into();
+        }
+        if server
+            .clients
+            .get(id)
+            .is_some_and(|c| c.message.text.is_some())
+        {
+            status_message_redraw(server, id);
+        } else if server.clients.get(id).is_some_and(|c| !c.prompt.is_some()) {
+            status_redraw(server, id);
+        }
+        build(server, id, prompt)
     } else {
         None
     };
@@ -50,7 +76,7 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
         .and_then(|c| c.tsp.projection.as_mut())
         .is_some_and(|p| {
             p.bar_styles = styles;
-            p.set_bar(bar)
+            p.set_bar(bar) || p.bar_pending()
         })
 }
 
@@ -70,26 +96,44 @@ pub fn redraw(server: &mut Server, id: ClientId) {
     }
 }
 
-fn build(server: &Server, id: ClientId) -> Option<Value> {
+fn build(server: &mut Server, id: ClientId, mut prompt: Option<Value>) -> Option<Value> {
+    if server.clients.get(id)?.message.text.is_some()
+        && let Some(props) = prompt.as_mut()
+    {
+        props["readonly"] = true.into();
+        props["ghost"] = Value::Null;
+    }
     let c = server.clients.get(id)?;
     let session = c.session?;
-    let grid = &c.status.screen.grid;
-    let lines = (status_line_size(server, id) as usize)
+    let grid = &c.status.active().grid;
+    let overlay = c.message.text.is_some() || c.prompt.is_some();
+    let lines = (status_line_size(server, id).max(u32::from(overlay)) as usize)
         .min(STATUS_LINES_LIMIT)
         .min(grid.sy() as usize);
-    let strips: Vec<Value> = (0..lines)
-        .filter_map(|y| {
-            let segs = segments(
-                server,
-                session,
-                grid,
-                &c.status.entries[y].ranges.0,
-                y as u32,
-            );
-            (!segs.is_empty())
-                .then(|| json!({"id": format!("{BAR_ID}:{y}"), "k": "status", "c": segs}))
-        })
-        .collect();
+    let overlay_line = status_prompt_line_at(server, id).min(lines.saturating_sub(1) as u32);
+    let mut strips = Vec::new();
+    for y in 0..lines {
+        if y as u32 == overlay_line
+            && let Some(props) = &prompt
+        {
+            strips.push(json!({
+                "id": format!("rmux:prompt:{}", c.prompt.generation()),
+                "k": "input", "p": props,
+            }));
+            if c.message.text.is_none() {
+                continue;
+            }
+        }
+        let ranges = if overlay && y as u32 == overlay_line {
+            &[][..]
+        } else {
+            &c.status.entries[y].ranges.0
+        };
+        let segs = segments(server, session, grid, ranges, y as u32);
+        if !segs.is_empty() {
+            strips.push(json!({"id": format!("{BAR_ID}:{y}"), "k": "status", "c": segs}));
+        }
+    }
     (!strips.is_empty()).then(|| json!({"id": BAR_ID, "k": "col", "c": strips}))
 }
 
@@ -260,7 +304,7 @@ mod tests {
         let id = server.clients.insert(c).unwrap();
 
         status_redraw(&mut server, id);
-        let bar = build(&server, id).unwrap();
+        let bar = build(&mut server, id, None).unwrap();
         assert_eq!(bar["id"], BAR_ID);
         assert_eq!(bar["c"].as_array().unwrap().len(), 1);
 
@@ -284,6 +328,6 @@ mod tests {
         );
 
         server.sessions.get_mut(s).unwrap().statuslines = 0;
-        assert_eq!(build(&server, id), None);
+        assert_eq!(build(&mut server, id, None), None);
     }
 }
