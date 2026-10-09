@@ -332,8 +332,14 @@ and messages remain native when the viewer supports the dock/status kinds
 (prompts also require `input`); other overlays retain the cell fallback. The
 outer surface hides cell status, borders, titles, and scrollbars without
 changing saved options or layout. Its native dock includes the status strip and
-active prompt/message; prefix keys
-remain rmux input. Opening a native projection clears cell mouse reporting
+active prompt/message; prefix keys remain rmux input. With `styles` and `el`,
+the strip projects color/attribute runs from the same rendered status grid as
+the tty, retaining inline styles and highlighted padding. Default backgrounds
+remain transparent; default foregrounds and ANSI 0–15 colors use Tern's terminal
+variables rather than the app palette. The broker-owned sheet is sent before
+the matching frame and replaced when styles change, including after a blocked
+send. Without those capabilities, text and fitting remain host-styled.
+Opening a native projection clears cell mouse reporting
 before the surface open, letting Tern scroll locally without a resize. Cell UI
 restores its own mouse modes; stray native wheel reports do not enter copy mode.
 Surface visibility is reported to the program, not used as projection eligibility:
