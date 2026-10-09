@@ -63,7 +63,10 @@ The plugin switches between native and text views without losing your
 conversation or draft. Splits use text; zoom a pane or close the other pane
 to return to native. Rename and command prompts stay native.
 
-The native bottom bar uses your configured status text, with Tern's styling.
+The native bottom bar keeps your configured status text and colors, including
+window highlights and inline `#[...]` styles. `bg=default` leaves it transparent.
+Exact colors require a host with TSP `styles` and `el` support; older hosts use
+their own styling. Native layout and font sizing still follow the host.
 Use `/terminal-reprobe` in omp if the view gets stuck, or `PI_TUI_NATIVE=0 omp`
 to use text only.
 

@@ -2,19 +2,22 @@
 // in the projected surface's dock, since the projection covers the whole tty.
 use super::wire::Hello;
 use crate::{
-    client::ClientFlags,
+    client::{Client, ClientFlags},
     ids::{ClientId, SessionId},
-    model::{Server, WinlinkFlags},
+    model::Server,
     ui::status::{
         STATUS_LINES_LIMIT, status_line_size, status_message_redraw, status_prompt_line_at,
         status_prompt_native, status_prompt_redraw, status_redraw,
     },
 };
 use rmux_emu::{
+    cell::{GridAttributes as A, GridCell, GridCellFlags},
+    colour::{Colour, ColourFlags},
     grid::Grid,
     style::{StyleRange, StyleRangeType},
 };
 use serde_json::{Map, Value, json};
+use std::fmt::Write;
 
 pub const BAR_ID: &str = "rmux:bar";
 pub const BAR_SHEET: &str = "rmux-bar";
@@ -39,7 +42,10 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
         return false;
     }
     let wanted = !c.tsp.bar_failed && c.tsp.hello().is_some_and(supported);
-    let styles = c.tsp.hello().is_some_and(|h| h.features.contains("styles"));
+    let styles = c
+        .tsp
+        .hello()
+        .is_some_and(|h| h.features.contains("styles") && h.kinds.contains("el"));
     let app_edit = server
         .panes
         .get(c.tsp.projection.as_ref().expect("projection checked").pane)
@@ -66,7 +72,7 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
         } else if server.clients.get(id).is_some_and(|c| !c.prompt.is_some()) {
             status_redraw(server, id);
         }
-        build(server, id, prompt)
+        build(server, id, prompt, styles)
     } else {
         None
     };
@@ -76,7 +82,10 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
         .and_then(|c| c.tsp.projection.as_mut())
         .is_some_and(|p| {
             p.bar_styles = styles;
-            p.set_bar(bar) || p.bar_pending()
+            let (node, css) =
+                bar.map_or((None, BAR_CSS.to_owned()), |bar| (Some(bar.node), bar.css));
+            let changed = p.set_bar_css(css);
+            p.set_bar(node) || changed || p.bar_pending()
         })
 }
 
@@ -96,7 +105,17 @@ pub fn redraw(server: &mut Server, id: ClientId) {
     }
 }
 
-fn build(server: &mut Server, id: ClientId, mut prompt: Option<Value>) -> Option<Value> {
+struct Bar {
+    node: Value,
+    css: String,
+}
+
+fn build(
+    server: &mut Server,
+    id: ClientId,
+    mut prompt: Option<Value>,
+    styled: bool,
+) -> Option<Bar> {
     if server.clients.get(id)?.message.text.is_some()
         && let Some(props) = prompt.as_mut()
     {
@@ -112,6 +131,10 @@ fn build(server: &mut Server, id: ClientId, mut prompt: Option<Value>) -> Option
         .min(grid.sy() as usize);
     let overlay_line = status_prompt_line_at(server, id).min(lines.saturating_sub(1) as u32);
     let mut strips = Vec::new();
+    let mut css = BAR_CSS.to_owned();
+    if styled {
+        css.push_str("[data-id='rmux:bar'] .sf-seg{padding:0;gap:0;border-radius:0;color:inherit}[data-id='rmux:bar'] .sf-seg-k{display:block;gap:0}[data-id='rmux:bar'] .sf-el{white-space:pre}");
+    }
     for y in 0..lines {
         if y as u32 == overlay_line
             && let Some(props) = &prompt
@@ -129,21 +152,51 @@ fn build(server: &mut Server, id: ClientId, mut prompt: Option<Value>) -> Option
         } else {
             &c.status.entries[y].ranges.0
         };
-        let segs = segments(server, session, grid, ranges, y as u32);
+        let segs = segments(
+            server,
+            session,
+            c,
+            grid,
+            ranges,
+            y as u32,
+            styled.then_some(&mut css),
+        );
         if !segs.is_empty() {
-            strips.push(json!({"id": format!("{BAR_ID}:{y}"), "k": "status", "c": segs}));
+            let strip_id = format!("{BAR_ID}:{y}");
+            let base = if overlay && y as u32 == overlay_line {
+                grid.view_get_cell(0, y as u32)
+            } else {
+                c.status.style
+            };
+            let style = CellStyle::new(c, base);
+            let transparent = style.bg.is_default() && !style.attr.contains(A::REVERSE);
+            if styled {
+                write!(css, "[data-id='{strip_id}']{{").unwrap();
+                CellStyle {
+                    attr: style.attr & A::REVERSE,
+                    ..style
+                }
+                .write_css(&mut css);
+                css.push_str("border:0!important}");
+            }
+            strips.push(json!({"id": strip_id, "k": "status", "p": {"transparent": transparent}, "c": segs}));
         }
     }
-    (!strips.is_empty()).then(|| json!({"id": BAR_ID, "k": "col", "c": strips}))
+    (!strips.is_empty()).then(|| Bar {
+        node: json!({"id": BAR_ID, "k": "col", "c": strips}),
+        css,
+    })
 }
 
 /// One segment per style range, plus any text drawn outside the ranges.
 fn segments(
     server: &Server,
     session: SessionId,
+    client: &Client,
     grid: &Grid,
     ranges: &[StyleRange],
     y: u32,
+    mut css: Option<&mut String>,
 ) -> Vec<Value> {
     let width = grid.sx();
     let mut ranges: Vec<&StyleRange> = ranges
@@ -154,6 +207,7 @@ fn segments(
     let line = Line {
         server,
         session,
+        client,
         grid,
         y,
     };
@@ -163,30 +217,41 @@ fn segments(
         if range.start < x {
             continue;
         }
-        line.push(&mut segs, x, range.start, None);
+        line.push(&mut segs, x, range.start, None, css.as_deref_mut());
         let end = range.end.min(width);
-        line.push(&mut segs, range.start, end, Some(range));
+        line.push(&mut segs, range.start, end, Some(range), css.as_deref_mut());
         x = end;
     }
-    line.push(&mut segs, x, width, None);
+    line.push(&mut segs, x, width, None, css);
     segs
 }
 
 struct Line<'a> {
     server: &'a Server,
     session: SessionId,
+    client: &'a Client,
     grid: &'a Grid,
     y: u32,
 }
 impl Line<'_> {
-    fn push(&self, segs: &mut Vec<Value>, start: u32, end: u32, range: Option<&StyleRange>) {
+    fn push(
+        &self,
+        segs: &mut Vec<Value>,
+        start: u32,
+        end: u32,
+        range: Option<&StyleRange>,
+        css: Option<&mut String>,
+    ) {
         if start >= end {
             return;
         }
-        let cells = self.grid.view_string_cells(start, self.y, end - start);
-        let text = String::from_utf8_lossy(&cells);
-        let text = text.trim();
-        if text.is_empty() {
+        let styled = css.is_some();
+        let nonblank = |x| {
+            let cell = self.grid.view_get_cell(x, self.y);
+            !cell.flags.contains(GridCellFlags::PADDING) && cell.data.bytes() != b" "
+        };
+        let first = (start..end).find(|&x| nonblank(x));
+        if first.is_none() && !(styled && range.is_some()) {
             return;
         }
         let kind = range.map(|r| r.range_type);
@@ -200,47 +265,210 @@ impl Line<'_> {
             .and_then(|r| self.window(r.argument));
         // Tern drops the lowest priority first when the strip is narrow.
         let priority = match (kind, window) {
-            (_, Some((true, _))) => 4,
+            (_, Some(true)) => 4,
             (Some(StyleRangeType::Left), _) => 3,
-            (_, Some(_)) => 2,
+            (_, Some(false)) => 2,
             (Some(StyleRangeType::Right), _) => 1,
             _ => 0,
         };
         let mut p = Map::new();
-        match window {
-            Some((true, _)) => {
-                p.insert("tone".into(), "accent".into());
-                p.insert("spans".into(), json!([{"t": text, "s": "accent strong"}]));
+        let id = format!("{BAR_ID}:{}:{}", self.y, segs.len());
+        let mut children = Vec::new();
+        if let Some(css) = css {
+            let (start, end) = if range.is_some() {
+                (start, end)
+            } else {
+                let first = first.unwrap_or(end);
+                let last = (first..end)
+                    .rfind(|&x| nonblank(x))
+                    .map_or(first, |x| {
+                        x + u32::from(self.grid.view_get_cell(x, self.y).data.width)
+                    })
+                    .min(end);
+                (first, last)
+            };
+            let mut x = start;
+            while x < end {
+                if self
+                    .grid
+                    .view_get_cell(x, self.y)
+                    .flags
+                    .contains(GridCellFlags::PADDING)
+                {
+                    x += 1;
+                    continue;
+                }
+                let style = CellStyle::new(self.client, self.grid.view_get_cell(x, self.y));
+                let from = x;
+                x += 1;
+                while x < end {
+                    let cell = self.grid.view_get_cell(x, self.y);
+                    if !cell.flags.contains(GridCellFlags::PADDING)
+                        && CellStyle::new(self.client, cell) != style
+                    {
+                        break;
+                    }
+                    x += 1;
+                }
+                let bytes = self.grid.view_string_cells(from, self.y, x - from);
+                let run_id = format!("{id}:{}", children.len());
+                write!(css, "[data-id='{run_id}']{{").unwrap();
+                style.write_css(css);
+                css.push('}');
+                children.push(json!({"id": run_id, "k": "el", "p": {
+                    "tag": "span", "text": String::from_utf8_lossy(&bytes),
+                }}));
             }
-            Some((false, flags)) if flags.intersects(WinlinkFlags::BELL) => {
-                p.insert("spans".into(), json!([{"t": text, "s": "error"}]));
-            }
-            Some((false, flags))
-                if flags.intersects(WinlinkFlags::ACTIVITY | WinlinkFlags::SILENCE) =>
-            {
-                p.insert("spans".into(), json!([{"t": text, "s": "warning"}]));
-            }
-            _ => {
-                p.insert("text".into(), text.into());
-            }
+        } else {
+            let bytes = self.grid.view_string_cells(start, self.y, end - start);
+            p.insert("text".into(), String::from_utf8_lossy(&bytes).trim().into());
         }
         if right {
             p.insert("side".into(), "right".into());
         }
         p.insert("priority".into(), priority.into());
         segs.push(json!({
-            "id": format!("{BAR_ID}:{}:{}", self.y, segs.len()),
+            "id": id,
             "k": "seg",
             "p": p,
+            "c": children,
         }));
     }
 
-    /// Whether the window range's winlink is current, and its alert flags.
-    fn window(&self, index: u32) -> Option<(bool, WinlinkFlags)> {
+    fn window(&self, index: u32) -> Option<bool> {
         let session = self.server.sessions.get(self.session)?;
         let wl = *session.windows.get(&i32::try_from(index).ok()?)?;
-        let flags = self.server.winlinks.get(wl)?.flags;
-        Some((session.current == Some(wl), flags))
+        Some(session.current == Some(wl))
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct CellStyle {
+    fg: Colour,
+    bg: Colour,
+    us: Colour,
+    attr: A,
+}
+
+impl CellStyle {
+    fn new(client: &Client, cell: GridCell) -> Self {
+        let resolve = |colour: Colour| {
+            if colour.raw() & ColourFlags::THEME.bits() as i32 == 0 {
+                return colour;
+            }
+            let mapped = Colour(
+                client
+                    .theme_colours
+                    .get((colour.raw() & 255) as usize)
+                    .copied()
+                    .unwrap_or(-1),
+            );
+            if mapped == Colour::NONE || mapped.raw() & ColourFlags::THEME.bits() as i32 != 0 {
+                Colour::DEFAULT
+            } else {
+                mapped
+            }
+        };
+        Self {
+            fg: resolve(cell.fg),
+            bg: resolve(cell.bg),
+            us: resolve(cell.us),
+            attr: cell.attr,
+        }
+    }
+
+    fn write_css(self, css: &mut String) {
+        css.push_str("color:");
+        write_colour(
+            css,
+            if self.attr.contains(A::REVERSE) {
+                self.bg
+            } else {
+                self.fg
+            },
+            if self.attr.contains(A::REVERSE) {
+                "var(--tv-bg,var(--bg))"
+            } else {
+                "var(--tv-fg,var(--fg))"
+            },
+        );
+        css.push_str("!important;background:");
+        write_colour(
+            css,
+            if self.attr.contains(A::REVERSE) {
+                self.fg
+            } else {
+                self.bg
+            },
+            if self.attr.contains(A::REVERSE) {
+                "var(--tv-fg,var(--fg))"
+            } else {
+                "transparent"
+            },
+        );
+        write!(
+            css,
+            "!important;font-weight:{};font-style:{};",
+            if self.attr.contains(A::BRIGHT) {
+                "bold"
+            } else {
+                "normal"
+            },
+            if self.attr.contains(A::ITALICS) {
+                "italic"
+            } else {
+                "normal"
+            }
+        )
+        .unwrap();
+        if self
+            .attr
+            .intersects(A::ALL_UNDERSCORE | A::STRIKETHROUGH | A::OVERLINE)
+        {
+            css.push_str("text-decoration-line:");
+            if self.attr.intersects(A::ALL_UNDERSCORE) {
+                css.push_str(" underline");
+            }
+            if self.attr.contains(A::STRIKETHROUGH) {
+                css.push_str(" line-through");
+            }
+            if self.attr.contains(A::OVERLINE) {
+                css.push_str(" overline");
+            }
+            css.push_str(";text-decoration-color:");
+            write_colour(css, self.us, "currentColor");
+            css.push(';');
+            if self.attr.contains(A::UNDERSCORE_2) {
+                css.push_str("text-decoration-style:double;");
+            }
+        }
+        if self.attr.contains(A::DIM) {
+            css.push_str("opacity:0.5;");
+        }
+        if self.attr.contains(A::HIDDEN) {
+            css.push_str("visibility:hidden;");
+        }
+    }
+}
+
+fn write_colour(css: &mut String, colour: Colour, default: &str) {
+    let raw = colour.raw();
+    let index = if (0..8).contains(&raw) {
+        Some(raw)
+    } else if (90..=97).contains(&raw) {
+        Some(raw - 90 + 8)
+    } else if raw & ColourFlags::_256.bits() as i32 != 0 && raw & 255 < 16 {
+        Some(raw & 255)
+    } else {
+        None
+    };
+    if let Some(index) = index {
+        let rgb = rmux_emu::colour::indexed_to_rgb(Colour(index));
+        write!(css, "var(--ansi{index},#{:06x})", rgb.raw() & 0xffffff).unwrap();
+    } else if let Some(rgb) = colour.force_rgb() {
+        write!(css, "#{:06x}", rgb.raw() & 0xffffff).unwrap();
+    } else {
+        css.push_str(default);
     }
 }
 
@@ -249,6 +477,7 @@ mod tests {
     use super::*;
     use crate::{
         client::Client,
+        ids::ArenaId,
         model::{session, spawn::SpawnFlags, window},
     };
 
@@ -262,14 +491,13 @@ mod tests {
                 let p = &seg["p"];
                 p["text"]
                     .as_str()
-                    .or(p["spans"][0]["t"].as_str())
                     .is_some_and(|text| text.starts_with(prefix))
             })
             .unwrap_or_else(|| panic!("no segment {prefix} in {bar}"))
     }
 
     #[test]
-    fn bar_marks_the_current_window_and_keeps_the_status_sides() {
+    fn bar_keeps_status_sides_and_window_drop_priorities() {
         let mut server = Server::new();
         let options = server.options.create(Some(server.options.global_s));
         let s = session::session_create(
@@ -294,7 +522,7 @@ mod tests {
             links.push(session::session_attach(&mut server, s, w, index as i32).unwrap());
         }
         session::session_set_current(&mut server, s, Some(links[0]));
-        server.winlinks.get_mut(links[1]).unwrap().flags = WinlinkFlags::BELL;
+        server.winlinks.get_mut(links[1]).unwrap().flags = crate::model::WinlinkFlags::BELL;
         crate::ui::status::status_update_cache(&mut server, s);
         let mut c = Client::new(None, (0, 0));
         c.session = Some(s);
@@ -304,18 +532,14 @@ mod tests {
         let id = server.clients.insert(c).unwrap();
 
         status_redraw(&mut server, id);
-        let bar = build(&mut server, id, None).unwrap();
+        let bar = build(&mut server, id, None, false).unwrap().node;
         assert_eq!(bar["id"], BAR_ID);
         assert_eq!(bar["c"].as_array().unwrap().len(), 1);
 
         let session = seg(&bar, "[work]");
         assert!(session["p"].get("side").is_none());
         let current = seg(&bar, "0:edit");
-        assert_eq!(current["p"]["tone"], "accent");
-        assert_eq!(current["p"]["spans"][0]["s"], "accent strong");
         let bell = seg(&bar, "1:logs");
-        assert_eq!(bell["p"]["spans"][0]["s"], "error");
-        assert!(bell["p"].get("tone").is_none());
         // Narrow strips drop the other windows before the current one.
         assert!(current["p"]["priority"].as_u64() > bell["p"]["priority"].as_u64());
         let right = segs(&bar).last().unwrap();
@@ -328,6 +552,56 @@ mod tests {
         );
 
         server.sessions.get_mut(s).unwrap().statuslines = 0;
-        assert_eq!(build(&mut server, id, None), None);
+        assert!(build(&mut server, id, None, false).is_none());
+    }
+
+    #[test]
+    fn styled_segments_preserve_wide_text_spaces_and_inline_color_boundaries() {
+        let server = Server::new();
+        let client = Client::new(None, (0, 0));
+        let mut grid = Grid::new(8, 1, 0);
+        let mut cell = rmux_emu::cell::DEFAULT_CELL;
+        cell.fg = Colour::rgb(0x12, 0x34, 0x56);
+        cell.bg = Colour::rgb(0x65, 0x43, 0x21);
+        cell.data = rmux_util::utf8::Utf8Data::set(b' ');
+        grid.view_set_cell(0, 0, &cell);
+        cell.data.data[..3].copy_from_slice("界".as_bytes());
+        cell.data.size = 3;
+        cell.data.width = 2;
+        grid.view_set_cell(1, 0, &cell);
+        grid.view_set_padding(2, 0, cell.bg);
+        cell.data = rmux_util::utf8::Utf8Data::set(b'x');
+        cell.fg = Colour::DEFAULT;
+        grid.view_set_cell(3, 0, &cell);
+        cell.data = rmux_util::utf8::Utf8Data::set(b' ');
+        grid.view_set_cell(4, 0, &cell);
+        let range = StyleRange {
+            range_type: StyleRangeType::Left,
+            argument: 0,
+            string: [0; 16],
+            start: 0,
+            end: 5,
+        };
+        let line = Line {
+            server: &server,
+            session: SessionId::from_parts(0, 1),
+            client: &client,
+            grid: &grid,
+            y: 0,
+        };
+        let mut segs = Vec::new();
+        let mut css = String::new();
+        line.push(&mut segs, 0, 5, Some(&range), Some(&mut css));
+        let runs = segs[0]["c"].as_array().unwrap();
+        assert_eq!(
+            runs.iter()
+                .map(|run| run["p"]["text"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            [" 界", "x "]
+        );
+        assert!(css.contains("color:#123456!important;background:#654321!important"));
+        assert!(
+            css.contains("color:var(--tv-fg,var(--fg))!important;background:#654321!important")
+        );
     }
 }

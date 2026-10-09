@@ -73,7 +73,7 @@ struct ReplayCursor {
     root_props: BTreeSet<String>,
     sheets: BTreeSet<String>,
     bar_dock: bool,
-    bar_sheet: bool,
+    bar_sheet: Option<String>,
     /// Next `replay_piece` index. The frame is last and is the only piece that
     /// publishes ack coverage.
     sent_prefix: usize,
@@ -127,8 +127,9 @@ pub struct Projection {
     bar_dock: bool,
     /// The client takes program sheets, so the bar can span the pane.
     pub bar_styles: bool,
-    /// The bar's sheet is installed on the outer surface.
-    bar_sheet: bool,
+    bar_css: String,
+    /// The bar's last admitted sheet on the outer surface.
+    bar_sheet: Option<String>,
 }
 impl Projection {
     pub fn new(
@@ -171,7 +172,8 @@ impl Projection {
             bar_dirty: false,
             bar_dock: false,
             bar_styles: false,
-            bar_sheet: false,
+            bar_css: BAR_CSS.to_owned(),
+            bar_sheet: None,
         }
     }
 
@@ -197,6 +199,15 @@ impl Projection {
         true
     }
 
+    pub(crate) fn set_bar_css(&mut self, css: String) -> bool {
+        if self.bar_css == css {
+            return false;
+        }
+        self.bar_css = css;
+        self.bar_dirty = true;
+        true
+    }
+
     pub(crate) fn invalidate_bar(&mut self) {
         self.bar_dirty = true;
     }
@@ -205,9 +216,12 @@ impl Projection {
         self.bar_dirty
     }
 
-    /// The bar's sheet goes with the first frame that adds the bar.
+    /// A changed sheet travels with the frame that uses it.
     fn bar_sheet_due(&self, bar_ops: &[usize]) -> bool {
-        self.bar_styles && !self.bar_sheet && self.bar.is_some() && !bar_ops.is_empty()
+        self.bar_styles
+            && self.bar_sheet.as_ref() != Some(&self.bar_css)
+            && self.bar.is_some()
+            && !bar_ops.is_empty()
     }
 
     fn push_before_frame(&self, messages: &mut Vec<WireMessage>) {
@@ -216,7 +230,7 @@ impl Projection {
             at,
             WireMessage::json(
                 b's',
-                &json!({"sf": self.outer, "name": BAR_SHEET, "css": BAR_CSS}),
+                &json!({"sf": self.outer, "name": BAR_SHEET, "css": self.bar_css}),
             ),
         );
     }
@@ -542,10 +556,12 @@ impl Projection {
             plan.messages.append(&mut deletions);
             plan.messages.push(frame);
         }
-        let bar_sheet = self.bar_sheet || self.bar_sheet_due(&bar_ops);
-        if bar_sheet && !self.bar_sheet {
+        let bar_sheet = if self.bar_sheet_due(&bar_ops) {
             self.push_before_frame(&mut plan.messages);
-        }
+            Some(self.bar_css.clone())
+        } else {
+            self.bar_sheet.clone()
+        };
         // The canonical metadata at this revision subsumes the pending batch.
         self.pending_palette = None;
         self.pending_sheets.clear();
@@ -645,10 +661,12 @@ impl Projection {
         }
         let frame_bytes = frame.body.len();
         messages.push(frame);
-        let bar_sheet = self.bar_sheet || self.bar_sheet_due(&bar_ops);
-        if bar_sheet && !self.bar_sheet {
+        let bar_sheet = if self.bar_sheet_due(&bar_ops) {
             self.push_before_frame(&mut messages);
-        }
+            Some(self.bar_css.clone())
+        } else {
+            self.bar_sheet.clone()
+        };
         let mut sheets = self.sheets.clone();
         for (name, css) in &self.pending_sheets {
             if css.is_some() {
@@ -2096,6 +2114,61 @@ mod tests {
             }]
         );
         assert_eq!(p.ack(newer.sequence).unwrap(), 2);
+    }
+
+    #[test]
+    fn status_style_changes_survive_a_blocked_frame_and_replay() {
+        let mut p = projection(2);
+        p.bar_styles = true;
+        p.set_bar(Some(
+            json!({"id":BAR_ID,"k":"col","c":[{"id":"rmux:bar:0","k":"status","c":[
+            {"id":"rmux:bar:0:0","k":"seg","p":{"text":"work"}}]}]}),
+        ));
+        let d = TspDocument::new("s");
+        let css = |messages: &[WireMessage]| -> String {
+            messages
+                .iter()
+                .find(|message| message.verb == b's')
+                .map(|message| {
+                    serde_json::from_slice::<Value>(&message.body).unwrap()["css"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
+                .unwrap()
+        };
+        p.set_bar_css("[data-id='rmux:bar']{color:#123456}".into());
+        let (held, first) = p
+            .next_messages(
+                &d,
+                &mut TspBlobStore::new(),
+                &BTreeSet::new(),
+                &json!({}),
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        p.set_bar_css("[data-id='rmux:bar']{color:#654321}".into());
+        let (retry, _) = p
+            .next_messages(
+                &d,
+                &mut TspBlobStore::new(),
+                &BTreeSet::new(),
+                &json!({}),
+                0,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(css(&retry), css(&held));
+        p.note_enqueued(first.sequence);
+        p.ack(first.sequence).unwrap();
+        let (updated, second) = send(&mut p, &d);
+        assert_eq!(css(&updated), "[data-id='rmux:bar']{color:#654321}");
+        assert_eq!(updated.last().unwrap().verb, b'f');
+        p.ack(second.sequence).unwrap();
+        p.reconcile();
+        let (replayed, _) = send(&mut p, &d);
+        assert!(!replayed.iter().any(|message| message.verb == b's'));
     }
 
     #[test]
