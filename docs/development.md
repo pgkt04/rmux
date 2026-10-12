@@ -334,11 +334,21 @@ outer surface hides cell status, borders, titles, and scrollbars without
 changing saved options or layout. Its native dock includes the status strip and
 active prompt/message; prefix keys remain rmux input. With `styles` and `el`,
 the strip projects color/attribute runs from the same rendered status grid as
-the tty, retaining inline styles and highlighted padding. Default backgrounds
-remain transparent; default foregrounds and ANSI 0–15 colors use Tern's terminal
-variables rather than the app palette. The broker-owned sheet is sent before
-the matching frame and replaced when styles change, including after a blocked
-send. Without those capabilities, text and fitting remain host-styled.
+the tty, retaining inline styles and highlighted padding. Tern collapses white
+space by the segment's `white-space`, so the sheet sets `pre` on segments, not
+runs. Each window segment owns the `window-status-separator` drawn after it,
+so window spacing matches the tty and a dropped window drops its separator.
+Default backgrounds remain transparent; default foregrounds and ANSI 0–15
+colors use Tern's terminal variables rather than the app palette. Other colors
+are fixed, so the sheet does what Tern's grid does under its default
+`contrast` setting: `light-dark()` gives light themes the color relit just to
+WCAG AA against its background (the reported light background or white
+behind default backgrounds) and dark themes the original. Theme-variable colors
+and text on the terminal's foreground (reverse over a default foreground) are
+not relit, and the relit hue can differ from the grid's. The broker-owned sheet
+is sent before the matching frame and replaced when styles change, including
+after a blocked send. Without those capabilities, text and fitting remain
+host-styled.
 Opening a native projection clears cell mouse reporting
 before the surface open, letting Tern scroll locally without a resize. Cell UI
 restores its own mouse modes; stray native wheel reports do not enter copy mode.

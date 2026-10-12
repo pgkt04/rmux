@@ -12,7 +12,7 @@ use crate::{
 };
 use rmux_emu::{
     cell::{GridAttributes as A, GridCell, GridCellFlags},
-    colour::{Colour, ColourFlags},
+    colour::{ClientTheme, Colour, ColourFlags},
     grid::Grid,
     style::{StyleRange, StyleRangeType},
 };
@@ -133,7 +133,9 @@ fn build(
     let mut strips = Vec::new();
     let mut css = BAR_CSS.to_owned();
     if styled {
-        css.push_str("[data-id='rmux:bar'] .sf-seg{padding:0;gap:0;border-radius:0;color:inherit}[data-id='rmux:bar'] .sf-seg-k{display:block;gap:0}[data-id='rmux:bar'] .sf-el{white-space:pre}");
+        // Tern collapses white space by the segment's own `white-space`, not
+        // the runs', so padding inside a range survives only from here.
+        css.push_str("[data-id='rmux:bar'] .sf-seg{padding:0;gap:0;border-radius:0;color:inherit;white-space:pre}[data-id='rmux:bar'] .sf-seg-k{display:block;gap:0}");
     }
     for y in 0..lines {
         if y as u32 == overlay_line
@@ -176,7 +178,7 @@ fn build(
                     attr: style.attr & A::REVERSE,
                     ..style
                 }
-                .write_css(&mut css);
+                .write_css(&mut css, light_page(c));
                 css.push_str("border:0!important}");
             }
             strips.push(json!({"id": strip_id, "k": "status", "p": {"transparent": transparent}, "c": segs}));
@@ -210,15 +212,25 @@ fn segments(
         client,
         grid,
         y,
+        page: light_page(client),
     };
     let mut segs = Vec::new();
     let mut x = 0;
-    for range in ranges {
+    for (i, &range) in ranges.iter().enumerate() {
         if range.start < x {
             continue;
         }
         line.push(&mut segs, x, range.start, None, css.as_deref_mut());
-        let end = range.end.min(width);
+        let mut end = range.end.min(width);
+        // The status format draws `window-status-separator` after every
+        // window but the last. The window's segment owns it, so the list
+        // keeps its spacing and a dropped window takes its separator along.
+        if range.range_type == StyleRangeType::Window
+            && let Some(next) = ranges.get(i + 1)
+            && next.range_type == StyleRangeType::Window
+        {
+            end = end.max(next.start);
+        }
         line.push(&mut segs, range.start, end, Some(range), css.as_deref_mut());
         x = end;
     }
@@ -232,6 +244,7 @@ struct Line<'a> {
     client: &'a Client,
     grid: &'a Grid,
     y: u32,
+    page: Colour,
 }
 impl Line<'_> {
     fn push(
@@ -313,7 +326,7 @@ impl Line<'_> {
                 let bytes = self.grid.view_string_cells(from, self.y, x - from);
                 let run_id = format!("{id}:{}", children.len());
                 write!(css, "[data-id='{run_id}']{{").unwrap();
-                style.write_css(css);
+                style.write_css(css, self.page);
                 css.push('}');
                 children.push(json!({"id": run_id, "k": "el", "p": {
                     "tag": "span", "text": String::from_utf8_lossy(&bytes),
@@ -377,30 +390,45 @@ impl CellStyle {
         }
     }
 
-    fn write_css(self, css: &mut String) {
+    /// `page` is the light theme's background behind a default background.
+    fn write_css(self, css: &mut String, page: Colour) {
+        let reverse = self.attr.contains(A::REVERSE);
+        let (text, back) = if reverse {
+            (self.bg, self.fg)
+        } else {
+            (self.fg, self.bg)
+        };
         css.push_str("color:");
-        write_colour(
-            css,
-            if self.attr.contains(A::REVERSE) {
-                self.bg
-            } else {
-                self.fg
-            },
-            if self.attr.contains(A::REVERSE) {
-                "var(--tv-bg,var(--bg))"
-            } else {
-                "var(--tv-fg,var(--fg))"
-            },
-        );
+        let text_default = if reverse {
+            "var(--tv-bg,var(--bg))"
+        } else {
+            "var(--tv-fg,var(--fg))"
+        };
+        // A reversed default background shows the terminal's foreground,
+        // which only Tern knows.
+        let behind = if back.is_default() {
+            (!reverse).then_some(page)
+        } else {
+            fixed_rgb(back)
+        };
+        let lit = fixed_rgb(text)
+            .zip(behind)
+            .map(|(fixed, behind)| (fixed, legible(fixed, behind)));
+        match lit {
+            Some((fixed, lit)) if lit != fixed => write!(
+                css,
+                "light-dark(#{:06x},#{:06x})",
+                lit.raw() & 0xffffff,
+                fixed.raw() & 0xffffff
+            )
+            .unwrap(),
+            _ => write_colour(css, text, text_default),
+        }
         css.push_str("!important;background:");
         write_colour(
             css,
-            if self.attr.contains(A::REVERSE) {
-                self.fg
-            } else {
-                self.bg
-            },
-            if self.attr.contains(A::REVERSE) {
+            back,
+            if reverse {
                 "var(--tv-fg,var(--fg))"
             } else {
                 "transparent"
@@ -451,9 +479,10 @@ impl CellStyle {
     }
 }
 
-fn write_colour(css: &mut String, colour: Colour, default: &str) {
+/// ANSI 0–15, which Tern's theme supplies.
+fn ansi_index(colour: Colour) -> Option<i32> {
     let raw = colour.raw();
-    let index = if (0..8).contains(&raw) {
+    if (0..8).contains(&raw) {
         Some(raw)
     } else if (90..=97).contains(&raw) {
         Some(raw - 90 + 8)
@@ -461,8 +490,20 @@ fn write_colour(css: &mut String, colour: Colour, default: &str) {
         Some(raw & 255)
     } else {
         None
-    };
-    if let Some(index) = index {
+    }
+}
+
+/// The colour as RGB when the program fixed it, not Tern's theme.
+fn fixed_rgb(colour: Colour) -> Option<Colour> {
+    if ansi_index(colour).is_some() {
+        None
+    } else {
+        colour.force_rgb()
+    }
+}
+
+fn write_colour(css: &mut String, colour: Colour, default: &str) {
+    if let Some(index) = ansi_index(colour) {
         let rgb = rmux_emu::colour::indexed_to_rgb(Colour(index));
         write!(css, "var(--ansi{index},#{:06x})", rgb.raw() & 0xffffff).unwrap();
     } else if let Some(rgb) = colour.force_rgb() {
@@ -470,6 +511,64 @@ fn write_colour(css: &mut String, colour: Colour, default: &str) {
     } else {
         css.push_str(default);
     }
+}
+
+/// Tern relights text a program coloured too faintly for a light theme
+/// (its default `contrast` setting) until it reaches WCAG AA.
+const LEGIBLE: f64 = 4.5;
+
+/// What a default background shows in a light theme: the terminal's
+/// reported background while it is light, else white.
+fn light_page(client: &Client) -> Colour {
+    client
+        .tty
+        .as_ref()
+        .map(|tty| Colour(tty.reported_colours().1))
+        .filter(|bg| bg.theme() == ClientTheme::Light)
+        .and_then(Colour::force_rgb)
+        .unwrap_or(Colour::rgb(255, 255, 255))
+}
+
+/// RGB `fg` moved just far enough from RGB `bg` to reach [`LEGIBLE`], towards
+/// whichever of black and white contrasts more with `bg`. Darkening scales
+/// linear light, keeping the hue; lightening mixes in white.
+fn legible(fg: Colour, bg: Colour) -> Colour {
+    let linear = |c: u8| {
+        let c = f64::from(c) / 255.0;
+        if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let channels = |c: Colour| {
+        let (r, g, b) = c.split_rgb();
+        [linear(r), linear(g), linear(b)]
+    };
+    let luminance = |c: [f64; 3]| 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2];
+    let (text, back) = (channels(fg), luminance(channels(bg)));
+    let y = luminance(text);
+    if (y.max(back) + 0.05) / (y.min(back) + 0.05) >= LEGIBLE {
+        return fg;
+    }
+    let encode = |c: f64| {
+        255.0
+            * if c <= 0.003_130_8 {
+                12.92 * c
+            } else {
+                1.055 * c.powf(1.0 / 2.4) - 0.055
+            }
+    };
+    // Either end passes, so the target is reachable; rounding away from the
+    // background keeps it reached.
+    let [r, g, b] = if (back + 0.05) / 0.05 >= 1.05 / (back + 0.05) {
+        let k = ((back + 0.05) / LEGIBLE - 0.05) / y;
+        text.map(|c| encode(c * k).floor() as u8)
+    } else {
+        let t = (LEGIBLE * (back + 0.05) - 0.05 - y) / (1.0 - y);
+        text.map(|c| encode(c + (1.0 - c) * t).ceil().min(255.0) as u8)
+    };
+    Colour::rgb(r, g, b)
 }
 
 #[cfg(test)]
@@ -496,8 +595,9 @@ mod tests {
             .unwrap_or_else(|| panic!("no segment {prefix} in {bar}"))
     }
 
-    #[test]
-    fn bar_keeps_status_sides_and_window_drop_priorities() {
+    /// Session `work` showing window 0 `edit` (current) and window 1 `logs`
+    /// (bell) to an attached 80x24 client.
+    fn work_session() -> (Server, ClientId, SessionId) {
         let mut server = Server::new();
         let options = server.options.create(Some(server.options.global_s));
         let s = session::session_create(
@@ -530,8 +630,13 @@ mod tests {
         c.tty_sx = 80;
         c.tty_sy = 24;
         let id = server.clients.insert(c).unwrap();
-
         status_redraw(&mut server, id);
+        (server, id, s)
+    }
+
+    #[test]
+    fn bar_keeps_status_sides_and_window_drop_priorities() {
+        let (mut server, id, s) = work_session();
         let bar = build(&mut server, id, None, false).unwrap().node;
         assert_eq!(bar["id"], BAR_ID);
         assert_eq!(bar["c"].as_array().unwrap().len(), 1);
@@ -556,12 +661,35 @@ mod tests {
     }
 
     #[test]
+    fn styled_window_segments_own_the_separator_after_them() {
+        let (mut server, id, _) = work_session();
+        let bar = build(&mut server, id, None, true).unwrap().node;
+        let texts = segs(&bar)
+            .iter()
+            .map(|seg| {
+                seg["c"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|run| run["p"]["text"].as_str().unwrap())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        // The default separator is one space: it stays between the windows,
+        // with the window before it rather than alone, and the last window
+        // has none.
+        let current = texts.iter().position(|t| t.starts_with("0:edit")).unwrap();
+        assert_eq!(texts[current], "0:edit* ");
+        assert_eq!(texts[current + 1], "1:logs!");
+    }
+
+    #[test]
     fn styled_segments_preserve_wide_text_spaces_and_inline_color_boundaries() {
         let server = Server::new();
         let client = Client::new(None, (0, 0));
         let mut grid = Grid::new(8, 1, 0);
         let mut cell = rmux_emu::cell::DEFAULT_CELL;
-        cell.fg = Colour::rgb(0x12, 0x34, 0x56);
+        cell.fg = Colour::rgb(0xfe, 0xdc, 0xba);
         cell.bg = Colour::rgb(0x65, 0x43, 0x21);
         cell.data = rmux_util::utf8::Utf8Data::set(b' ');
         grid.view_set_cell(0, 0, &cell);
@@ -588,6 +716,7 @@ mod tests {
             client: &client,
             grid: &grid,
             y: 0,
+            page: Colour::rgb(255, 255, 255),
         };
         let mut segs = Vec::new();
         let mut css = String::new();
@@ -599,9 +728,106 @@ mod tests {
                 .collect::<Vec<_>>(),
             [" 界", "x "]
         );
-        assert!(css.contains("color:#123456!important;background:#654321!important"));
+        assert!(css.contains("color:#fedcba!important;background:#654321!important"));
         assert!(
             css.contains("color:var(--tv-fg,var(--fg))!important;background:#654321!important")
         );
+    }
+
+    fn ratio(a: Colour, b: Colour) -> f64 {
+        let luminance = |c: Colour| {
+            let (r, g, b) = c.split_rgb();
+            let [r, g, b] = [r, g, b].map(|c| {
+                let c = f64::from(c) / 255.0;
+                if c <= 0.04045 {
+                    c / 12.92
+                } else {
+                    ((c + 0.055) / 1.055).powf(2.4)
+                }
+            });
+            0.2126 * r + 0.7152 * g + 0.0722 * b
+        };
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    #[test]
+    fn faint_fixed_colours_are_relit_just_to_aa_against_their_background() {
+        for bg in [
+            Colour::rgb(255, 255, 255),
+            Colour::rgb(0xf8, 0xf8, 0xfa),
+            Colour::rgb(0x8a, 0x8a, 0x8a),
+            Colour::rgb(0x74, 0x74, 0x74),
+            Colour::rgb(0x62, 0x62, 0x62),
+            Colour::rgb(0, 0, 0),
+        ] {
+            for r in (0..=255).step_by(17) {
+                for g in (0..=255).step_by(17) {
+                    for b in (0..=255).step_by(17) {
+                        let fg = Colour::rgb(r, g, b);
+                        let lit = legible(fg, bg);
+                        if ratio(fg, bg) >= LEGIBLE {
+                            assert_eq!(lit, fg);
+                            continue;
+                        }
+                        let reached = ratio(lit, bg);
+                        assert!(
+                            (LEGIBLE - 1e-9..LEGIBLE + 0.2).contains(&reached),
+                            "{fg:?} on {bg:?} -> {lit:?}: {reached}"
+                        );
+                    }
+                }
+            }
+        }
+        // Darkening keeps the hue: colour50 stays aquamarine, not teal-blue.
+        let (r, g, b) =
+            legible(Colour::rgb(0x00, 0xff, 0xd7), Colour::rgb(255, 255, 255)).split_rgb();
+        assert!(r == 0 && g > b, "{r} {g} {b}");
+    }
+
+    #[test]
+    fn light_themes_get_relit_fixed_colours_and_dark_ones_the_original() {
+        let client = Client::new(None, (0, 0));
+        let css = |fg: Colour, bg: Colour, attr: A| {
+            let mut css = String::new();
+            CellStyle::new(
+                &client,
+                GridCell {
+                    fg,
+                    bg,
+                    attr,
+                    ..rmux_emu::cell::DEFAULT_CELL
+                },
+            )
+            .write_css(&mut css, Colour::rgb(0xf8, 0xf8, 0xfa));
+            css
+        };
+        let colour255 = Colour(ColourFlags::_256.bits() as i32 | 255);
+        let faint = css(colour255, Colour::DEFAULT, A::default());
+        let lit = legible(Colour::rgb(0xee, 0xee, 0xee), Colour::rgb(0xf8, 0xf8, 0xfa));
+        assert!(
+            faint.starts_with(&format!(
+                "color:light-dark(#{:06x},#eeeeee)!important;",
+                lit.raw() & 0xffffff
+            )),
+            "{faint}"
+        );
+        // Reversed, the text takes the background colour and sits on the
+        // foreground colour.
+        let reversed = css(
+            Colour::rgb(0x62, 0x62, 0x62),
+            Colour::rgb(0x12, 0x12, 0x12),
+            A::REVERSE,
+        );
+        assert!(reversed.starts_with("color:light-dark(#"), "{reversed}");
+        // Tern's theme supplies ANSI 0–15 and the default foreground.
+        assert!(css(Colour(7), Colour::DEFAULT, A::default()).starts_with("color:var(--ansi7,"));
+        assert!(
+            css(Colour::DEFAULT, Colour::DEFAULT, A::default())
+                .starts_with("color:var(--tv-fg,var(--fg))!important")
+        );
+        // Reversed over a default foreground, the text sits on the terminal's
+        // foreground, which only Tern knows.
+        assert!(css(Colour::DEFAULT, colour255, A::REVERSE).starts_with("color:#eeeeee!important"));
     }
 }
