@@ -65,7 +65,10 @@ try:
                     break
         out.extend(len(reply).to_bytes(4, 'little'))
         out.extend(reply)
-    open(sys.argv[1], 'wb').write(out)
+    partial = sys.argv[1] + '.partial'
+    with open(partial, 'wb') as f:
+        f.write(out)
+    os.replace(partial, sys.argv[1])
     time.sleep(10)
 finally:
     termios.tcsetattr(0, termios.TCSANOW, old)
