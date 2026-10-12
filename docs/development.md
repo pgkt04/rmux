@@ -338,6 +338,12 @@ the tty, retaining inline styles and highlighted padding. Tern collapses white
 space by the segment's `white-space`, so the sheet sets `pre` on segments, not
 runs. Each window segment owns the `window-status-separator` drawn after it,
 so window spacing matches the tty and a dropped window drops its separator.
+On a narrow strip the window list gives way first, as on the tty: other
+windows drop before status-right, status-left and the current window.
+With `mouse` on, every segment drawn from a status range takes a `click`
+action; rmux replays it as a tty press and release on that range, so the same
+status mouse bindings run (`MouseDown1Status` and friends, `=` naming the
+clicked window). With `mouse` off the strip is inert.
 Default backgrounds remain transparent; default foregrounds and ANSI 0–15
 colors use Tern's terminal variables rather than the app palette. Other colors
 are fixed, so the sheet does what Tern's grid does under its default

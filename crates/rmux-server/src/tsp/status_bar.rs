@@ -2,12 +2,13 @@
 // in the projected surface's dock, since the projection covers the whole tty.
 use super::wire::Hello;
 use crate::{
-    client::{Client, ClientFlags},
+    client::{Client, ClientFlags, KeyEvent, keys::handle_key},
     ids::{ClientId, SessionId},
     model::Server,
     ui::status::{
-        STATUS_LINES_LIMIT, status_line_size, status_message_redraw, status_prompt_line_at,
-        status_prompt_native, status_prompt_redraw, status_redraw,
+        STATUS_LINES_LIMIT, status_at_line, status_get_range, status_line_size,
+        status_message_redraw, status_prompt_line_at, status_prompt_native, status_prompt_redraw,
+        status_redraw,
     },
 };
 use rmux_emu::{
@@ -16,11 +17,14 @@ use rmux_emu::{
     grid::Grid,
     style::{StyleRange, StyleRangeType},
 };
+use rmux_util::key::{KeyCode, MouseEvent, SpecialKey};
 use serde_json::{Map, Value, json};
 use std::fmt::Write;
 
 pub const BAR_ID: &str = "rmux:bar";
 pub const BAR_SHEET: &str = "rmux-bar";
+/// The `click` action of a segment drawn from a status range.
+pub const BAR_ACTION: &str = "status";
 /// The chat skins hold dock strips to the transcript measure; the bar spans
 /// the pane like a status line.
 pub const BAR_CSS: &str = "[data-id='rmux:bar']>.sf-status{max-width:none!important;width:100%!important;margin:0!important}";
@@ -76,17 +80,66 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
     } else {
         None
     };
-    server
-        .clients
-        .get_mut(id)
-        .and_then(|c| c.tsp.projection.as_mut())
-        .is_some_and(|p| {
-            p.bar_styles = styles;
-            let (node, css) =
-                bar.map_or((None, BAR_CSS.to_owned()), |bar| (Some(bar.node), bar.css));
-            let changed = p.set_bar_css(css);
-            p.set_bar(node) || changed || p.bar_pending()
-        })
+    let (node, css, segs) = bar.map_or((None, BAR_CSS.to_owned(), Vec::new()), |bar| {
+        (Some(bar.node), bar.css, bar.segs)
+    });
+    let Some(c) = server.clients.get_mut(id) else {
+        return false;
+    };
+    c.tsp.bar_segs = segs;
+    c.tsp.projection.as_mut().is_some_and(|p| {
+        p.bar_styles = styles;
+        let changed = p.set_bar_css(css);
+        p.set_bar(node) || changed || p.bar_pending()
+    })
+}
+
+/// A click on the bar segment `seg`: with `mouse` on, the press and release
+/// a tty sends on that range of the status line, so the status mouse
+/// bindings run as they do there. A segment no longer drawn is ignored.
+pub fn click(server: &mut Server, id: ClientId, seg: &str) {
+    let Some(c) = server.clients.get(id) else {
+        return;
+    };
+    let Some(&BarSeg { y, range, .. }) = c.tsp.bar_segs.iter().find(|s| s.id == seg) else {
+        return;
+    };
+    let mouse = c
+        .session
+        .and_then(|s| server.sessions.get(s))
+        .is_some_and(|s| server.options.get_number(s.options, b"mouse") != 0);
+    // The status line is redrawn before the bar is, so the range is still
+    // there unless the terminal clicked a bar since replaced.
+    if !mouse || status_get_range(c, range.start, y) != Some(&range) {
+        return;
+    }
+    let Ok(at) = u32::try_from(status_at_line(server, id)) else {
+        return;
+    };
+    let (x, y) = (range.start, at + y);
+    let press = MouseEvent {
+        x,
+        y,
+        b: 0,
+        lx: x,
+        ly: y,
+        lb: 3,
+        sgr_type: b'M',
+        sgr_b: 0,
+    };
+    let release = MouseEvent {
+        b: 3,
+        lb: 0,
+        sgr_type: b'm',
+        ..press
+    };
+    for m in [press, release] {
+        handle_key(
+            server,
+            id,
+            KeyEvent::with_mouse(KeyCode(SpecialKey::MOUSE), m),
+        );
+    }
 }
 
 /// The native half of `check_redraw`: of the client's cells, only the status
@@ -105,9 +158,23 @@ pub fn redraw(server: &mut Server, id: ClientId) {
     }
 }
 
+/// A bar segment drawn from a status range: what a click on it resolves.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BarSeg {
+    pub id: String,
+    /// The status line the range is on.
+    pub y: u32,
+    pub range: StyleRange,
+}
+
+fn seg_id(y: u32, n: usize) -> String {
+    format!("{BAR_ID}:{y}:{n}")
+}
+
 struct Bar {
     node: Value,
     css: String,
+    segs: Vec<BarSeg>,
 }
 
 fn build(
@@ -131,6 +198,7 @@ fn build(
         .min(grid.sy() as usize);
     let overlay_line = status_prompt_line_at(server, id).min(lines.saturating_sub(1) as u32);
     let mut strips = Vec::new();
+    let mut clicks = Vec::new();
     let mut css = BAR_CSS.to_owned();
     if styled {
         // Tern collapses white space by the segment's own `white-space`, not
@@ -154,7 +222,7 @@ fn build(
         } else {
             &c.status.entries[y].ranges.0
         };
-        let segs = segments(
+        let (segs, line_clicks) = segments(
             server,
             session,
             c,
@@ -163,6 +231,7 @@ fn build(
             y as u32,
             styled.then_some(&mut css),
         );
+        clicks.extend(line_clicks);
         if !segs.is_empty() {
             let strip_id = format!("{BAR_ID}:{y}");
             let base = if overlay && y as u32 == overlay_line {
@@ -187,10 +256,12 @@ fn build(
     (!strips.is_empty()).then(|| Bar {
         node: json!({"id": BAR_ID, "k": "col", "c": strips}),
         css,
+        segs: clicks,
     })
 }
 
-/// One segment per style range, plus any text drawn outside the ranges.
+/// One segment per style range, plus any text drawn outside the ranges,
+/// and the segments a click resolves to their range.
 fn segments(
     server: &Server,
     session: SessionId,
@@ -199,7 +270,7 @@ fn segments(
     ranges: &[StyleRange],
     y: u32,
     mut css: Option<&mut String>,
-) -> Vec<Value> {
+) -> (Vec<Value>, Vec<BarSeg>) {
     let width = grid.sx();
     let mut ranges: Vec<&StyleRange> = ranges
         .iter()
@@ -213,8 +284,20 @@ fn segments(
         grid,
         y,
         page: light_page(client),
+        mouse: server
+            .sessions
+            .get(session)
+            .is_some_and(|s| server.options.get_number(s.options, b"mouse") != 0),
+        // `status-justify right` (choice 2) is the only one that puts the
+        // window list on the right; left, centre and absolute-centre start
+        // it after status-left.
+        list_right: server
+            .sessions
+            .get(session)
+            .is_some_and(|s| server.options.get_number(s.options, b"status-justify") == 2),
     };
     let mut segs = Vec::new();
+    let mut clicks = Vec::new();
     let mut x = 0;
     for (i, &range) in ranges.iter().enumerate() {
         if range.start < x {
@@ -231,11 +314,19 @@ fn segments(
         {
             end = end.max(next.start);
         }
-        line.push(&mut segs, range.start, end, Some(range), css.as_deref_mut());
+        if line.push(&mut segs, range.start, end, Some(range), css.as_deref_mut())
+            && line.clickable(range)
+        {
+            clicks.push(BarSeg {
+                id: seg_id(y, segs.len() - 1),
+                y,
+                range: *range,
+            });
+        }
         x = end;
     }
     line.push(&mut segs, x, width, None, css);
-    segs
+    (segs, clicks)
 }
 
 struct Line<'a> {
@@ -245,8 +336,19 @@ struct Line<'a> {
     grid: &'a Grid,
     y: u32,
     page: Colour,
+    /// The session's `mouse`: status ranges take clicks.
+    mouse: bool,
+    /// The window list is right-justified (`status-justify right`).
+    list_right: bool,
 }
 impl Line<'_> {
+    /// Whether a click on the range's segment reaches the status mouse
+    /// bindings, as a tty click on it would.
+    fn clickable(&self, range: &StyleRange) -> bool {
+        self.mouse && range.range_type != StyleRangeType::None
+    }
+
+    /// True when a segment was pushed.
     fn push(
         &self,
         segs: &mut Vec<Value>,
@@ -254,9 +356,9 @@ impl Line<'_> {
         end: u32,
         range: Option<&StyleRange>,
         css: Option<&mut String>,
-    ) {
+    ) -> bool {
         if start >= end {
-            return;
+            return false;
         }
         let styled = css.is_some();
         let nonblank = |x| {
@@ -265,27 +367,36 @@ impl Line<'_> {
         };
         let first = (start..end).find(|&x| nonblank(x));
         if first.is_none() && !(styled && range.is_some()) {
-            return;
+            return false;
         }
         let kind = range.map(|r| r.range_type);
+        // Status-left and status-right name their side; the window, session
+        // and pane lists follow `status-justify`, not where the tty happened
+        // to draw them (a long list crosses the middle of the line); only
+        // text outside every range goes by position.
         let right = match kind {
             Some(StyleRangeType::Left) => false,
             Some(StyleRangeType::Right) => true,
+            Some(StyleRangeType::Window | StyleRangeType::Session | StyleRangeType::Pane) => {
+                self.list_right
+            }
             _ => start + end > self.grid.sx(),
         };
         let window = range
             .filter(|r| r.range_type == StyleRangeType::Window)
             .and_then(|r| self.window(r.argument));
-        // Tern drops the lowest priority first when the strip is narrow.
+        // Tern drops the lowest priority first when the strip is narrow. As
+        // on the tty, status-left and status-right keep their place and the
+        // window list gives way, the current window last.
         let priority = match (kind, window) {
             (_, Some(true)) => 4,
             (Some(StyleRangeType::Left), _) => 3,
-            (_, Some(false)) => 2,
-            (Some(StyleRangeType::Right), _) => 1,
+            (Some(StyleRangeType::Right), _) => 2,
+            (_, Some(false)) => 1,
             _ => 0,
         };
         let mut p = Map::new();
-        let id = format!("{BAR_ID}:{}:{}", self.y, segs.len());
+        let id = seg_id(self.y, segs.len());
         let mut children = Vec::new();
         if let Some(css) = css {
             let (start, end) = if range.is_some() {
@@ -340,12 +451,16 @@ impl Line<'_> {
             p.insert("side".into(), "right".into());
         }
         p.insert("priority".into(), priority.into());
+        if range.is_some_and(|r| self.clickable(r)) {
+            p.insert("actions".into(), json!({"click": BAR_ACTION}));
+        }
         segs.push(json!({
             "id": id,
             "k": "seg",
             "p": p,
             "c": children,
         }));
+        true
     }
 
     fn window(&self, index: u32) -> Option<bool> {
@@ -645,10 +760,12 @@ mod tests {
         assert!(session["p"].get("side").is_none());
         let current = seg(&bar, "0:edit");
         let bell = seg(&bar, "1:logs");
-        // Narrow strips drop the other windows before the current one.
+        // Narrow strips drop the other windows before the current one, and
+        // before status-right (the clock), as the tty's window list does.
         assert!(current["p"]["priority"].as_u64() > bell["p"]["priority"].as_u64());
         let right = segs(&bar).last().unwrap();
         assert_eq!(right["p"]["side"], "right");
+        assert!(right["p"]["priority"].as_u64() > bell["p"]["priority"].as_u64());
         assert!(
             segs(&bar)
                 .iter()
@@ -681,6 +798,107 @@ mod tests {
         let current = texts.iter().position(|t| t.starts_with("0:edit")).unwrap();
         assert_eq!(texts[current], "0:edit* ");
         assert_eq!(texts[current + 1], "1:logs!");
+    }
+
+    #[test]
+    fn range_segments_take_clicks_only_with_mouse_on() {
+        let (mut server, id, s) = work_session();
+        // rmux defaults `mouse` on, as the pin's Makefile does.
+        let options = server.sessions.get(s).unwrap().options;
+        server.options.set_number_value(options, b"mouse", 0);
+        let bar = build(&mut server, id, None, false).unwrap();
+        assert!(
+            segs(&bar.node)
+                .iter()
+                .all(|seg| seg["p"].get("actions").is_none())
+        );
+        assert!(bar.segs.is_empty());
+
+        server.options.set_number_value(options, b"mouse", 1);
+        let bar = build(&mut server, id, None, false).unwrap();
+        for (prefix, kind, argument) in [
+            ("[work]", StyleRangeType::Left, None),
+            ("0:edit", StyleRangeType::Window, Some(0)),
+            ("1:logs", StyleRangeType::Window, Some(1)),
+        ] {
+            let node = seg(&bar.node, prefix);
+            assert_eq!(node["p"]["actions"], json!({"click": BAR_ACTION}));
+            let click = bar
+                .segs
+                .iter()
+                .find(|click| node["id"].as_str() == Some(click.id.as_str()))
+                .unwrap_or_else(|| panic!("{prefix} not clickable"));
+            assert_eq!((click.y, click.range.range_type), (0, kind));
+            if let Some(argument) = argument {
+                assert_eq!(click.range.argument, argument);
+            }
+        }
+    }
+
+    #[test]
+    fn text_outside_ranges_takes_no_clicks() {
+        let (mut server, id, s) = work_session();
+        let options = server.sessions.get(s).unwrap().options;
+        server.options.set_number_value(options, b"mouse", 1);
+        let mut grid = Grid::new(4, 1, 0);
+        let mut cell = rmux_emu::cell::DEFAULT_CELL;
+        cell.data = rmux_util::utf8::Utf8Data::set(b'a');
+        grid.view_set_cell(0, 0, &cell);
+        cell.data = rmux_util::utf8::Utf8Data::set(b'b');
+        grid.view_set_cell(2, 0, &cell);
+        let range = StyleRange {
+            range_type: StyleRangeType::Window,
+            argument: 1,
+            string: [0; 16],
+            start: 0,
+            end: 1,
+        };
+        let client = server.clients.get(id).unwrap();
+        let (segs, clicks) = segments(&server, s, client, &grid, &[range], 0, None);
+        assert_eq!(segs.len(), 2);
+        assert_eq!(segs[0]["p"]["actions"]["click"], BAR_ACTION);
+        assert_eq!(segs[1]["p"]["text"], "b");
+        assert!(segs[1]["p"].get("actions").is_none());
+        assert_eq!(
+            clicks,
+            [BarSeg {
+                id: segs[0]["id"].as_str().unwrap().to_owned(),
+                y: 0,
+                range,
+            }]
+        );
+    }
+
+    #[test]
+    fn window_list_segments_take_the_status_justify_side() {
+        let (mut server, id, s) = work_session();
+        // A window drawn past the middle of the line still belongs to the
+        // left-justified list, not the right group.
+        let mut grid = Grid::new(10, 1, 0);
+        let mut cell = rmux_emu::cell::DEFAULT_CELL;
+        cell.data = rmux_util::utf8::Utf8Data::set(b'w');
+        for x in 6..9 {
+            grid.view_set_cell(x, 0, &cell);
+        }
+        let range = StyleRange {
+            range_type: StyleRangeType::Window,
+            argument: 1,
+            string: [0; 16],
+            start: 6,
+            end: 9,
+        };
+        let side = |server: &Server| {
+            let client = server.clients.get(id).unwrap();
+            let (segs, _) = segments(server, s, client, &grid, &[range], 0, None);
+            segs[0]["p"].get("side").cloned()
+        };
+        assert_eq!(side(&server), None);
+
+        let options = server.sessions.get(s).unwrap().options;
+        server
+            .options
+            .set_number_value(options, b"status-justify", 2);
+        assert_eq!(side(&server), Some(json!("right")));
     }
 
     #[test]
@@ -717,6 +935,8 @@ mod tests {
             grid: &grid,
             y: 0,
             page: Colour::rgb(255, 255, 255),
+            mouse: false,
+            list_right: false,
         };
         let mut segs = Vec::new();
         let mut css = String::new();

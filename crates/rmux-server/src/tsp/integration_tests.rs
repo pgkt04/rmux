@@ -1089,6 +1089,122 @@ fn native_message_keeps_readonly_prompt_focus_and_multiline_order() {
     );
 }
 
+/// The native status terminal with a second window `1:logs` beside the
+/// current `0`, `mouse` as given: the server, the terminal, the session and
+/// the two winlinks.
+fn native_two_window_bar(
+    mouse: bool,
+) -> (
+    Server,
+    FakeTerminal,
+    SessionId,
+    crate::ids::WinlinkId,
+    crate::ids::WinlinkId,
+) {
+    let (mut server, _, mut terminal) = native_status_terminal();
+    let session = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .session
+        .unwrap();
+    let first = server.sessions.get(session).unwrap().current.unwrap();
+    let window = window::window_create(&mut server, 80, 24, 0, 0).unwrap();
+    server.windows.get_mut(window).unwrap().name = b"logs".to_vec();
+    let pane =
+        window::window_add_pane(&mut server, window, None, 0, SpawnFlags::default()).unwrap();
+    server.windows.get_mut(window).unwrap().active = Some(pane);
+    crate::layout::init(&mut server, window, pane);
+    let second = session::session_attach(&mut server, session, window, 1).unwrap();
+    let options = server.sessions.get(session).unwrap().options;
+    server
+        .options
+        .set_number_value(options, b"mouse", i64::from(mouse));
+    server
+        .clients
+        .get_mut(terminal.client)
+        .unwrap()
+        .flags
+        .insert(ClientFlags::REDRAWSTATUS);
+    native_keys(&mut server, &mut terminal, b"");
+    (server, terminal, session, first, second)
+}
+
+fn native_bar_seg(terminal: &mut FakeTerminal, prefix: &str) -> Value {
+    node_mut(terminal.tree.as_mut().unwrap(), "rmux:bar:0").unwrap()["c"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|seg| {
+            seg["p"]["text"]
+                .as_str()
+                .is_some_and(|text| text.starts_with(prefix))
+        })
+        .unwrap_or_else(|| panic!("no bar segment {prefix}"))
+        .clone()
+}
+
+/// Tern's event for a click on the node `id`, run to the end of the
+/// client's queue. Not drawn after: the click may take the client off the
+/// projected pane.
+fn native_action(server: &mut Server, terminal: &FakeTerminal, id: &Value, act: &str) {
+    let sf = terminal.tree.as_ref().unwrap()["id"].clone();
+    terminal.send(
+        server,
+        &apc(b'e', &json!({"ev":"action","sf":sf,"id":id,"act":act})),
+    );
+    crate::cmd::queue::next(server, Some(terminal.client));
+}
+
+#[test]
+fn native_bar_click_runs_the_status_mouse_binding() {
+    let (mut server, mut terminal, session, _, second) = native_two_window_bar(true);
+    let seg = native_bar_seg(&mut terminal, "1:logs");
+    assert_eq!(seg["p"]["actions"], json!({"click": "status"}));
+    // `MouseDown1Status { switch-client -t= }`, `=` the clicked window.
+    native_action(&mut server, &terminal, &seg["id"], "status");
+    assert_eq!(server.sessions.get(session).unwrap().current, Some(second));
+}
+
+#[test]
+fn native_bar_click_follows_a_rebound_status_binding() {
+    use crate::cmd::key_bindings::KeyInitRuntime;
+    let (mut server, mut terminal, session, first, second) = native_two_window_bar(true);
+    let list = crate::cmd::parse::from_string(
+        &mut server,
+        b"bind -n MouseDown1Status rename-window -t= clicked",
+        &mut crate::cmd::parse::CmdParseInput::default(),
+    )
+    .unwrap();
+    server.append_default_commands(list);
+    crate::cmd::queue::next(&mut server, None);
+    let seg = native_bar_seg(&mut terminal, "1:logs");
+    native_action(&mut server, &terminal, &seg["id"], "status");
+    let window = server.winlinks.get(second).unwrap().window;
+    assert_eq!(server.windows.get(window).unwrap().name, b"clicked");
+    assert_eq!(server.sessions.get(session).unwrap().current, Some(first));
+}
+
+#[test]
+fn native_bar_ignores_unknown_segments_other_actions_and_mouse_off() {
+    let (mut server, mut terminal, session, first, _) = native_two_window_bar(true);
+    let seg = native_bar_seg(&mut terminal, "1:logs");
+    for (id, act) in [
+        (json!("rmux:bar:0:99"), "status"),
+        (json!("rmux:bar:0"), "status"),
+        (seg["id"].clone(), "other"),
+    ] {
+        native_action(&mut server, &terminal, &id, act);
+        assert_eq!(server.sessions.get(session).unwrap().current, Some(first));
+    }
+
+    let (mut server, mut terminal, session, first, _) = native_two_window_bar(false);
+    let seg = native_bar_seg(&mut terminal, "1:logs");
+    assert!(seg["p"].get("actions").is_none());
+    native_action(&mut server, &terminal, &seg["id"], "status");
+    assert_eq!(server.sessions.get(session).unwrap().current, Some(first));
+}
+
 #[test]
 fn native_vi_command_prompt_rejects_host_edit_and_keeps_raw_vi_keys() {
     let (mut server, _, mut terminal) = native_status_terminal();

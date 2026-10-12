@@ -635,6 +635,7 @@ fn client_event(
             Err(super::projection::ProjectionError::StatusBar) => {
                 if let Some(c) = server.clients.get_mut(client) {
                     c.tsp.bar_failed = true;
+                    c.tsp.bar_segs.clear();
                     c.tsp.diagnostic = Some("TSP status bar rejected".into());
                     if let Some(projection) = c.tsp.projection.as_mut() {
                         projection.set_bar(None);
@@ -688,11 +689,16 @@ fn client_event(
             return;
         }
     }
-    if value.get("id").and_then(Value::as_str).is_some_and(|id| {
-        id == super::status_bar::BAR_ID
+    if let Some(id) = value.get("id").and_then(Value::as_str).filter(|id| {
+        *id == super::status_bar::BAR_ID
             || id.starts_with("rmux:bar:")
             || id.starts_with("rmux:prompt:")
     }) {
+        if name == "action"
+            && value.get("act").and_then(Value::as_str) == Some(super::status_bar::BAR_ACTION)
+        {
+            super::status_bar::click(server, client, id);
+        }
         return;
     }
     let Some(routed) = server
