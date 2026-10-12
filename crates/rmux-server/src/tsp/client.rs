@@ -41,6 +41,8 @@ pub struct ClientTspState {
     pub transition_pane: Option<PaneId>,
     /// Tern rejected the native status bar; this client goes without it.
     pub bar_failed: bool,
+    /// The bar segments a click resolves, as last drawn.
+    pub bar_segs: Vec<super::status_bar::BarSeg>,
     next_request: u64,
 }
 impl Default for ClientTspState {
@@ -60,6 +62,7 @@ impl Default for ClientTspState {
             failed_logical: None,
             transition_pane: None,
             bar_failed: false,
+            bar_segs: Vec::new(),
             next_request: 0,
         }
     }
@@ -92,6 +95,7 @@ impl ClientTspState {
         self.failed_logical = None;
         self.transition_pane = None;
         self.bar_failed = false;
+        self.bar_segs.clear();
     }
     pub fn request(&mut self, owner: RequestOwner) -> u64 {
         self.next_request = self.next_request.wrapping_add(1).max(1);
