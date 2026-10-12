@@ -1170,7 +1170,11 @@ mod tests {
                 + n.children.len() * 32;
             scan(&Value::Object(n.props.clone()), &mut blobs);
         }
-        bytes += d.sheets.iter().map(|(n, c)| n.len() + c.len()).sum::<usize>();
+        bytes += d
+            .sheets
+            .iter()
+            .map(|(n, c)| n.len() + c.len())
+            .sum::<usize>();
         bytes += d
             .palette
             .as_ref()
@@ -1196,19 +1200,26 @@ mod tests {
             json!(["set","missing",{"blob":"FFF"}]),
             json!(["set","e1",{"img":null,"meta":{"nested":[{"sha256":"FFF"}]},"age":3}]),
             json!(["set","e2a",{"sha256":null}]),
-            json!(["text","draft","append","hello"]),
-            json!(["splice","draft",1,2,"ZZ"]),
-            json!(["text","draft","replace","é"]),
-            json!(["move","e2a","main","e1"]),
-            json!(["move","main","e2a",null]),
-            json!(["del","e2"]),
-            json!(["settle","e1"]),
-            json!(["focus","draft"]),
+            json!(["text", "draft", "append", "hello"]),
+            json!(["splice", "draft", 1, 2, "ZZ"]),
+            json!(["text", "draft", "replace", "é"]),
+            json!(["move", "e2a", "main", "e1"]),
+            json!(["move", "main", "e2a", null]),
+            json!(["del", "e2"]),
+            json!(["settle", "e1"]),
+            json!(["focus", "draft"]),
         ];
         for (s, op) in ops.into_iter().enumerate() {
             let step = op.to_string();
-            d.apply_frame(&Frame { sf: "s".into(), s: s as u64, ops: vec![op] }, 7)
-                .unwrap();
+            d.apply_frame(
+                &Frame {
+                    sf: "s".into(),
+                    s: s as u64,
+                    ops: vec![op],
+                },
+                7,
+            )
+            .unwrap();
             check(&d, &step);
         }
         assert_eq!(d.evict_settled_main_child("e1").unwrap(), ["e1"]);
