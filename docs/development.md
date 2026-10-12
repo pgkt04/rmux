@@ -403,6 +403,18 @@ real-omp PTY switch smoke for a small document stayed about 1.7 ms to first
 frame before/after: these optimizations target large replay preparation, not
 Tern rendering time or reduced wire payload. Native rename, split/zoom, and
 500 rapid resizes retained the app/draft without protocol errors.
+Live frames (keystrokes, streamed tokens) cost O(change), not O(retained
+document): each document maintains its retention size estimate and blob
+reference counts as nodes change, and a live projection applies its topology
+changes in place (only a replay installs a fresh topology at commit) with a
+running count of rmux prompt ids. Before this, every frame re-serialized all
+node properties and walked every node, and every live send cloned the whole
+outer topology, so long omp transcripts made typing lag. With a fake native
+terminal acking immediately, server time per keystroke frame went from 0.5,
+2.1, 13.5, and 32 ms at 1.5k, 6k, 24k, and 48k retained nodes to about 5 µs at
+every size. A `del` still scans the outer topology once per projection. At
+`-v`, each frame logs `tsp …: frame <sf> s=… ops=…: <nodes> nodes, <bytes>
+bytes, <µs>us`.
 Native tty teardown closes the outer surface and restores terminal modes before
 a final owned DA1 barrier. rmux keeps raw input active to consume delayed TSP
 replies and delays `MSG_EXITED` until the barrier completes. If the terminal

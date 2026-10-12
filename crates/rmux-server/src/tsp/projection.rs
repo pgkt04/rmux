@@ -9,7 +9,7 @@ use super::{
 };
 use crate::ids::PaneId;
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque, hash_map};
 use std::sync::Arc;
 
 const PENDING_OP_LIMIT: usize = 4096;
@@ -69,7 +69,10 @@ struct ReplayCursor {
     listening: bool,
     coverage: FrameCoverage,
     plan: Arc<replay::ReplayPlan>,
-    parents: HashMap<String, String>,
+    /// A replay's canonical topology. `None` for a live frame, which already
+    /// applied its few changes to `Projection::parents`: until this cursor
+    /// commits or the projection resets, nothing else prepares or reads them.
+    parents: Option<Topology>,
     root_props: BTreeSet<String>,
     sheets: BTreeSet<String>,
     bar_dock: bool,
@@ -112,8 +115,8 @@ pub struct Projection {
     replay: Option<ReplayCursor>,
     awaiting_frame: Option<u64>,
     // Only wire topology and root prop names, not a second document or frame log.
-    parents: HashMap<String, String>,
-    view_parents: HashMap<String, String>,
+    parents: Topology,
+    view_parents: Topology,
     root_props: BTreeSet<String>,
     /// Latest palette not yet admitted. `None` means unchanged since the last send.
     pending_palette: Option<Option<Value>>,
@@ -162,8 +165,8 @@ impl Projection {
             listening: true,
             replay: None,
             awaiting_frame: None,
-            parents: HashMap::new(),
-            view_parents: HashMap::new(),
+            parents: Topology::default(),
+            view_parents: Topology::default(),
             root_props: BTreeSet::new(),
             pending_palette: None,
             pending_sheets: Vec::new(),
@@ -489,10 +492,10 @@ impl Projection {
         } else {
             Vec::new()
         };
-        let (canonical_parents, canonical_props, canonical_ops) =
-            document.replay_topology(&self.outer);
+        let (parents, canonical_props, canonical_ops) = document.replay_topology(&self.outer);
+        let mut parents = Topology::from(parents);
         let prefix_ops = before.len() + canonical_ops;
-        let mut frame = OuterOps::new(&self.outer, canonical_parents, canonical_props, false);
+        let mut frame = OuterOps::new(&self.outer, &mut parents, canonical_props, false);
         frame.place_bar(self.bar.as_ref(), true);
         for pending in &self.pending {
             if !is_transient_view(&pending.value)
@@ -509,7 +512,6 @@ impl Projection {
             ops,
             operations,
             mut bar_ops,
-            parents,
             root_props,
             bar_dock,
             ..
@@ -593,7 +595,7 @@ impl Projection {
             listening,
             coverage,
             plan: Arc::clone(&plan),
-            parents,
+            parents: Some(parents),
             root_props,
             sheets,
             bar_dock,
@@ -617,7 +619,7 @@ impl Projection {
     ) -> Result<Option<PreparedSend>, ProjectionError> {
         let mut frame = OuterOps::new(
             &self.outer,
-            self.parents.clone(),
+            &mut self.parents,
             self.root_props.clone(),
             self.bar_dock,
         );
@@ -626,17 +628,13 @@ impl Projection {
             rewrite_operation(&mut value, &self.logical, &self.outer);
             frame.push_program(value, pending.sources.clone());
         }
-        let had_prompt = frame
-            .parents
-            .keys()
-            .any(|id| id.starts_with("rmux:prompt:"));
+        let had_prompt = frame.parents.has_prompt();
         frame.place_bar(self.bar.as_ref(), self.bar_dirty);
         frame.focus_status(self.bar.as_ref(), had_prompt, document.focus.as_deref());
         let OuterOps {
             ops,
             operations,
             bar_ops,
-            parents,
             root_props,
             bar_dock,
             ..
@@ -695,7 +693,7 @@ impl Projection {
             listening,
             coverage: coverage.clone(),
             plan: Arc::clone(&plan),
-            parents,
+            parents: None,
             root_props,
             sheets,
             bar_dock,
@@ -847,7 +845,9 @@ impl Projection {
 
     fn commit_cursor(&mut self, cursor: ReplayCursor) {
         self.awaiting_frame = None;
-        self.parents = cursor.parents;
+        if let Some(parents) = cursor.parents {
+            self.parents = parents;
+        }
         self.root_props = cursor.root_props;
         self.sheets = cursor.sheets;
         self.bar_dock = cursor.bar_dock;
@@ -1001,7 +1001,7 @@ impl Projection {
 
     fn reset_ops(&self) -> Vec<Value> {
         let mut ops = vec![json!(["focus", null]), json!(["resume"])];
-        for (id, parent) in &self.parents {
+        for (id, parent) in self.parents.iter() {
             if parent == &self.outer {
                 ops.push(json!(["del", id]));
             }
@@ -1018,7 +1018,7 @@ impl Projection {
     }
 
     fn track_operation(
-        parents: &mut HashMap<String, String>,
+        parents: &mut Topology,
         root_props: &mut BTreeSet<String>,
         outer: &str,
         op: &Value,
@@ -1062,14 +1062,14 @@ struct OuterOps<'a> {
     ops: Vec<Value>,
     operations: Vec<Vec<SourceOp>>,
     bar_ops: Vec<usize>,
-    parents: HashMap<String, String>,
+    parents: &'a mut Topology,
     root_props: BTreeSet<String>,
     bar_dock: bool,
 }
 impl<'a> OuterOps<'a> {
     fn new(
         outer: &'a str,
-        parents: HashMap<String, String>,
+        parents: &'a mut Topology,
         root_props: BTreeSet<String>,
         bar_dock: bool,
     ) -> Self {
@@ -1084,7 +1084,7 @@ impl<'a> OuterOps<'a> {
         }
     }
     fn push(&mut self, op: Value, sources: Vec<SourceOp>) {
-        Projection::track_operation(&mut self.parents, &mut self.root_props, self.outer, &op);
+        Projection::track_operation(self.parents, &mut self.root_props, self.outer, &op);
         self.ops.push(op);
         self.operations.push(sources);
     }
@@ -1191,7 +1191,7 @@ impl<'a> OuterOps<'a> {
             self.push_bar(json!([
                 "focus",
                 focus.map(|id| {
-                    if self.parents.contains_key(id) {
+                    if self.parents.contains(id) {
                         id
                     } else {
                         self.outer
@@ -1285,7 +1285,63 @@ pub fn rewrite_operation(value: &mut Value, from: &str, to: &str) {
         _ => {}
     }
 }
-fn track_subtree(parents: &mut HashMap<String, String>, tree: &Value, parent: &str) {
+/// Outer wire topology (id -> parent). It also counts rmux prompt ids, so the
+/// per-frame "was a prompt shown" check does not scan every retained node.
+#[derive(Debug, Default)]
+struct Topology {
+    parents: HashMap<String, String>,
+    prompts: usize,
+}
+impl Topology {
+    fn is_prompt(id: &str) -> bool {
+        id.starts_with("rmux:prompt:")
+    }
+    fn has_prompt(&self) -> bool {
+        self.prompts > 0
+    }
+    fn get(&self, id: &str) -> Option<&String> {
+        self.parents.get(id)
+    }
+    fn contains(&self, id: &str) -> bool {
+        self.parents.contains_key(id)
+    }
+    fn iter(&self) -> hash_map::Iter<'_, String, String> {
+        self.parents.iter()
+    }
+    fn insert(&mut self, id: String, parent: String) {
+        let prompt = Self::is_prompt(&id);
+        if self.parents.insert(id, parent).is_none() && prompt {
+            self.prompts += 1;
+        }
+    }
+    fn retain(&mut self, mut keep: impl FnMut(&String, &String) -> bool) {
+        let prompts = &mut self.prompts;
+        self.parents.retain(|id, parent| {
+            let kept = keep(id, parent);
+            if !kept && Self::is_prompt(id) {
+                *prompts -= 1;
+            }
+            kept
+        });
+    }
+    fn clear(&mut self) {
+        self.parents.clear();
+        self.prompts = 0;
+    }
+}
+impl FromIterator<(String, String)> for Topology {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(items: I) -> Self {
+        Self::from(items.into_iter().collect::<HashMap<_, _>>())
+    }
+}
+impl From<HashMap<String, String>> for Topology {
+    fn from(parents: HashMap<String, String>) -> Self {
+        let prompts = parents.keys().filter(|id| Self::is_prompt(id)).count();
+        Self { parents, prompts }
+    }
+}
+
+fn track_subtree(parents: &mut Topology, tree: &Value, parent: &str) {
     let Some(id) = tree.get("id").and_then(Value::as_str) else {
         return;
     };
@@ -1297,7 +1353,7 @@ fn track_subtree(parents: &mut HashMap<String, String>, tree: &Value, parent: &s
     }
 }
 
-fn remove_topology(parents: &mut HashMap<String, String>, id: &str) -> BTreeSet<String> {
+fn remove_topology(parents: &mut Topology, id: &str) -> BTreeSet<String> {
     let mut removed = BTreeSet::from([id.to_owned()]);
     loop {
         let before = removed.len();

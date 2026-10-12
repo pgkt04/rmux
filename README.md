@@ -88,6 +88,11 @@ For detailed logs, run `rmux -vv -L debug new-session` from a writable directory
 It writes `rmux-*.log` files there, including terminal output. Treat these logs
 as sensitive; they are not rotated.
 
+To log a server that is already running, send it `SIGUSR2` (`kill -USR2 <pid>`)
+once to start and once to stop; it writes `rmux-server-<pid>.log` in the
+server's working directory. Native frames log their handling time as
+`tsp …: frame … <µs>us`.
+
 Builds, tests, native rendering details, and diagnostic limits:
 [development guide](docs/development.md).
 

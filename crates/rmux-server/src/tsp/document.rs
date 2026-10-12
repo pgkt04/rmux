@@ -2,7 +2,7 @@ use super::wire::{Frame, KINDS, TEXT_KINDS};
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 pub const NODE_LIMIT: usize = 200_000;
 pub const DEPTH_LIMIT: usize = 64;
@@ -13,10 +13,17 @@ struct Node {
     id: String,
     kind: String,
     props: Map<String, Value>,
+    /// Compact JSON length of `props`, refreshed whenever they change.
+    props_bytes: usize,
     parent: Option<String>,
     children: Vec<String>,
     ages: HashMap<String, u64>,
     created_at_ms: u64,
+}
+impl Node {
+    fn estimated_bytes(&self) -> usize {
+        self.id.len() + self.kind.len() + self.props_bytes + 128 + self.children.len() * 32
+    }
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct ApplyError {
@@ -31,10 +38,17 @@ pub struct ApplyResult {
     pub errors: Vec<ApplyError>,
     pub revision: u64,
 }
+/// Frames arrive per keystroke and per streamed token, so everything they
+/// update must cost O(change): the retention estimate and blob references are
+/// maintained as nodes change rather than recomputed from the whole tree.
 #[derive(Debug)]
 pub struct TspDocument {
     pub surface: String,
     nodes: HashMap<String, Node>,
+    /// Sum of `Node::estimated_bytes` over `nodes`.
+    node_bytes: usize,
+    /// Blob id -> number of references from node props.
+    blob_refs: BTreeMap<String, usize>,
     pub settled: BTreeSet<String>,
     pub focus: Option<String>,
     pub suspended: bool,
@@ -50,13 +64,16 @@ impl TspDocument {
             id: surface.clone(),
             kind: "col".into(),
             props: Map::new(),
+            props_bytes: json_len(&Map::new()),
             parent: None,
             children: vec![],
             ages: HashMap::new(),
             created_at_ms: 0,
         };
         Self {
+            node_bytes: root.estimated_bytes(),
             nodes: HashMap::from([(surface.clone(), root)]),
+            blob_refs: BTreeMap::new(),
             surface,
             settled: BTreeSet::new(),
             focus: None,
@@ -95,6 +112,27 @@ impl TspDocument {
             .map(|c| self.subtree_depth(c))
             .max()
             .unwrap_or(0)
+    }
+    fn insert_node(&mut self, node: Node) {
+        self.node_bytes += node.estimated_bytes();
+        add_blobs(&mut self.blob_refs, &node.props);
+        self.nodes.insert(node.id.clone(), node);
+    }
+    fn edit_children(&mut self, id: &str, edit: impl FnOnce(&mut Vec<String>)) {
+        let node = self.nodes.get_mut(id).expect("edited node exists");
+        let before = node.children.len();
+        edit(&mut node.children);
+        self.node_bytes = self.node_bytes - before * 32 + node.children.len() * 32;
+    }
+    fn edit_props<R>(&mut self, id: &str, edit: impl FnOnce(&mut Node) -> R) -> R {
+        let node = self.nodes.get_mut(id).expect("edited node exists");
+        remove_blobs(&mut self.blob_refs, &node.props);
+        self.node_bytes -= node.props_bytes;
+        let result = edit(node);
+        node.props_bytes = json_len(&node.props);
+        self.node_bytes += node.props_bytes;
+        add_blobs(&mut self.blob_refs, &node.props);
+        result
     }
     fn unsettle(&mut self, id: &str) {
         let mut at = Some(id.to_owned());
@@ -154,6 +192,7 @@ impl TspDocument {
         let mut n = Node {
             id: id.into(),
             kind: k.into(),
+            props_bytes: json_len(&props),
             props,
             parent: Some(parent.into()),
             children: vec![],
@@ -177,6 +216,8 @@ impl TspDocument {
     }
     fn remove(&mut self, id: &str) {
         if let Some(n) = self.nodes.remove(id) {
+            self.node_bytes -= n.estimated_bytes();
+            remove_blobs(&mut self.blob_refs, &n.props);
             for c in n.children {
                 self.remove(&c);
             }
@@ -189,11 +230,8 @@ impl TspDocument {
     pub fn close(&mut self) {
         for id in ["dock", "layer"] {
             if self.nodes.get(id).and_then(|n| n.parent.as_deref()) == Some(&self.surface) {
-                self.nodes
-                    .get_mut(&self.surface)
-                    .unwrap()
-                    .children
-                    .retain(|c| c != id);
+                let surface = self.surface.clone();
+                self.edit_children(&surface, |children| children.retain(|c| c != id));
                 self.remove(id);
             }
         }
@@ -264,13 +302,9 @@ impl TspDocument {
                 &mut BTreeSet::new(),
                 now,
             )?;
-            self.nodes
-                .get_mut(p)
-                .unwrap()
-                .children
-                .insert(pos, id.into());
+            self.edit_children(p, |children| children.insert(pos, id.into()));
             for n in staged {
-                self.nodes.insert(n.id.clone(), n);
+                self.insert_node(n);
             }
             self.unsettle(p);
             return Ok(());
@@ -279,39 +313,40 @@ impl TspDocument {
         match verb {
             "set" => {
                 let p = a[2].as_object().ok_or("set props must be object")?;
-                let n = self.nodes.get_mut(id).unwrap();
-                let unchanged: HashMap<String, u64> = age_paths()
-                    .into_iter()
-                    .filter_map(|path| {
-                        let key = path.split('.').next().unwrap();
-                        if !p.contains_key(key) {
-                            return None;
+                self.edit_props(id, |n| {
+                    let unchanged: HashMap<String, u64> = age_paths()
+                        .into_iter()
+                        .filter_map(|path| {
+                            let key = path.split('.').next().unwrap();
+                            if !p.contains_key(key) {
+                                return None;
+                            }
+                            let mut old = n.props.get(key)?;
+                            let mut new = p.get(key)?;
+                            for part in path.split('.').skip(1) {
+                                old = old.get(part)?;
+                                new = new.get(part)?;
+                            }
+                            (old == new)
+                                .then(|| n.ages.get(path).map(|base| (path.to_owned(), *base)))
+                                .flatten()
+                        })
+                        .collect();
+                    for (k, v) in p {
+                        if v.is_null() {
+                            n.props.remove(k);
+                        } else {
+                            n.props.insert(k.clone(), v.clone());
                         }
-                        let mut old = n.props.get(key)?;
-                        let mut new = p.get(key)?;
-                        for part in path.split('.').skip(1) {
-                            old = old.get(part)?;
-                            new = new.get(part)?;
+                        for path in age_paths() {
+                            if path.split('.').next() == Some(k.as_str()) {
+                                n.ages.remove(path);
+                            }
                         }
-                        (old == new)
-                            .then(|| n.ages.get(path).map(|base| (path.to_owned(), *base)))
-                            .flatten()
-                    })
-                    .collect();
-                for (k, v) in p {
-                    if v.is_null() {
-                        n.props.remove(k);
-                    } else {
-                        n.props.insert(k.clone(), v.clone());
                     }
-                    for path in age_paths() {
-                        if path.split('.').next() == Some(k.as_str()) {
-                            n.ages.remove(path);
-                        }
-                    }
-                }
-                refresh_ages(n, now);
-                n.ages.extend(unchanged);
+                    refresh_ages(n, now);
+                    n.ages.extend(unchanged);
+                });
                 self.unsettle(id);
             }
             "text" | "splice" => {
@@ -335,11 +370,7 @@ impl TspDocument {
                     let end = utf16_byte(old, end)?;
                     format!("{}{text}{}", &old[..start], &old[end..])
                 };
-                self.nodes
-                    .get_mut(id)
-                    .unwrap()
-                    .props
-                    .insert("text".into(), next.into());
+                self.edit_props(id, |n| n.props.insert("text".into(), next.into()));
                 self.unsettle(id);
             }
             "move" => {
@@ -362,17 +393,9 @@ impl TspDocument {
                     return Err("depth limit".into());
                 }
                 let old = self.nodes[id].parent.clone().unwrap();
-                self.nodes
-                    .get_mut(&old)
-                    .unwrap()
-                    .children
-                    .retain(|c| c != id);
+                self.edit_children(&old, |children| children.retain(|c| c != id));
                 let pos = self.position(p, &a[3])?;
-                self.nodes
-                    .get_mut(p)
-                    .unwrap()
-                    .children
-                    .insert(pos, id.into());
+                self.edit_children(p, |children| children.insert(pos, id.into()));
                 self.nodes.get_mut(id).unwrap().parent = Some(p.into());
                 self.unsettle(&old);
                 self.unsettle(id);
@@ -382,7 +405,7 @@ impl TspDocument {
                     return Err("cannot delete the root".into());
                 }
                 let p = self.nodes[id].parent.clone().unwrap();
-                self.nodes.get_mut(&p).unwrap().children.retain(|c| c != id);
+                self.edit_children(&p, |children| children.retain(|c| c != id));
                 self.remove(id);
                 self.unsettle(&p);
             }
@@ -522,25 +545,13 @@ impl TspDocument {
         Ok(())
     }
     pub fn estimated_bytes(&self) -> usize {
-        self.nodes
-            .values()
-            .map(|n| {
-                n.id.len()
-                    + n.kind.len()
-                    + serde_json::to_vec(&n.props).unwrap().len()
-                    + 128
-                    + n.children.len() * 32
-            })
-            .sum::<usize>()
+        self.node_bytes
             + self
                 .sheets
                 .iter()
                 .map(|(n, c)| n.len() + c.len())
                 .sum::<usize>()
-            + self
-                .palette
-                .as_ref()
-                .map_or(0, |p| serde_json::to_vec(p).unwrap().len())
+            + self.palette.as_ref().map_or(0, json_len)
     }
     pub fn settled_main_children(&self) -> Vec<String> {
         self.nodes
@@ -589,28 +600,14 @@ impl TspDocument {
             pending.extend(self.nodes[&at].children.iter().rev().cloned());
             removed.push(at);
         }
-        self.nodes
-            .get_mut("main")?
-            .children
-            .retain(|child| child != id);
+        self.edit_children("main", |children| children.retain(|child| child != id));
         self.remove(id);
         self.unsettle("main");
         self.revision += 1;
         Some(removed)
     }
     pub fn blob_references(&self) -> BTreeSet<String> {
-        let mut out = BTreeSet::new();
-        for n in self.nodes.values() {
-            for (key, value) in &n.props {
-                if matches!(key.as_str(), "blob" | "sha256") {
-                    if let Some(id) = value.as_str() {
-                        out.insert(id.to_ascii_lowercase());
-                    }
-                }
-                collect_blobs(value, &mut out);
-            }
-        }
-        out
+        self.blob_refs.keys().cloned().collect()
     }
 }
 
@@ -790,25 +787,60 @@ impl Serialize for ReplayProps<'_> {
         props.end()
     }
 }
-fn collect_blobs(v: &Value, out: &mut BTreeSet<String>) {
-    match v {
-        Value::Object(o) => {
-            for (k, v) in o {
-                if matches!(k.as_str(), "blob" | "sha256") {
-                    if let Some(s) = v.as_str() {
-                        out.insert(s.to_ascii_lowercase());
-                    }
-                }
-                collect_blobs(v, out);
+/// Compact JSON length without materializing the encoding.
+fn json_len<T: Serialize + ?Sized>(value: &T) -> usize {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut count = Count(0);
+    serde_json::to_writer(&mut count, value).expect("JSON value serialization");
+    count.0
+}
+/// Every `blob`/`sha256` string at any depth of `props`, as written.
+fn visit_blobs(props: &Map<String, Value>, visit: &mut impl FnMut(&str)) {
+    for (key, value) in props {
+        if matches!(key.as_str(), "blob" | "sha256") {
+            if let Some(id) = value.as_str() {
+                visit(id);
             }
         }
+        visit_value_blobs(value, visit);
+    }
+}
+fn visit_value_blobs(value: &Value, visit: &mut impl FnMut(&str)) {
+    match value {
+        Value::Object(o) => visit_blobs(o, visit),
         Value::Array(a) => {
             for v in a {
-                collect_blobs(v, out);
+                visit_value_blobs(v, visit);
             }
         }
         _ => {}
     }
+}
+fn add_blobs(refs: &mut BTreeMap<String, usize>, props: &Map<String, Value>) {
+    visit_blobs(props, &mut |id| {
+        *refs.entry(id.to_ascii_lowercase()).or_default() += 1;
+    });
+}
+fn remove_blobs(refs: &mut BTreeMap<String, usize>, props: &Map<String, Value>) {
+    visit_blobs(props, &mut |id| {
+        let id = id.to_ascii_lowercase();
+        let Some(count) = refs.get_mut(&id) else {
+            return;
+        };
+        *count -= 1;
+        if *count == 0 {
+            refs.remove(&id);
+        }
+    });
 }
 fn age_paths() -> [&'static str; 5] {
     [
@@ -1109,5 +1141,83 @@ mod tests {
             assert_eq!(json!(d.focus), state["focus"]);
             assert_eq!(json!(d.settled), state["settled"]);
         }
+    }
+    /// The pre-incremental full scan, kept as the reference for both totals.
+    fn rescanned(d: &TspDocument) -> (usize, BTreeSet<String>) {
+        fn scan(v: &Value, out: &mut BTreeSet<String>) {
+            match v {
+                Value::Object(o) => {
+                    for (k, v) in o {
+                        if matches!(k.as_str(), "blob" | "sha256") {
+                            if let Some(s) = v.as_str() {
+                                out.insert(s.to_ascii_lowercase());
+                            }
+                        }
+                        scan(v, out);
+                    }
+                }
+                Value::Array(a) => a.iter().for_each(|v| scan(v, out)),
+                _ => {}
+            }
+        }
+        let mut blobs = BTreeSet::new();
+        let mut bytes = 0;
+        for n in d.nodes.values() {
+            bytes += n.id.len()
+                + n.kind.len()
+                + serde_json::to_vec(&n.props).unwrap().len()
+                + 128
+                + n.children.len() * 32;
+            scan(&Value::Object(n.props.clone()), &mut blobs);
+        }
+        bytes += d.sheets.iter().map(|(n, c)| n.len() + c.len()).sum::<usize>();
+        bytes += d
+            .palette
+            .as_ref()
+            .map_or(0, |p| serde_json::to_vec(p).unwrap().len());
+        (bytes, blobs)
+    }
+    #[test]
+    fn incremental_size_and_blob_references_match_a_full_rescan() {
+        let mut d = TspDocument::new("s");
+        let check = |d: &TspDocument, step: &str| {
+            let (bytes, blobs) = rescanned(d);
+            assert_eq!(d.estimated_bytes(), bytes, "bytes after {step}");
+            assert_eq!(d.blob_references(), blobs, "blobs after {step}");
+        };
+        check(&d, "new");
+        let ops = [
+            json!(["add","main","s",null,{"id":"main","k":"col","c":[
+                {"id":"e1","k":"text","p":{"text":"a\"\n😀","img":{"blob":"ABC"}}},
+                {"id":"e2","k":"col","c":[{"id":"e2a","k":"text","p":{"sha256":"DEF","list":[{"blob":"abc"}]}}]}
+            ]}]),
+            json!(["add","dock","s",null,{"id":"dock","k":"col","c":[{"id":"draft","k":"editor","p":{"text":""}}]}]),
+            json!(["add","dup","main",null,{"id":"dup","k":"col","c":[{"id":"e1","k":"text"}]}]),
+            json!(["set","missing",{"blob":"FFF"}]),
+            json!(["set","e1",{"img":null,"meta":{"nested":[{"sha256":"FFF"}]},"age":3}]),
+            json!(["set","e2a",{"sha256":null}]),
+            json!(["text","draft","append","hello"]),
+            json!(["splice","draft",1,2,"ZZ"]),
+            json!(["text","draft","replace","é"]),
+            json!(["move","e2a","main","e1"]),
+            json!(["move","main","e2a",null]),
+            json!(["del","e2"]),
+            json!(["settle","e1"]),
+            json!(["focus","draft"]),
+        ];
+        for (s, op) in ops.into_iter().enumerate() {
+            let step = op.to_string();
+            d.apply_frame(&Frame { sf: "s".into(), s: s as u64, ops: vec![op] }, 7)
+                .unwrap();
+            check(&d, &step);
+        }
+        assert_eq!(d.evict_settled_main_child("e1").unwrap(), ["e1"]);
+        check(&d, "evict");
+        d.set_palette(json!({"dark":{"fg":"#fff"}})).unwrap();
+        d.set_sheet("theme", Some(&json!(".a{}"))).unwrap();
+        check(&d, "metadata");
+        d.close();
+        assert!(!d.has("draft"));
+        check(&d, "close");
     }
 }

@@ -259,6 +259,7 @@ fn open(server: &mut Server, pane: PaneId, value: Value) {
     }
 }
 fn frame(server: &mut Server, pane: PaneId, value: Value) {
+    let started = rmux_util::log::enabled().then(std::time::Instant::now);
     let context = json!({"sf":value.get("sf"),"s":value.get("s")});
     let frame = match serde_json::from_value::<Frame>(value) {
         Ok(f) => f,
@@ -333,6 +334,22 @@ fn frame(server: &mut Server, pane: PaneId, value: Value) {
         .surfaces
         .retain();
     super::lifetime::apply_change(server, pane, change);
+    if let Some(started) = started {
+        let (nodes, bytes) = server
+            .panes
+            .get(pane)
+            .and_then(|p| p.tsp.as_ref()?.surfaces.get(handle))
+            .map_or((0, 0), |s| {
+                (s.document.size(), s.document.estimated_bytes())
+            });
+        rmux_util::log_debug!(
+            "tsp {pane:?}: frame {} s={} ops={}: {nodes} nodes, {bytes} bytes, {}us",
+            frame.sf,
+            frame.s,
+            frame.ops.len(),
+            started.elapsed().as_micros()
+        );
+    }
 }
 fn query(server: &mut Server, pane: PaneId, value: Value) {
     match value["q"].as_str() {
