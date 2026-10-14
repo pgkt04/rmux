@@ -324,12 +324,16 @@ admitted. Source-op coverage becomes visible only at frame admission, and blob
 base64/APC bodies are generated as the tty drains rather than eagerly buffered.
 
 The rmux-specific `rmux-reprobe`/epoch/`rmux-ready` contract selects one renderer
-for every viewer of a pane: a plain or read-only plain attachment forces all
-viewers to ANSI; a client on another window does not. Native rendering requires
-only eligible TSP viewers and a sole visible or zoomed pane, without cropping,
-panning, floating panes, popups, pane modes, or menus. Client command prompts
-and messages remain native when the viewer supports the dock/status kinds
-(prompts also require `input`); other overlays retain the cell fallback. The
+for a pane, chosen by the viewer in use: the writable viewer with the newest
+input. If that viewer can show the native view, every eligible TSP viewer gets
+the projection, and an idle viewer that cannot (a plain or read-only plain
+attachment, or one smaller than the window) sees the cell note instead. If it
+cannot, all viewers get ANSI. A client on another window does not count. Native
+rendering requires at least one eligible TSP viewer and a sole visible or zoomed
+pane, without cropping, panning, floating panes, popups, pane modes, or menus.
+Client command prompts and messages remain native when the viewer supports the
+dock/status kinds (prompts also require `input`); other overlays retain the cell
+fallback. The
 outer surface hides cell status, borders, titles, and scrollbars without
 changing saved options or layout. Its native dock includes the status strip and
 active prompt/message; prefix keys remain rmux input. With `styles` and `el`,

@@ -131,7 +131,6 @@ pub fn native_only(server: &Server, pane: PaneId) -> Option<String> {
     let state = p.tsp.as_ref()?;
     if !p.modes.is_empty()
         || p.prompt.is_some()
-        || !state.stock
         || !matches!(state.renderer, Renderer::Native | Renderer::Detached)
     {
         return None;

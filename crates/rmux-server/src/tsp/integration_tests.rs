@@ -294,7 +294,15 @@ impl FakeTerminal {
             None,
         )
         .unwrap();
-        let mut client = Client::new(None, (0, 0));
+        // A later attach is the newer client, as it is with a real clock.
+        let newest = server
+            .client_order
+            .iter()
+            .filter_map(|id| server.clients.get(*id))
+            .map(|c| c.activity_time)
+            .max()
+            .unwrap_or((0, 0));
+        let mut client = Client::new(None, (newest.0 + 1, 0));
         client.session = session;
         client.flags.insert(ClientFlags::ATTACHED);
         client.tty = Some(tty);
@@ -1790,6 +1798,94 @@ fn source_ack_requires_every_viewer_and_none_when_detached() {
         acks, drawn,
         "no source ack is invented for an empty viewer set"
     );
+}
+
+#[test]
+fn smaller_idle_viewer_gets_the_note_and_the_viewer_in_use_keeps_native() {
+    let mut fixture = Fixture::new();
+    let mut ghost = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
+    fixture.settle(&mut ghost);
+    let mut live = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
+    live.pump(&mut fixture.server);
+    live.draw(&mut fixture.server);
+    fixture.drive();
+    // A closed browser tab keeps its client, now smaller than the window.
+    fixture
+        .server
+        .clients
+        .get_mut(ghost.client)
+        .unwrap()
+        .tty
+        .as_mut()
+        .unwrap()
+        .set_size(40, 12, 0, 0);
+    broker::recompute(&mut fixture.server);
+    ghost.pump(&mut fixture.server);
+    live.pump(&mut fixture.server);
+    let pane = fixture.pane;
+    let renderer = |server: &Server| {
+        server
+            .panes
+            .get(pane)
+            .unwrap()
+            .tsp
+            .as_ref()
+            .unwrap()
+            .renderer
+    };
+    assert_eq!(renderer(&fixture.server), broker::Renderer::Native);
+    assert!(
+        fixture
+            .server
+            .clients
+            .get(ghost.client)
+            .unwrap()
+            .tsp
+            .projection
+            .is_none()
+    );
+    assert_eq!(live.text("transcript"), "transcript:0");
+
+    let acks = |fixture: &Fixture| {
+        fixture
+            .replies
+            .iter()
+            .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
+            .count()
+    };
+    let before = acks(&fixture);
+    let fd = fixture
+        .server
+        .panes
+        .get(fixture.pane)
+        .unwrap()
+        .fd
+        .as_ref()
+        .unwrap();
+    write_all_fd(fd.as_fd(), &apc(b'q', &json!({"q":"fixture-work"})));
+    fixture.drive();
+    live.pump(&mut fixture.server);
+    live.draw(&mut fixture.server);
+    fixture.drive();
+    assert_eq!(live.text("transcript"), "transcript:1");
+    assert_eq!(
+        acks(&fixture),
+        before + 1,
+        "the viewer in use alone pays the draw debt"
+    );
+
+    // Typing in the small client makes it the one in use: everyone gets text.
+    fixture
+        .server
+        .clients
+        .get_mut(ghost.client)
+        .unwrap()
+        .activity_time = (i64::MAX, 0);
+    broker::recompute(&mut fixture.server);
+    fixture.settle(&mut ghost);
+    live.pump(&mut fixture.server);
+    assert_eq!(renderer(&fixture.server), broker::Renderer::Ansi);
+    assert!(live.tree.is_none());
 }
 
 #[test]

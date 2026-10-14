@@ -320,7 +320,7 @@ pub fn release_drawn(server: &mut Server, pane: PaneId) {
     };
     let surface_id = surface.id;
     let logical = surface.wire_id.clone();
-    let viewers = broker::viewers(server, pane);
+    let viewers = super::contract::native_viewers(server, pane);
     let mut minimum = None;
     for client in viewers {
         let Some(projection) = server

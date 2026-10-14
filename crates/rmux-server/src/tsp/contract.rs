@@ -153,27 +153,7 @@ fn display_contract_for_viewers(
         .copied()
         .filter(|id| viewer_eligible(server, pane, *id))
         .collect();
-    let leader = eligible
-        .iter()
-        .copied()
-        .filter(|id| {
-            !server
-                .clients
-                .get(*id)
-                .unwrap()
-                .flags
-                .contains(ClientFlags::READONLY)
-        })
-        .max_by(|a, b| {
-            server
-                .clients
-                .get(*a)
-                .unwrap()
-                .activity_time
-                .cmp(&server.clients.get(*b).unwrap().activity_time)
-                .then_with(|| b.cmp(a))
-        })
-        .or_else(|| eligible.iter().copied().min());
+    let leader = latest_writer(server, &eligible).or_else(|| eligible.iter().copied().min());
     let offers_v1 = state.program_hello["v"]
         .as_array()
         .is_some_and(|v| v.iter().any(|version| version.as_u64() == Some(1)));
@@ -205,15 +185,51 @@ fn display_contract_for_viewers(
     {
         return (None, leader);
     }
-    if eligible.len() != ids.len() {
+    // The client in use decides. An idle viewer that cannot show the pane (one
+    // smaller than the window, a plain terminal) gets the grid note and does
+    // not take the native view from the others.
+    if eligible.is_empty()
+        || latest_writer(server, ids).is_some_and(|active| !eligible.contains(&active))
+    {
         return (None, leader);
     }
-    let hellos: Vec<_> = ids
+    let hellos: Vec<_> = eligible
         .iter()
         .filter_map(|id| server.clients.get(*id)?.tsp.hello().cloned())
         .collect();
-    let index = ids.iter().position(|id| Some(*id) == leader).unwrap();
+    let index = eligible.iter().position(|id| Some(*id) == leader).unwrap();
     (DisplayContract::intersect(&hellos, index, p.sx), leader)
+}
+
+/// The writable client with the newest input: the one in use.
+fn latest_writer(server: &Server, ids: &[ClientId]) -> Option<ClientId> {
+    ids.iter()
+        .copied()
+        .filter(|id| {
+            !server
+                .clients
+                .get(*id)
+                .unwrap()
+                .flags
+                .contains(ClientFlags::READONLY)
+        })
+        .max_by(|a, b| {
+            server
+                .clients
+                .get(*a)
+                .unwrap()
+                .activity_time
+                .cmp(&server.clients.get(*b).unwrap().activity_time)
+                .then_with(|| b.cmp(a))
+        })
+}
+
+/// The viewers that get the native projection when the pane has a contract.
+pub fn native_viewers(server: &Server, pane: PaneId) -> Vec<ClientId> {
+    viewers(server, pane)
+        .into_iter()
+        .filter(|id| viewer_eligible(server, pane, *id))
+        .collect()
 }
 
 fn viewer_eligible(server: &Server, pane: PaneId, id: ClientId) -> bool {
@@ -411,8 +427,8 @@ pub fn begin_initial(server: &mut Server, pane: PaneId, native: bool) {
 }
 
 /// A [`PaneTspState::stock`] program takes its renderer from the viewers at
-/// its hello and keeps it until its next hello: native when it starts with only
-/// eligible viewers, else ANSI.
+/// its hello and keeps it until its next hello: native when the viewer in use
+/// can show it, else ANSI.
 pub fn begin_stock(server: &mut Server, pane: PaneId, native: bool) {
     let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
         return;
@@ -891,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn same_size_native_join_keeps_epoch_but_plain_readonly_forces_ansi() {
+    fn idle_plain_viewers_keep_native_until_a_plain_writer_is_in_use() {
         let (mut server, pane, session) = fixture();
         let a = client(&mut server, session, true, false);
         let (contract, leader) = display_contract(&server, pane);
@@ -903,8 +919,19 @@ mod tests {
         recompute(&mut server);
         assert_eq!(state(&server, pane).epoch, epoch);
         assert!(state(&server, pane).switch.is_none());
-        let plain = client(&mut server, session, false, true);
+
+        let readonly = client(&mut server, session, false, true);
+        server.clients.get_mut(readonly).unwrap().activity_time = (1, 0);
+        let plain = client(&mut server, session, false, false);
+        assert!(viewers(&server, pane).contains(&readonly));
         assert!(viewers(&server, pane).contains(&plain));
+        recompute(&mut server);
+        assert_eq!(state(&server, pane).epoch, epoch);
+        assert!(state(&server, pane).switch.is_none());
+        assert!(state(&server, pane).contract.is_some());
+        assert!(!native_viewers(&server, pane).contains(&readonly));
+
+        server.clients.get_mut(plain).unwrap().activity_time = (2, 0);
         recompute(&mut server);
         assert_eq!(state(&server, pane).epoch, epoch + 1);
         assert_eq!(state(&server, pane).renderer, Renderer::Switching);
@@ -1031,6 +1058,7 @@ mod tests {
         assert_eq!(state(&server, pane).renderer, Renderer::Detached);
 
         let plain = client(&mut server, session, false, false);
+        server.clients.get_mut(plain).unwrap().activity_time = (1, 0);
         recompute(&mut server);
         assert_desired_view(&mut server, pane, "pending");
         let token = server
@@ -1261,9 +1289,10 @@ mod tests {
         );
         let epoch = state(&server, pane).epoch;
 
-        // A plain viewer cannot see the native view, and the program cannot be
-        // told to switch: it stays native and its frames are acked by rmux.
+        // A plain viewer in use cannot see the native view, and the program
+        // cannot be told to switch: it stays native and rmux acks its frames.
         let plain = client(&mut server, session, false, false);
+        server.clients.get_mut(plain).unwrap().activity_time = (1, 0);
         recompute(&mut server);
         assert_eq!(state(&server, pane).renderer, Renderer::Native);
         assert_eq!(state(&server, pane).epoch, epoch);
@@ -1414,7 +1443,7 @@ mod tests {
     }
 
     #[test]
-    fn full_pane_geometry_and_stable_writable_leader_are_required() {
+    fn full_pane_geometry_and_stable_writable_leader_decide_the_contract() {
         let (mut server, pane, session) = fixture();
         let readonly = client(&mut server, session, true, true);
         let first = client(&mut server, session, true, false);
@@ -1446,8 +1475,24 @@ mod tests {
             .as_mut()
             .unwrap()
             .set_size(40, 25, 0, 0);
-        assert!(display_contract(&server, pane).0.is_none());
         assert!(viewers(&server, pane).contains(&first));
+        assert!(!native_viewers(&server, pane).contains(&first));
+        assert_eq!(
+            display_contract(&server, pane).1,
+            Some(readonly.min(second)),
+            "a narrow idle viewer leaves the view to the others"
+        );
+        assert!(display_contract(&server, pane).0.is_some());
+        server
+            .clients
+            .get_mut(first)
+            .unwrap()
+            .flags
+            .remove(ClientFlags::READONLY);
+        assert!(
+            display_contract(&server, pane).0.is_none(),
+            "a narrow viewer in use cannot show the native view, so no viewer gets it"
+        );
     }
 
     fn pane_send(server: &mut Server, pane: PaneId, verb: u8, value: serde_json::Value) {

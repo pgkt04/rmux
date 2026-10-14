@@ -62,7 +62,7 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
         close_projection(server, id);
         return;
     };
-    if !super::contract::viewers(server, pane).contains(&id) {
+    if !super::contract::native_viewers(server, pane).contains(&id) {
         close_projection(server, id);
         return;
     }
