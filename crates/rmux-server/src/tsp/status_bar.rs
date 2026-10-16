@@ -782,6 +782,18 @@ mod tests {
     /// some cells, too few for eight windows.
     const PHONE: u32 = 40;
 
+    /// [`EIGHT`] on a [`PHONE`] client. status-right is fixed text: the
+    /// default one holds the host name, which can fill the line alone.
+    fn phone_session() -> (Server, ClientId, SessionId, Vec<crate::ids::WinlinkId>) {
+        let (mut server, id, s, links) = session_with(&EIGHT, PHONE);
+        let oo = server.sessions.get(s).unwrap().options;
+        let mut options = std::mem::take(&mut server.options);
+        options.set_string(oo, b"status-right", false, b"right", &mut server);
+        server.options = options;
+        status_redraw(&mut server, id);
+        (server, id, s, links)
+    }
+
     fn window_label(index: usize) -> String {
         format!("{index}:{}", String::from_utf8_lossy(EIGHT[index]))
     }
@@ -793,7 +805,7 @@ mod tests {
 
     #[test]
     fn narrow_client_bar_holds_every_window_and_scrolls() {
-        let (mut server, id, _, _) = session_with(&EIGHT, PHONE);
+        let (mut server, id, _, _) = phone_session();
         // The tty's own status line keeps a few windows and a list marker.
         let tty = status_text(&server, id);
         assert!(
@@ -821,7 +833,7 @@ mod tests {
 
     #[test]
     fn narrow_client_bar_click_selects_a_window_the_tty_could_not_draw() {
-        let (mut server, id, s, links) = session_with(&EIGHT, PHONE);
+        let (mut server, id, s, links) = phone_session();
         let tty = status_text(&server, id);
         let hidden = (0..EIGHT.len())
             .rev()
