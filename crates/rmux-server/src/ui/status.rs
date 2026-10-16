@@ -354,8 +354,15 @@ pub fn status_free(srv: &mut Server, c: ClientId) {
     );
 }
 
-/// Draw status line for client. Returns true when it changed.
+/// Draw status line for client at its tty width. Returns true when it changed.
 pub fn status_redraw(srv: &mut Server, c: ClientId) -> bool {
+    let (width, _) = styles::client_size(srv, c);
+    status_redraw_at(srv, c, width)
+}
+
+/// Draw status line for client `width` cells wide. Returns true when it
+/// changed.
+pub fn status_redraw_at(srv: &mut Server, c: ClientId, width: u32) -> bool {
     log_debug!("status_redraw enter");
     let Some(client) = srv.clients.get(c) else {
         return false;
@@ -366,7 +373,7 @@ pub fn status_redraw(srv: &mut Server, c: ClientId) -> bool {
     let Some(s) = client.session else {
         return true;
     };
-    let (width, tty_sy) = styles::client_size(srv, c);
+    let (_, tty_sy) = styles::client_size(srv, c);
     let lines = status_line_size(srv, c);
     if tty_sy == 0 || lines == 0 {
         return true;

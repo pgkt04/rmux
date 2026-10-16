@@ -8,7 +8,7 @@ use crate::{
     ui::status::{
         STATUS_LINES_LIMIT, status_at_line, status_get_range, status_line_size,
         status_message_redraw, status_prompt_line_at, status_prompt_native, status_prompt_redraw,
-        status_redraw,
+        status_redraw_at,
     },
 };
 use rmux_emu::{
@@ -28,6 +28,10 @@ pub const BAR_ACTION: &str = "status";
 /// The chat skins hold dock strips to the transcript measure; the bar spans
 /// the pane like a status line.
 pub const BAR_CSS: &str = "[data-id='rmux:bar']>.sf-status{max-width:none!important;width:100%!important;margin:0!important}";
+/// The status line is drawn this wide for the bar, not at the tty width, so
+/// the window list is whole (no `<`/`>` markers) and the host scrolls the
+/// strip. 1024 cells hold some 60 windows of a dozen-cell name each.
+const BAR_WIDTH: u32 = 1024;
 
 pub fn supported(hello: &Hello) -> bool {
     hello.features.contains("dock")
@@ -74,7 +78,7 @@ pub fn refresh(server: &mut Server, id: ClientId) -> bool {
         {
             status_message_redraw(server, id);
         } else if server.clients.get(id).is_some_and(|c| !c.prompt.is_some()) {
-            status_redraw(server, id);
+            status_redraw_at(server, id, BAR_WIDTH);
         }
         build(server, id, prompt, styles)
     } else {
@@ -191,11 +195,12 @@ fn build(
     }
     let c = server.clients.get(id)?;
     let session = c.session?;
-    let grid = &c.status.active().grid;
+    let wide = &c.status.screen.grid;
+    let active = &c.status.active().grid;
     let overlay = c.message.text.is_some() || c.prompt.is_some();
     let lines = (status_line_size(server, id).max(u32::from(overlay)) as usize)
         .min(STATUS_LINES_LIMIT)
-        .min(grid.sy() as usize);
+        .min(active.sy() as usize);
     let overlay_line = status_prompt_line_at(server, id).min(lines.saturating_sub(1) as u32);
     let mut strips = Vec::new();
     let mut clicks = Vec::new();
@@ -217,10 +222,12 @@ fn build(
                 continue;
             }
         }
-        let ranges = if overlay && y as u32 == overlay_line {
-            &[][..]
+        // An overlay copies the status line only at the tty width; the
+        // lines it does not cover come from the wide status screen.
+        let (grid, ranges) = if overlay && y as u32 == overlay_line {
+            (active, &[][..])
         } else {
-            &c.status.entries[y].ranges.0
+            (wide, &c.status.entries[y].ranges.0[..])
         };
         let (segs, line_clicks) = segments(
             server,
@@ -235,7 +242,7 @@ fn build(
         if !segs.is_empty() {
             let strip_id = format!("{BAR_ID}:{y}");
             let base = if overlay && y as u32 == overlay_line {
-                grid.view_get_cell(0, y as u32)
+                active.view_get_cell(0, y as u32)
             } else {
                 c.status.style
             };
@@ -250,7 +257,11 @@ fn build(
                 .write_css(&mut css, light_page(c));
                 css.push_str("border:0!important}");
             }
-            strips.push(json!({"id": strip_id, "k": "status", "p": {"transparent": transparent}, "c": segs}));
+            strips.push(json!({
+                "id": strip_id, "k": "status",
+                "p": {"transparent": transparent, "overflow": "scroll"},
+                "c": segs,
+            }));
         }
     }
     (!strips.is_empty()).then(|| Bar {
@@ -385,9 +396,10 @@ impl Line<'_> {
         let window = range
             .filter(|r| r.range_type == StyleRangeType::Window)
             .and_then(|r| self.window(r.argument));
-        // Tern drops the lowest priority first when the strip is narrow. As
-        // on the tty, status-left and status-right keep their place and the
-        // window list gives way, the current window last.
+        // A scrolling strip keeps the highest priority in view; a host that
+        // cannot scroll drops the lowest first. As on the tty, status-left
+        // and status-right keep their place and the window list gives way,
+        // the current window last.
         let priority = match (kind, window) {
             (_, Some(true)) => 4,
             (Some(StyleRangeType::Left), _) => 3,
@@ -693,6 +705,7 @@ mod tests {
         client::Client,
         ids::ArenaId,
         model::{session, spawn::SpawnFlags, window},
+        ui::status::status_redraw,
     };
 
     fn segs(bar: &Value) -> &[Value] {
@@ -713,6 +726,20 @@ mod tests {
     /// Session `work` showing window 0 `edit` (current) and window 1 `logs`
     /// (bell) to an attached 80x24 client.
     fn work_session() -> (Server, ClientId, SessionId) {
+        let (mut server, id, s, links) = session_with(&[b"edit", b"logs"], 80);
+        server.winlinks.get_mut(links[1]).unwrap().flags = crate::model::WinlinkFlags::BELL;
+        crate::ui::status::status_update_cache(&mut server, s);
+        status_redraw(&mut server, id);
+        (server, id, s)
+    }
+
+    /// Session `work` with the windows `names` from index 0, the first
+    /// current, attached to a client `sx` columns wide whose status line is
+    /// drawn at its tty width.
+    fn session_with(
+        names: &[&[u8]],
+        sx: u32,
+    ) -> (Server, ClientId, SessionId, Vec<crate::ids::WinlinkId>) {
         let mut server = Server::new();
         let options = server.options.create(Some(server.options.global_s));
         let s = session::session_create(
@@ -727,8 +754,8 @@ mod tests {
             },
         );
         let mut links = Vec::new();
-        for (index, name) in [b"edit", b"logs"].iter().enumerate() {
-            let w = window::window_create(&mut server, 80, 23, 0, 0).unwrap();
+        for (index, name) in names.iter().enumerate() {
+            let w = window::window_create(&mut server, sx, 23, 0, 0).unwrap();
             server.windows.get_mut(w).unwrap().name = name.to_vec();
             let pane =
                 window::window_add_pane(&mut server, w, None, 0, SpawnFlags::default()).unwrap();
@@ -737,16 +764,85 @@ mod tests {
             links.push(session::session_attach(&mut server, s, w, index as i32).unwrap());
         }
         session::session_set_current(&mut server, s, Some(links[0]));
-        server.winlinks.get_mut(links[1]).unwrap().flags = crate::model::WinlinkFlags::BELL;
         crate::ui::status::status_update_cache(&mut server, s);
         let mut c = Client::new(None, (0, 0));
         c.session = Some(s);
         c.flags.insert(ClientFlags::ATTACHED);
-        c.tty_sx = 80;
+        c.tty_sx = sx;
         c.tty_sy = 24;
         let id = server.clients.insert(c).unwrap();
         status_redraw(&mut server, id);
-        (server, id, s)
+        (server, id, s, links)
+    }
+
+    const EIGHT: [&[u8]; 8] = [
+        b"edit", b"logs", b"build", b"tests", b"notes", b"shell", b"music", b"mail",
+    ];
+    /// A phone's width: status-left and status-right leave the window list
+    /// some cells, too few for eight windows.
+    const PHONE: u32 = 40;
+
+    fn window_label(index: usize) -> String {
+        format!("{index}:{}", String::from_utf8_lossy(EIGHT[index]))
+    }
+
+    fn status_text(server: &Server, id: ClientId) -> String {
+        let grid = &server.clients.get(id).unwrap().status.screen.grid;
+        String::from_utf8_lossy(&grid.view_string_cells(0, 0, grid.sx())).into_owned()
+    }
+
+    #[test]
+    fn narrow_client_bar_holds_every_window_and_scrolls() {
+        let (mut server, id, _, _) = session_with(&EIGHT, PHONE);
+        // The tty's own status line keeps a few windows and a list marker.
+        let tty = status_text(&server, id);
+        assert!(
+            tty.contains('>') && !tty.contains(&window_label(7)),
+            "{tty}"
+        );
+
+        status_redraw_at(&mut server, id, BAR_WIDTH);
+        let bar = build(&mut server, id, None, false).unwrap().node;
+        assert_eq!(bar["c"][0]["p"]["overflow"], "scroll");
+        for index in 0..EIGHT.len() {
+            seg(&bar, &window_label(index));
+        }
+        assert!(
+            segs(&bar)
+                .iter()
+                .all(|seg| !seg["p"]["text"].as_str().unwrap().contains(['<', '>'])),
+            "{bar}"
+        );
+
+        // Off the native view, the cell redraw draws at the tty width again.
+        status_redraw(&mut server, id);
+        assert_eq!(status_text(&server, id), tty);
+    }
+
+    #[test]
+    fn narrow_client_bar_click_selects_a_window_the_tty_could_not_draw() {
+        let (mut server, id, s, links) = session_with(&EIGHT, PHONE);
+        let tty = status_text(&server, id);
+        let hidden = (0..EIGHT.len())
+            .rev()
+            .find(|&i| !tty.contains(&window_label(i)))
+            .unwrap();
+        // `MouseDown1Status { switch-client -t= }`, `=` the clicked window.
+        crate::cmd::key_bindings::init(&mut server).unwrap();
+        crate::cmd::queue::next(&mut server, None);
+        let options = server.sessions.get(s).unwrap().options;
+        server.options.set_number_value(options, b"mouse", 1);
+
+        status_redraw_at(&mut server, id, BAR_WIDTH);
+        let bar = build(&mut server, id, None, false).unwrap();
+        let target = seg(&bar.node, &window_label(hidden))["id"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        server.clients.get_mut(id).unwrap().tsp.bar_segs = bar.segs;
+        click(&mut server, id, &target);
+        crate::cmd::queue::next(&mut server, Some(id));
+        assert_eq!(server.sessions.get(s).unwrap().current, Some(links[hidden]));
     }
 
     #[test]
