@@ -38,6 +38,9 @@ pub struct ClientTspState {
     pub diagnostic: Option<String>,
     pub rebuild_attempted: bool,
     pub failed_logical: Option<String>,
+    /// The TSP host lost the outer surface and the projection was opened
+    /// again; no frame of it is acked yet.
+    pub host_reopen_unacked: bool,
     pub transition_pane: Option<PaneId>,
     /// Tern rejected the native status bar; this client goes without it.
     pub bar_failed: bool,
@@ -60,6 +63,7 @@ impl Default for ClientTspState {
             diagnostic: None,
             rebuild_attempted: false,
             failed_logical: None,
+            host_reopen_unacked: false,
             transition_pane: None,
             bar_failed: false,
             bar_segs: Vec::new(),
@@ -93,6 +97,7 @@ impl ClientTspState {
         self.diagnostic = None;
         self.rebuild_attempted = false;
         self.failed_logical = None;
+        self.host_reopen_unacked = false;
         self.transition_pane = None;
         self.bar_failed = false;
         self.bar_segs.clear();

@@ -1326,6 +1326,54 @@ fn client_that_stays_smaller_than_the_window_gets_no_projection() {
     assert_eq!(projection(&server, big.client), before);
 }
 
+/// The TSP host after a page reload that kept the pty: it reports the outer
+/// surface gone. The terminal forgets its tree, as the reloaded page did.
+fn host_lost_surface(server: &mut Server, terminal: &mut FakeTerminal) {
+    let outer = terminal.tree.take().unwrap()["id"].clone();
+    terminal.focus = None;
+    terminal.frames.clear();
+    terminal.send(
+        server,
+        &apc(b'e', &json!({"ev":"gone","sf":outer,"ids":[outer]})),
+    );
+    terminal.pump(server);
+}
+
+fn projection_generation(server: &Server, terminal: &FakeTerminal) -> Option<u64> {
+    let c = server.clients.get(terminal.client).unwrap();
+    c.tsp.projection.as_ref().map(|p| p.generation)
+}
+
+#[test]
+fn host_that_lost_the_surface_gets_it_again_after_every_reload() {
+    let (mut server, _, mut terminal) = stock_native();
+    let mut generations = vec![projection_generation(&server, &terminal).unwrap()];
+    for _ in 0..3 {
+        host_lost_surface(&mut server, &mut terminal);
+        assert!(
+            terminal.draw(&mut server).is_some(),
+            "no replay after a reload"
+        );
+        assert_eq!(terminal.text("transcript"), "retained transcript");
+        let c = server.clients.get(terminal.client).unwrap();
+        assert_eq!(c.tsp.format(), "v1");
+        generations.push(projection_generation(&server, &terminal).unwrap());
+    }
+    generations.dedup();
+    assert_eq!(generations.len(), 4, "{generations:?}");
+}
+
+#[test]
+fn host_that_loses_the_reopened_surface_before_an_ack_falls_back() {
+    let (mut server, _, mut terminal) = stock_native();
+    host_lost_surface(&mut server, &mut terminal);
+    assert!(projection_generation(&server, &terminal).is_some());
+    host_lost_surface(&mut server, &mut terminal);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.projection.is_none());
+    assert_eq!(c.tsp.format(), "no");
+}
+
 #[test]
 fn native_vi_command_prompt_rejects_host_edit_and_keeps_raw_vi_keys() {
     let (mut server, _, mut terminal) = native_status_terminal();

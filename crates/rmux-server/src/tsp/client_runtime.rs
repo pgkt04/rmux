@@ -63,6 +63,7 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
     }
     c.tsp.rebuild_attempted = false;
     c.tsp.failed_logical = None;
+    c.tsp.host_reopen_unacked = false;
     c.tsp.diagnostic = None;
     c.tsp.visible = true;
     c.tsp.projection_hello = None;
@@ -282,6 +283,24 @@ fn rebuild_projection(server: &mut Server, client: ClientId) {
     c.tsp.rebuild_attempted = true;
     c.tsp.failed_logical = Some(identity);
     projection.failed = true;
+    c.tsp.projection_hello = None;
+    broker::close_projection(server, client);
+    broker::project_pending(server, client);
+}
+
+/// The TSP host lost the outer surface (a page reload that kept the pty):
+/// open the projection again with a new hello and a full replay. A host that
+/// loses the reopened surface before it acks one frame of it is broken, not
+/// reloaded, and falls back to the cell view.
+fn reopen_projection(server: &mut Server, client: ClientId) {
+    let Some(c) = server.clients.get_mut(client) else {
+        return;
+    };
+    if c.tsp.host_reopen_unacked {
+        client_protocol_fault(server, client);
+        return;
+    }
+    c.tsp.host_reopen_unacked = true;
     c.tsp.projection_hello = None;
     broker::close_projection(server, client);
     broker::project_pending(server, client);
@@ -510,7 +529,7 @@ fn client_gone(
         return;
     };
     if nodes.iter().any(|id| id == &projection.outer) {
-        rebuild_projection(server, client);
+        reopen_projection(server, client);
         return;
     }
     let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
@@ -582,6 +601,9 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
             };
             if projection.ack(sequence).is_err() {
                 return;
+            }
+            if let Some(c) = server.clients.get_mut(client) {
+                c.tsp.host_reopen_unacked = false;
             }
             release_drawn(server, pane);
             broker::project_pending(server, client);
