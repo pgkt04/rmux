@@ -1213,6 +1213,119 @@ fn native_bar_ignores_unknown_segments_other_actions_and_mouse_off() {
     assert_eq!(server.sessions.get(session).unwrap().current, Some(first));
 }
 
+/// `MSG_RESIZE` after the terminal changed to `sx`x`sy`, run through the
+/// server loop's order: the message, its effects, then the client tick.
+fn resize_terminal(server: &mut Server, terminal: &mut FakeTerminal, sx: u16, sy: u16) {
+    let tty = server.clients.get(terminal.client).unwrap().tty.as_ref();
+    rmux_sys::pty::set_winsize(
+        tty.unwrap().fd(),
+        Winsize {
+            rows: sy,
+            cols: sx,
+            xpixel: sx * 8,
+            ypixel: sy * 16,
+        },
+    )
+    .unwrap();
+    crate::client::dispatch::on_message(
+        server,
+        terminal.client,
+        crate::server::protocol::ProtocolMessage::new(
+            crate::server::protocol::ProtocolMessageKind::Resize,
+            Vec::new(),
+        ),
+    );
+    crate::server::run::drain_effects(server).unwrap();
+    crate::client::tick::tick(server);
+    crate::server::run::drain_effects(server).unwrap();
+    terminal.pump(server);
+    terminal.draw(server);
+}
+
+#[test]
+fn rows_only_client_resize_keeps_the_native_projection() {
+    let (mut server, pane, mut terminal) = stock_native();
+    let client = terminal.client;
+    let generation = |server: &Server| {
+        let c = server.clients.get(client).unwrap();
+        c.tsp.projection.as_ref().map(|p| p.generation)
+    };
+    let before = generation(&server);
+    assert!(before.is_some());
+    let window = server.panes.get(pane).unwrap().window;
+    // A real terminal client, the program's cursor on the last row: a
+    // smaller tty follows it with a window offset.
+    server
+        .clients
+        .get_mut(client)
+        .unwrap()
+        .flags
+        .insert(ClientFlags::TERMINAL);
+    pane_runtime::pane_parse_buffer(&mut server, pane, b"\x1b[24;1H\x1b[?25h").unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    let sent = terminal.packets.len();
+    // A phone's soft keyboard opens, then closes: only the rows change.
+    for (rows, window_rows) in [(19, 18), (25, 24)] {
+        resize_terminal(&mut server, &mut terminal, 80, rows);
+        let w = server.windows.get(window).unwrap();
+        assert_eq!((w.sx, w.sy), (80, window_rows));
+        assert_eq!(generation(&server), before, "{rows} rows re-projected");
+        assert_eq!(
+            server
+                .panes
+                .get(pane)
+                .unwrap()
+                .tsp
+                .as_ref()
+                .unwrap()
+                .renderer,
+            broker::Renderer::Native
+        );
+    }
+    let verbs: Vec<char> = terminal.packets[sent..]
+        .iter()
+        .map(|(verb, _)| char::from(*verb))
+        .collect();
+    assert!(
+        verbs.iter().all(|verb| !"xostb".contains(*verb)),
+        "re-projected on a rows-only resize: {verbs:?}"
+    );
+    assert_eq!(terminal.opens, 1);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+}
+
+#[test]
+fn client_that_stays_smaller_than_the_window_gets_no_projection() {
+    let (mut server, pane, mut big) = stock_native();
+    let window = server.panes.get(pane).unwrap().window;
+    let options = server.windows.get(window).unwrap().options;
+    // `window-size largest`: the bigger client keeps the window at 80x24.
+    server.options.set_number_value(options, b"window-size", 0);
+    let session = server.clients.get(big.client).unwrap().session;
+    let mut small = FakeTerminal::attach(&mut server, session, true);
+    server.clients.get_mut(big.client).unwrap().activity_time = (i64::MAX, 0);
+    broker::recompute(&mut server);
+    small.pump(&mut server);
+    big.pump(&mut server);
+    big.draw(&mut server);
+    let projection = |server: &Server, client| {
+        let c: &Client = server.clients.get(client).unwrap();
+        c.tsp.projection.as_ref().map(|p| p.generation)
+    };
+    let before = projection(&server, big.client);
+    assert!(before.is_some());
+    assert!(projection(&server, small.client).is_some());
+
+    resize_terminal(&mut server, &mut small, 80, 19);
+    big.pump(&mut server);
+    let w = server.windows.get(window).unwrap();
+    assert_eq!((w.sx, w.sy), (80, 24));
+    assert_eq!(projection(&server, small.client), None);
+    assert!(small.tree.is_none());
+    assert_eq!(projection(&server, big.client), before);
+}
+
 #[test]
 fn native_vi_command_prompt_rejects_host_edit_and_keeps_raw_vi_keys() {
     let (mut server, _, mut terminal) = native_status_terminal();

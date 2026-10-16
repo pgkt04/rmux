@@ -176,8 +176,7 @@ fn display_contract_for_viewers(
         || w.menu.is_some()
         || p.xoff != 0
         || p.yoff != 0
-        || p.sx != w.sx
-        || p.sy != w.sy
+        || !fills_window(p.sx, p.sy, w)
         || w.panes
             .iter()
             .any(|id| *id != pane && pane_is_visible(server, *id))
@@ -245,13 +244,17 @@ fn viewer_eligible(server: &Server, pane: PaneId, id: ClientId) -> bool {
     let Some(tty) = c.tty.as_ref() else {
         return false;
     };
-    let (_, ox, oy, _, _) = tty.window_offset();
+    // The stored offset follows a window resize one effect pass later; a
+    // window that fits the tty has none.
+    let (wsx, wsy) = pending_size(w);
     let (sx, sy) = tty.size();
+    let lines = crate::ui::status::status_line_size(server, id);
+    let fits = sx >= wsx && sy.saturating_sub(lines) >= wsy;
+    let (_, ox, oy, _, _) = tty.window_offset();
     c.pan_window != Some(p.window)
-        && ox == 0
-        && oy == 0
-        && sx >= w.sx
-        && sy >= w.sy
+        && (fits || (ox == 0 && oy == 0))
+        && sx >= wsx
+        && sy >= wsy
         && (!c.prompt.is_some()
             || (!c.tsp.bar_failed
                 && c.tsp
@@ -262,6 +265,22 @@ fn viewer_eligible(server: &Server, pane: PaneId, id: ClientId) -> bool {
         && c.tsp
             .hello()
             .is_some_and(|h| h.v == 1 && h.credits > 0 && h.apc >= 64)
+}
+
+/// The size a client resize gives the window at the next loop turn, else the
+/// window's size. Until it lands, the pane is judged by it, so the resize
+/// does not take the native view away for one loop turn.
+fn pending_size(w: &crate::model::Window) -> (u32, u32) {
+    match w.pending {
+        Some(size) if w.flags.contains(crate::model::WindowFlags::RESIZE) => (size.sx, size.sy),
+        _ => (w.sx, w.sy),
+    }
+}
+
+/// The pane fills the window, also while the window resize lays it out
+/// (the panes take the pending size before the window does).
+fn fills_window(sx: u32, sy: u32, w: &crate::model::Window) -> bool {
+    (sx, sy) == (w.sx, w.sy) || (sx, sy) == pending_size(w)
 }
 
 fn same_renderer_contract(a: Option<&DisplayContract>, b: Option<&DisplayContract>) -> bool {

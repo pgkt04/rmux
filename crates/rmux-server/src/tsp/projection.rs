@@ -133,6 +133,9 @@ pub struct Projection {
     bar_css: String,
     /// The bar's last admitted sheet on the outer surface.
     bar_sheet: Option<String>,
+    /// Blobs this projection admitted before a frame. The host keeps them,
+    /// so later frames do not send them again.
+    admitted_blobs: BTreeSet<String>,
 }
 impl Projection {
     pub fn new(
@@ -177,6 +180,7 @@ impl Projection {
             bar_styles: false,
             bar_css: BAR_CSS.to_owned(),
             bar_sheet: None,
+            admitted_blobs: BTreeSet::new(),
         }
     }
 
@@ -522,14 +526,15 @@ impl Projection {
             params: Default::default(),
             body: encoded,
         };
-        let mut plan =
-            match replay::plan_with_frame(document, blobs, confirmed, &self.outer, message) {
-                Ok(plan) => plan,
-                Err(error) => {
-                    self.failed = true;
-                    return Err(ProjectionError::Replay(error));
-                }
-            };
+        let known: BTreeSet<String> = confirmed.union(&self.admitted_blobs).cloned().collect();
+        let mut plan = match replay::plan_with_frame(document, blobs, &known, &self.outer, message)
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.failed = true;
+                return Err(ProjectionError::Replay(error));
+            }
+        };
         let mut replay_operations = vec![Vec::new(); prefix_ops];
         replay_operations.extend(operations);
         for index in &mut bar_ops {
@@ -646,7 +651,7 @@ impl Projection {
             self.bar_dirty = false;
             return Ok(None);
         };
-        let blobs_out = live_blobs(document, blobs, confirmed);
+        let blobs_out = live_blobs(document, blobs, confirmed, &self.admitted_blobs);
         let mut messages = Vec::new();
         let frame = replay::frame_message(&self.outer, sequence, ops);
         if frame.body.len() > JOINED_LIMIT {
@@ -850,6 +855,8 @@ impl Projection {
         }
         self.root_props = cursor.root_props;
         self.sheets = cursor.sheets;
+        self.admitted_blobs
+            .extend(cursor.plan.blobs.iter().map(|blob| blob.id.clone()));
         self.bar_dock = cursor.bar_dock;
         self.bar_sheet = cursor.bar_sheet;
         self.listening = cursor.listening;
@@ -1374,9 +1381,13 @@ fn live_blobs(
     document: &TspDocument,
     blobs: &TspBlobStore,
     confirmed: &BTreeSet<String>,
+    admitted: &BTreeSet<String>,
 ) -> Vec<replay::ReplayBlob> {
     let mut out = Vec::new();
     for id in document.blob_references().difference(confirmed) {
+        if admitted.contains(id) {
+            continue;
+        }
         if let Some(blob) = blobs.peek(id) {
             out.push(replay::ReplayBlob {
                 id: id.clone(),
@@ -1742,6 +1753,24 @@ mod tests {
         );
         let (live, coverage) = p
             .next_messages(&d, &mut blobs, &BTreeSet::from([hash]), &json!({}), 100)
+            .unwrap()
+            .unwrap();
+        p.note_enqueued(coverage.sequence);
+        assert_eq!(
+            live.iter().map(|message| message.verb).collect::<Vec<_>>(),
+            b"f"
+        );
+        // The host keeps a blob it was sent, so a later frame does not
+        // repeat it, though the host never confirmed it.
+        p.ack(coverage.sequence).unwrap();
+        apply(
+            &mut p,
+            &mut d,
+            300,
+            vec![json!(["set","image",{"label":"t"}])],
+        );
+        let (live, coverage) = p
+            .next_messages(&d, &mut blobs, &BTreeSet::new(), &json!({}), 100)
             .unwrap()
             .unwrap();
         p.note_enqueued(coverage.sequence);
