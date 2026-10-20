@@ -222,8 +222,7 @@ pub fn defer_cell_ui(
                 server
                     .clients
                     .get(*id)
-                    .and_then(|c| c.tsp.projection.as_ref())
-                    .is_some_and(|p| p.pane == pane)
+                    .is_some_and(|c| c.tsp.projections().any(|p| p.pane == pane))
             })
             .collect();
         for client in clients {

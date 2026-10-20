@@ -99,6 +99,11 @@ pub struct Projection {
     /// The outer surface is `inline`, on the client's main screen, as the
     /// program's own surface; otherwise `screen`.
     pub inline: bool,
+    /// The host keeps the surface but shows the grid (`["suspend"]` sent);
+    /// nothing else goes to it until `reveal`.
+    hidden: bool,
+    /// `hidden` changed; the next frame starts with `["suspend"]`/`["resume"]`.
+    visibility_dirty: bool,
     credits: usize,
     next_sequence: u64,
     last_ack: Option<u64>,
@@ -153,6 +158,8 @@ impl Projection {
             drawn_revision: 0,
             failed: false,
             inline: false,
+            hidden: false,
+            visibility_dirty: false,
             credits,
             next_sequence: 1,
             last_ack: None,
@@ -221,6 +228,29 @@ impl Projection {
 
     pub(crate) fn bar_pending(&self) -> bool {
         self.bar_dirty
+    }
+
+    pub fn hide(&mut self) {
+        self.hidden = true;
+        self.visibility_dirty = true;
+    }
+
+    pub fn reveal(&mut self) {
+        self.hidden = false;
+        self.visibility_dirty = true;
+    }
+
+    pub fn is_hidden(&self) -> bool {
+        self.hidden
+    }
+
+    /// `hide`/`reveal` not yet carried by a frame.
+    pub fn visibility_pending(&self) -> bool {
+        self.visibility_dirty
+    }
+
+    fn visibility_op(&self) -> Value {
+        json!([if self.hidden { "suspend" } else { "resume" }])
     }
 
     /// A changed sheet travels with the frame that uses it.
@@ -406,6 +436,9 @@ impl Projection {
         if self.awaiting_frame.is_some() {
             return Ok(self.prepared_held());
         }
+        if self.hidden && !self.visibility_dirty {
+            return Ok(None);
+        }
         let latest = self.pending_revision.unwrap_or(self.sent_revision);
         if document.revision < latest {
             return Err(ProjectionError::StaleRevision);
@@ -419,7 +452,11 @@ impl Projection {
             }
             return Ok(None);
         }
-        if !self.snapshot_needed && self.pending_revision.is_none() && !self.bar_dirty {
+        if !self.snapshot_needed
+            && self.pending_revision.is_none()
+            && !self.bar_dirty
+            && !self.visibility_dirty
+        {
             return Ok(None);
         }
         let next_sequence = self
@@ -621,12 +658,16 @@ impl Projection {
         sequence: u64,
         next_sequence: u64,
     ) -> Result<Option<PreparedSend>, ProjectionError> {
+        let visibility = self.visibility_dirty.then(|| self.visibility_op());
         let mut frame = OuterOps::new(
             &self.outer,
             &mut self.parents,
             self.root_props.clone(),
             self.bar_dock,
         );
+        if let Some(op) = visibility {
+            frame.push(op, Vec::new());
+        }
         for pending in &self.pending {
             let mut value = pending.value.clone();
             rewrite_operation(&mut value, &self.logical, &self.outer);
@@ -768,8 +809,9 @@ impl Projection {
     /// Next unsent palette or sheet, in canonical order: one palette, then sheets
     /// in first-install order. `None` when the metadata queue is empty.
     pub fn peek_metadata(&self) -> Option<WireMessage> {
-        // An old snapshot must finish before any newer canonical metadata.
-        if self.replay.is_some() || !self.opened {
+        // An old snapshot must finish before any newer canonical metadata; a
+        // hidden projection carries its metadata in the `["resume"]` frame.
+        if self.replay.is_some() || !self.opened || self.hidden {
             return None;
         }
         if let Some(palette) = &self.pending_palette {
@@ -873,6 +915,7 @@ impl Projection {
         self.pending_revision = None;
         self.snapshot_needed = false;
         self.bar_dirty = false;
+        self.visibility_dirty = false;
     }
 
     pub fn ack(&mut self, sequence: u64) -> Result<u64, ProjectionError> {
@@ -1006,7 +1049,7 @@ impl Projection {
     }
 
     fn reset_ops(&self) -> Vec<Value> {
-        let mut ops = vec![json!(["focus", null]), json!(["resume"])];
+        let mut ops = vec![self.visibility_op(), json!(["focus", null])];
         for (id, parent) in self.parents.iter() {
             if parent == &self.outer {
                 ops.push(json!(["del", id]));

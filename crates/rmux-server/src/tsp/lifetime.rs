@@ -39,7 +39,7 @@ pub fn apply_change(server: &mut Server, pane: PaneId, change: SurfaceChange) {
     let clients: Vec<_> = server.client_order.iter().copied().collect();
     for client in &clients {
         let affected = server.clients.get(*client).is_some_and(|c| {
-            c.tsp.projection.iter().chain(&c.tsp.covered).any(|p| {
+            c.tsp.projections().any(|p| {
                 p.pane == pane
                     && change
                         .evicted
@@ -132,8 +132,7 @@ fn end_reader(server: &mut Server, pane: PaneId, kind: u8) {
         if server
             .clients
             .get(id)
-            .and_then(|c| c.tsp.projection.as_ref())
-            .is_some_and(|p| p.pane == pane)
+            .is_some_and(|c| c.tsp.projections().any(|p| p.pane == pane))
         {
             super::project::close_projection(server, id);
         }

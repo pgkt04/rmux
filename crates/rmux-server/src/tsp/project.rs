@@ -1,7 +1,7 @@
 // Ported from tmux tty.c, server-client.c @ 8f25579c
 use super::{
     broker::{Renderer, now_ms},
-    client::{ClientTspState, RequestOwner},
+    client::{ClientTspState, RequestOwner, Slot},
     projection::Projection,
     surface::{SurfaceId, SurfaceMode},
     wire::WireMessage,
@@ -37,24 +37,31 @@ fn back_to_grid(tty: &Tty) -> Vec<u8> {
     bytes.extend(tty.alternate_screen(true));
     bytes
 }
-/// `x` for `projection`; an inline one also gives the cell view its screen back.
+/// `x` for `projection`; an inline one also gives the cell view its screen
+/// back. A hidden one first leaves the alternate screen its grid is on, so the
+/// anchor row goes from the main screen.
 fn close_bytes(projection: &Projection, tty: &Tty) -> Vec<u8> {
-    let mut bytes = WireMessage::json(
-        b'x',
-        &serde_json::json!({"id": projection.outer, "keep": false}),
-    )
-    .encode();
+    let mut bytes = if projection.is_hidden() {
+        tty.alternate_screen(false)
+    } else {
+        Vec::new()
+    };
+    bytes.extend(
+        WireMessage::json(
+            b'x',
+            &serde_json::json!({"id": projection.outer, "keep": false}),
+        )
+        .encode(),
+    );
     if projection.inline {
         bytes.extend(back_to_grid(tty));
     }
     bytes
 }
 /// What `Tty::stop` sends for the open projections: the screen first, then
-/// the inline surface under it.
+/// the inline surface under it, then a hidden one.
 fn teardown(tsp: &ClientTspState, tty: &Tty) -> Vec<u8> {
-    tsp.projection
-        .iter()
-        .chain(&tsp.covered)
+    tsp.projections()
         .flat_map(|projection| close_bytes(projection, tty))
         .collect()
 }
@@ -63,15 +70,50 @@ fn shows(projection: &Projection, pane: PaneId, logical: &str, handle: SurfaceId
         && projection.logical == logical
         && projection.outer.ends_with(&format!(":s{}", handle.0))
 }
+/// Close every projection of the client: shown, covered and hidden.
 pub fn close_projection(server: &mut Server, id: ClientId) {
     let Some(c) = server.clients.get_mut(id) else {
         return;
     };
-    if c.tsp.projection.is_none() && c.tsp.covered.is_none() {
+    let closing: Vec<_> = c
+        .tsp
+        .projection
+        .take()
+        .into_iter()
+        .chain(c.tsp.covered.take())
+        .chain(c.tsp.hidden.take())
+        .collect();
+    close_projections(server, id, closing);
+}
+/// Close what the client sees; a hidden projection waits for its window.
+fn close_shown(server: &mut Server, id: ClientId) {
+    let Some(c) = server.clients.get_mut(id) else {
+        return;
+    };
+    let closing: Vec<_> = c
+        .tsp
+        .projection
+        .take()
+        .into_iter()
+        .chain(c.tsp.covered.take())
+        .collect();
+    close_projections(server, id, closing);
+}
+/// Close the hidden projection with its `x`; the grid is up already.
+pub fn close_hidden(server: &mut Server, id: ClientId) {
+    let Some(c) = server.clients.get_mut(id) else {
+        return;
+    };
+    let closing: Vec<_> = c.tsp.hidden.take().into_iter().collect();
+    close_projections(server, id, closing);
+}
+fn close_projections(server: &mut Server, id: ClientId, closing: Vec<Projection>) {
+    if closing.is_empty() {
         return;
     }
-    let mut closing: Vec<_> = c.tsp.projection.take().into_iter().collect();
-    closing.extend(c.tsp.covered.take());
+    let Some(c) = server.clients.get_mut(id) else {
+        return;
+    };
     if let Some(tty) = c.tty.as_mut() {
         if !tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED) {
             return;
@@ -82,10 +124,112 @@ pub fn close_projection(server: &mut Server, id: ClientId) {
             projection.close();
             close.extend(close_bytes(&projection, tty));
         }
-        tty.set_teardown(Vec::new());
+        let bytes = teardown(&c.tsp, tty);
+        tty.set_teardown(bytes);
         let _ = tty.close_protocol(ProtocolTransaction::new(close).teardown());
     }
     restore_grid(server, id);
+}
+/// The host answered `gone` for the hidden projection: forget it, no `x`.
+pub fn drop_hidden(server: &mut Server, id: ClientId) {
+    let Some(c) = server.clients.get_mut(id) else {
+        return;
+    };
+    let Some(hidden) = c.tsp.hidden.take() else {
+        return;
+    };
+    if let Some(tty) = c.tty.as_mut() {
+        tty.cancel_protocol(hidden.generation);
+        let bytes = teardown(&c.tsp, tty);
+        tty.set_teardown(bytes);
+    }
+}
+/// Keep the client's open inline projection instead of closing it: the host
+/// gets `["suspend"]` and keeps the surface, the cells go back to the
+/// alternate screen. Anything else closes: a screen surface, a covered pair,
+/// a projection the host has not opened yet.
+pub fn hide_projection(server: &mut Server, id: ClientId) {
+    let hideable = server.clients.get(id).is_some_and(|c| {
+        c.tsp.covered.is_none()
+            && c.tsp.hidden.is_none()
+            && c.tty
+                .as_ref()
+                .is_some_and(|tty| tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED))
+            && c.tsp
+                .projection
+                .as_ref()
+                .is_some_and(|p| coverable(server, p, p.pane))
+    });
+    if !hideable {
+        close_projection(server, id);
+        return;
+    }
+    let c = server.clients.get_mut(id).expect("checked client");
+    let mut projection = c.tsp.projection.take().expect("checked projection");
+    let pane = projection.pane;
+    let handle = super::client_runtime::outer_surface(&projection.outer).expect("coverable");
+    projection.hide();
+    c.tsp.hidden = Some(projection);
+    send_pending(server, id, pane, handle, Slot::Hidden);
+    let Some(c) = server
+        .clients
+        .get_mut(id)
+        .filter(|c| c.tsp.hidden.is_some())
+    else {
+        return;
+    };
+    let tty = c.tty.as_mut().expect("checked tty");
+    let enter = ProtocolTransaction::new(tty.alternate_screen(true)).control();
+    if tty.queue_protocol(enter).is_err() {
+        close_hidden(server, id);
+        return;
+    }
+    let bytes = teardown(&c.tsp, tty);
+    tty.set_teardown(bytes);
+    restore_grid(server, id);
+}
+/// Show the hidden projection again: leave the alternate screen, then
+/// `["resume"]` with the frames queued meanwhile, no `o`. False when the
+/// screen switch does not fit the queue.
+fn reveal_hidden(server: &mut Server, id: ClientId, pane: PaneId, handle: SurfaceId) -> bool {
+    let Some(c) = server.clients.get_mut(id) else {
+        return false;
+    };
+    let Some(tty) = c.tty.as_mut() else {
+        return false;
+    };
+    let leave = ProtocolTransaction::new(tty.alternate_screen(false)).control();
+    if tty.queue_protocol(leave).is_err() {
+        return false;
+    }
+    let mode = tty.mode() & !rmux_emu::screen::ScreenMode::ALL_MOUSE_MODES;
+    tty.update_mode(&mut server.tparm, mode, None);
+    let mut projection = c.tsp.hidden.take().expect("checked hidden");
+    projection.reveal();
+    c.tsp.projection = Some(projection);
+    let bytes = teardown(&c.tsp, tty);
+    tty.set_teardown(bytes);
+    super::status_bar::refresh(server, id);
+    send_pending(server, id, pane, handle, Slot::Shown);
+    super::client_runtime::release_drawn(server, pane);
+    true
+}
+/// A hidden projection's `["suspend"]` frame that waited for credit or queue
+/// room when it hid.
+fn send_hidden(server: &mut Server, id: ClientId) {
+    let Some(hidden) = server
+        .clients
+        .get(id)
+        .and_then(|c| c.tsp.hidden.as_ref())
+        .filter(|p| p.visibility_pending() || p.pending_sequence().is_some())
+    else {
+        return;
+    };
+    let pane = hidden.pane;
+    let Some(handle) = super::client_runtime::outer_surface(&hidden.outer) else {
+        return;
+    };
+    send_pending(server, id, pane, handle, Slot::Hidden);
 }
 /// Close the screen projection over `covered` and leave the inline one as it
 /// is: the host shows it again with no resend. False when the close does not
@@ -131,12 +275,13 @@ fn coverable(server: &Server, projection: &Projection, pane: PaneId) -> bool {
             })
 }
 pub fn project_pending(server: &mut Server, id: ClientId) {
+    send_hidden(server, id);
     let Some(pane) = super::contract::client_pane(server, id) else {
-        close_projection(server, id);
+        close_shown(server, id);
         return;
     };
     if !super::contract::native_viewers(server, pane).contains(&id) {
-        close_projection(server, id);
+        close_shown(server, id);
         return;
     }
     let selected = server
@@ -150,15 +295,15 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
                 .map(|sf| (sf.id, sf.wire_id.clone(), sf.mode == SurfaceMode::Inline))
         });
     let Some((handle, logical, inline)) = selected else {
-        close_projection(server, id);
+        close_shown(server, id);
         return;
     };
     if server.clients.get(id).and_then(|c| c.tsp.hello()).is_none() {
-        close_projection(server, id);
+        close_shown(server, id);
         return;
     }
     if !super::contract::has_display_contract(server, pane) {
-        close_projection(server, id);
+        close_shown(server, id);
         return;
     }
     let Some(c) = server.clients.get(id) else {
@@ -173,6 +318,11 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
         .projection
         .as_ref()
         .is_some_and(|p| shows(p, pane, &logical, handle));
+    let reveal = c
+        .tsp
+        .hidden
+        .as_ref()
+        .is_some_and(|p| shows(p, pane, &logical, handle) && coverable(server, p, pane));
     let uncover = c
         .tsp
         .covered
@@ -190,11 +340,16 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
             .as_ref()
             .is_some_and(|p| coverable(server, p, pane));
     if !current {
+        if started && reveal && reveal_hidden(server, id, pane, handle) {
+            return;
+        }
+        // A hidden projection of another surface or pane; the grid is up already.
+        close_hidden(server, id);
         if started && uncover && close_over_covered(server, id) {
             let c = server.clients.get_mut(id).expect("checked client");
             c.tsp.projection = c.tsp.covered.take();
             super::status_bar::refresh(server, id);
-            send_pending(server, id, pane, handle);
+            send_pending(server, id, pane, handle, Slot::Shown);
             super::client_runtime::release_drawn(server, pane);
             return;
         }
@@ -202,13 +357,13 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
             let c = server.clients.get_mut(id).expect("checked client");
             c.tsp.covered = c.tsp.projection.take();
         } else if !(started && keep_covered && close_over_covered(server, id)) {
-            close_projection(server, id);
+            close_shown(server, id);
         }
         if !open_projection(server, id, pane, logical, handle, inline) {
             return;
         }
     }
-    send_pending(server, id, pane, handle);
+    send_pending(server, id, pane, handle, Slot::Shown);
 }
 /// A new outer surface for `handle`, sent from the next `send_pending`.
 fn open_projection(
@@ -285,9 +440,7 @@ pub fn queue_metadata(
         .filter(|id| {
             server.clients.get(*id).is_some_and(|c| {
                 c.tsp
-                    .projection
-                    .iter()
-                    .chain(&c.tsp.covered)
+                    .projections()
                     .any(|p| p.pane == pane && p.logical == logical && !p.failed)
             })
         })
@@ -297,21 +450,25 @@ pub fn queue_metadata(
             continue;
         };
         let shown = |p: &&mut Projection| p.pane == pane && p.logical == logical && !p.failed;
-        if let Some(covered) = c.tsp.covered.as_mut().filter(shown) {
-            let _ = covered.queue_metadata(verb, value);
+        for slot in [Slot::Covered, Slot::Hidden] {
+            if let Some(aside) = c.tsp.slot_mut(slot).filter(shown) {
+                let _ = aside.queue_metadata(verb, value);
+            }
         }
         if let Some(p) = c.tsp.projection.as_mut().filter(shown) {
             let _ = p.queue_metadata(verb, value);
-            send_pending(server, id, pane, handle);
+            send_pending(server, id, pane, handle, Slot::Shown);
         }
     }
 }
 
+/// Queue what the projection in `slot` has ready for the tty.
 fn send_pending(
     server: &mut Server,
     id: ClientId,
     pane: PaneId,
     handle: super::surface::SurfaceId,
+    slot: Slot,
 ) {
     let limit = server
         .clients
@@ -321,7 +478,7 @@ fn send_pending(
     let generation = server
         .clients
         .get(id)
-        .and_then(|c| c.tsp.projection.as_ref())
+        .and_then(|c| c.tsp.slot(slot))
         .map_or(0, |p| p.generation);
     let outcome = {
         let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
@@ -334,13 +491,19 @@ fn send_pending(
         let Some(client) = server.clients.get_mut(id) else {
             return;
         };
-        let Some(projection) = client.tsp.projection.as_mut() else {
+        let tsp = &mut client.tsp;
+        let projection = match slot {
+            Slot::Shown => tsp.projection.as_mut(),
+            Slot::Covered => tsp.covered.as_mut(),
+            Slot::Hidden => tsp.hidden.as_mut(),
+        };
+        let Some(projection) = projection else {
             return;
         };
         projection.prepare_send(
             &surface.document,
             &state.blobs,
-            &client.tsp.confirmed_blobs,
+            &tsp.confirmed_blobs,
             &surface.open,
             now,
         )
@@ -361,20 +524,20 @@ fn send_pending(
         }
     };
     if prepared.is_none() {
-        send_metadata(server, id, limit, generation);
+        send_metadata(server, id, limit, generation, slot);
         return;
     }
     // Old snapshot dependencies and its frame finish before newer metadata.
     while let Some(piece) = server
         .clients
         .get(id)
-        .and_then(|c| c.tsp.projection.as_ref())
+        .and_then(|c| c.tsp.slot(slot))
         .and_then(|p| p.take_piece())
     {
         let sequence = server
             .clients
             .get(id)
-            .and_then(|c| c.tsp.projection.as_ref())
+            .and_then(|c| c.tsp.slot(slot))
             .and_then(|p| p.pending_sequence())
             .unwrap_or(0);
         let token = format!("{sequence}-{}", piece.token());
@@ -383,7 +546,7 @@ fn send_pending(
             && server
                 .clients
                 .get(id)
-                .and_then(|c| c.tsp.projection.as_ref())
+                .and_then(|c| c.tsp.slot(slot))
                 .is_some_and(|p| p.inline);
         let transaction = match piece.stream(limit, &token) {
             Ok((bytes, chunks)) => {
@@ -428,10 +591,10 @@ fn send_pending(
                 let finished = server
                     .clients
                     .get_mut(id)
-                    .and_then(|c| c.tsp.projection.as_mut())
+                    .and_then(|c| c.tsp.slot_mut(slot))
                     .is_some_and(|p| p.note_piece(sequence));
                 if finished {
-                    send_metadata(server, id, limit, generation);
+                    send_metadata(server, id, limit, generation, slot);
                     break;
                 }
             }
@@ -439,11 +602,11 @@ fn send_pending(
         }
     }
 }
-fn send_metadata(server: &mut Server, id: ClientId, limit: usize, generation: u64) {
+fn send_metadata(server: &mut Server, id: ClientId, limit: usize, generation: u64, slot: Slot) {
     while let Some(message) = server
         .clients
         .get(id)
-        .and_then(|c| c.tsp.projection.as_ref())
+        .and_then(|c| c.tsp.slot(slot))
         .and_then(|p| p.peek_metadata())
     {
         let transaction = match message.chunks(limit, &format!("m{}", message.verb)) {
@@ -466,7 +629,7 @@ fn send_metadata(server: &mut Server, id: ClientId, limit: usize, generation: u6
                 let _ = server
                     .clients
                     .get_mut(id)
-                    .and_then(|c| c.tsp.projection.as_mut())
+                    .and_then(|c| c.tsp.slot_mut(slot))
                     .is_some_and(|p| p.note_metadata());
             }
             Some(Err(QueueFull)) | None => return,

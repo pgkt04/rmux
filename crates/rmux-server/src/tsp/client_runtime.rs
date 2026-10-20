@@ -1,7 +1,7 @@
 // Ported from tmux tty.c, tty-keys.c, server-client.c @ 8f25579c
 use super::{
     broker::{self, Renderer},
-    client::{Capability, RequestOwner},
+    client::{Capability, RequestOwner, Slot},
     surface::SurfaceId,
     wire::{Hello, WireMessage},
 };
@@ -243,21 +243,26 @@ fn mapped_surface(server: &Server, client: ClientId, sf: &str) -> Option<(PaneId
     Some((projection.pane, id))
 }
 
-/// The inline surface under the client's screen projection.
-fn covered_surface(server: &Server, client: ClientId, sf: &str) -> Option<(PaneId, SurfaceId)> {
+/// A projection the host keeps while the client does not see it: the inline
+/// surface under the screen projection, or the hidden one of another window.
+fn aside_surface(server: &Server, client: ClientId, sf: &str) -> Option<(Slot, PaneId, SurfaceId)> {
     let c = server.clients.get(client)?;
-    let covered = c.tsp.covered.as_ref()?;
-    if !client_live(c) || !covered.is_open() || covered.outer != sf {
+    let slot = c.tsp.slot_of(sf).filter(|slot| *slot != Slot::Shown)?;
+    let aside = c.tsp.slot(slot)?;
+    if !client_live(c) || !aside.is_open() {
         return None;
     }
-    let state = server.panes.get(covered.pane)?.tsp.as_ref()?;
-    if !state.registered || state.renderer != Renderer::Native || state.switch.is_some() {
+    let state = server.panes.get(aside.pane)?.tsp.as_ref()?;
+    if !state.registered
+        || !matches!(state.renderer, Renderer::Native | Renderer::Detached)
+        || state.switch.is_some()
+    {
         return None;
     }
-    let id = outer_surface(&covered.outer)?;
+    let id = outer_surface(&aside.outer)?;
     let surface = state.surfaces.get(id)?;
-    (surface.is_open() && surface.listens() && surface.wire_id == covered.logical)
-        .then_some((covered.pane, id))
+    (surface.is_open() && surface.listens() && surface.wire_id == aside.logical)
+        .then_some((slot, aside.pane, id))
 }
 
 pub fn client_protocol_fault(server: &mut Server, client: ClientId) {
@@ -370,9 +375,9 @@ fn release_surface(server: &mut Server, pane: PaneId, surface_id: SurfaceId) {
         let Some(c) = server.clients.get(client) else {
             return;
         };
-        let Some(projection) = c.tsp.projection.iter().chain(&c.tsp.covered).find(|p| {
+        let Some(projection) = c.tsp.projections().find(|p| {
             mapped_surface(server, client, &p.outer)
-                .or_else(|| covered_surface(server, client, &p.outer))
+                .or_else(|| aside_surface(server, client, &p.outer).map(|(_, pane, id)| (pane, id)))
                 == Some((pane, surface_id))
         }) else {
             return;
@@ -546,16 +551,21 @@ fn client_gone(
     if nodes.is_empty() {
         return;
     }
-    let lost_outer = server.clients.get(client).is_some_and(|c| {
-        c.tsp
-            .projection
-            .iter()
-            .chain(&c.tsp.covered)
-            .any(|p| nodes.contains(&p.outer))
-    });
-    if lost_outer {
-        reopen_projection(server, client);
-        return;
+    let lost = server
+        .clients
+        .get(client)
+        .and_then(|c| nodes.iter().find_map(|node| c.tsp.slot_of(node)));
+    match lost {
+        // The surface is gone on the host already; nothing to close there.
+        Some(Slot::Hidden) => {
+            broker::drop_hidden(server, client);
+            return;
+        }
+        Some(_) => {
+            reopen_projection(server, client);
+            return;
+        }
+        None => {}
     }
     let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
         return;
@@ -610,7 +620,7 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
         return;
     };
     let Some((pane, surface_id)) = mapped_surface(server, client, sf) else {
-        covered_event(server, client, sf, name, &value);
+        aside_event(server, client, sf, name, &value);
         return;
     };
     match name {
@@ -639,10 +649,10 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
     }
 }
 
-/// The host still acks the inline surface under a screen surface and may
-/// evict its nodes; its input events are stale.
-fn covered_event(server: &mut Server, client: ClientId, sf: &str, name: &str, value: &Value) {
-    let Some((pane, surface_id)) = covered_surface(server, client, sf) else {
+/// The host still acks a covered or hidden surface and may evict its nodes;
+/// its input events are stale.
+fn aside_event(server: &mut Server, client: ClientId, sf: &str, name: &str, value: &Value) {
+    let Some((slot, pane, surface_id)) = aside_surface(server, client, sf) else {
         return;
     };
     match name {
@@ -653,7 +663,7 @@ fn covered_event(server: &mut Server, client: ClientId, sf: &str, name: &str, va
             if server
                 .clients
                 .get_mut(client)
-                .and_then(|c| c.tsp.covered.as_mut())
+                .and_then(|c| c.tsp.slot_mut(slot))
                 .is_some_and(|p| p.ack(sequence).is_ok())
             {
                 release_surface(server, pane, surface_id);
@@ -664,12 +674,17 @@ fn covered_event(server: &mut Server, client: ClientId, sf: &str, name: &str, va
             let mapped = server
                 .clients
                 .get(client)
-                .and_then(|c| c.tsp.covered.as_ref())
+                .and_then(|c| c.tsp.slot(slot))
                 .map(|p| p.map_error(value));
             if let Some(Ok(Some(error))) = mapped {
                 broker::event(server, pane, &error);
             }
-            rebuild_projection(server, client);
+            // The host rejects the hidden surface: the next return replays.
+            if slot == Slot::Hidden {
+                broker::close_hidden(server, client);
+            } else {
+                rebuild_projection(server, client);
+            }
         }
         _ => {}
     }

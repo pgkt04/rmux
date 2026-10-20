@@ -301,12 +301,11 @@ fn frame(server: &mut Server, pane: PaneId, value: Value) {
         };
         for projection in client
             .tsp
-            .projection
-            .iter_mut()
-            .chain(client.tsp.covered.iter_mut())
+            .projections_mut()
             .filter(|p| p.pane == pane && p.logical == frame.sf)
         {
-            drawn = true;
+            // A hidden projection takes the frame for later; nobody draws it now.
+            drawn |= !projection.is_hidden();
             if projection.queue_frame(&frame, &applied).is_err() {
                 projection.failed = true;
             }

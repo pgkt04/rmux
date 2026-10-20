@@ -340,23 +340,37 @@ fn same_stock_contract(a: Option<&DisplayContract>, b: &DisplayContract) -> bool
     })
 }
 
-/// Close every projection of `pane`; returns the clients that had one.
+/// Close every projection of `pane`, hidden ones too; returns the clients
+/// that had one.
 fn close_pane_projections(server: &mut Server, pane: PaneId) -> Vec<ClientId> {
-    let ids: Vec<_> = server
-        .client_order
-        .iter()
-        .copied()
-        .filter(|id| {
-            server
-                .clients
-                .get(*id)
-                .is_some_and(|c| c.tsp.projection.as_ref().is_some_and(|p| p.pane == pane))
-        })
-        .collect();
+    let ids = clients_where(server, |c| c.tsp.projections().any(|p| p.pane == pane));
     for id in &ids {
         broker::close_projection(server, *id);
     }
     ids
+}
+
+/// No client views `pane` any more: keep each shown projection of it hidden
+/// (`["suspend"]`, grid up) so coming back resumes it without a replay.
+fn hide_pane_projections(server: &mut Server, pane: PaneId) {
+    let ids = clients_where(server, |c| {
+        c.tsp.projection.as_ref().is_some_and(|p| p.pane == pane)
+    });
+    for id in ids {
+        broker::hide_projection(server, id);
+    }
+}
+
+fn clients_where(
+    server: &Server,
+    matches: impl Fn(&crate::client::Client) -> bool,
+) -> Vec<ClientId> {
+    server
+        .client_order
+        .iter()
+        .copied()
+        .filter(|id| server.clients.get(*id).is_some_and(&matches))
+        .collect()
 }
 
 fn cancel_timer(server: &mut Server, timer: Option<(crate::ids::TimerId, u64)>) {
@@ -525,7 +539,7 @@ fn recompute_stock(
     if ids.is_empty() {
         let notify = state.renderer == Renderer::Native;
         state.renderer = Renderer::Detached;
-        close_pane_projections(server, pane);
+        hide_pane_projections(server, pane);
         if notify {
             visible_event(server, pane, false);
         }
@@ -648,7 +662,7 @@ fn recompute_pane(server: &mut Server, pane: PaneId, force: bool) {
     {
         let notify = state.renderer == Renderer::Native;
         state.renderer = Renderer::Detached;
-        close_pane_projections(server, pane);
+        hide_pane_projections(server, pane);
         if notify {
             visible_event(server, pane, false);
         }

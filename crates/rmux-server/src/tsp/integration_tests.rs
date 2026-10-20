@@ -208,7 +208,16 @@ fn apply_independent(tree: &mut Value, op: &Value, focus: &mut Option<String>) {
             assert!(take_node(tree, args[1].as_str().unwrap()).is_some());
         }
         "focus" => *focus = args[1].as_str().map(str::to_owned),
-        "settle" | "suspend" | "resume" => {}
+        "settle" => {}
+        // The surface stays, hidden; the root carries the flag as a host would.
+        "suspend" => {
+            tree.as_object_mut()
+                .unwrap()
+                .insert("suspended".into(), json!(true));
+        }
+        "resume" => {
+            tree.as_object_mut().unwrap().remove("suspended");
+        }
         verb => panic!("unimplemented fixture operation {verb}"),
     }
 }
@@ -455,7 +464,16 @@ impl FakeTerminal {
                         }
                         self.frames.retain(|frame| frame["sf"] != body["id"]);
                     }
-                    b'f' => self.frames.push_back(body),
+                    b'f' => {
+                        let resumes = body["ops"]
+                            .as_array()
+                            .is_some_and(|ops| ops.iter().any(|op| op == &json!(["resume"])));
+                        assert!(
+                            !(resumes && self.tree_inline && self.alternate()),
+                            "an inline surface resumed on the alternate screen"
+                        );
+                        self.frames.push_back(body)
+                    }
                     _ => {}
                 }
             }
@@ -528,6 +546,13 @@ impl FakeTerminal {
             .unwrap()
             .base
             .is_alternate()
+    }
+
+    /// The shown surface is suspended: kept, with the grid over it.
+    fn suspended(&self) -> bool {
+        self.tree
+            .as_ref()
+            .is_some_and(|tree| tree["suspended"] == true)
     }
 
     fn detach(&self, server: &mut Server) {
@@ -1249,6 +1274,108 @@ fn native_bar_ignores_unknown_segments_other_actions_and_mouse_off() {
     assert!(seg["p"].get("actions").is_none());
     native_action(&mut server, &terminal, &seg["id"], "status");
     assert_eq!(server.sessions.get(session).unwrap().current, Some(first));
+}
+
+/// A window switch by `keys`, run through the server loop's order: the
+/// command, its effects, the client tick, then a second tick for the grid
+/// redraw that waited for the protocol bytes to drain.
+fn switch_window(server: &mut Server, terminal: &mut FakeTerminal, keys: &[u8]) {
+    terminal.send(server, keys);
+    crate::cmd::queue::next(server, Some(terminal.client));
+    crate::server::run::drain_effects(server).unwrap();
+    crate::client::tick::tick(server);
+    crate::server::run::drain_effects(server).unwrap();
+    terminal.pump(server);
+    terminal.draw(server);
+    crate::client::tick::tick(server);
+    terminal.pump(server);
+    terminal.draw(server);
+}
+
+fn verbs_since(terminal: &FakeTerminal, sent: usize) -> Vec<char> {
+    terminal.packets[sent..]
+        .iter()
+        .map(|(verb, _)| char::from(*verb))
+        .collect()
+}
+
+/// The first op of each `f` since `sent`.
+fn frame_heads(terminal: &FakeTerminal, sent: usize) -> Vec<Value> {
+    terminal.packets[sent..]
+        .iter()
+        .filter(|(verb, _)| *verb == b'f')
+        .map(|(_, body)| body["ops"][0].clone())
+        .collect()
+}
+
+#[test]
+fn switching_to_a_grid_window_suspends_the_native_projection() {
+    let (mut server, mut terminal, _, _, second) = native_two_window_bar(false);
+    let logs = server.winlinks.get(second).unwrap().window;
+    let logs_pane = server.windows.get(logs).unwrap().active.unwrap();
+    pane_runtime::pane_parse_buffer(&mut server, logs_pane, b"logs pane").unwrap();
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert_eq!(frame_heads(&terminal, sent), vec![json!(["suspend"])]);
+    let verbs = verbs_since(&terminal, sent);
+    assert!(
+        verbs.iter().all(|verb| !"xob".contains(*verb)),
+        "the projection was closed or replaced: {verbs:?}"
+    );
+    assert_eq!(terminal.opens, 1);
+    assert!(
+        terminal.suspended(),
+        "the host keeps the surface, suspended"
+    );
+    assert!(
+        terminal.alternate(),
+        "the grid is back on the alternate screen"
+    );
+    assert_eq!(terminal.row(0), "logs pane");
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.projection.is_none() && c.tsp.hidden.is_some());
+}
+
+#[test]
+fn switching_back_resumes_the_native_projection_without_a_replay() {
+    let (mut server, mut terminal, _, _, _) = native_two_window_bar(false);
+    let before = terminal.tree.clone().unwrap();
+    let generation = projection_generation(&server, &terminal);
+    assert!(generation.is_some());
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert!(terminal.suspended());
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(frame_heads(&terminal, sent), vec![json!(["resume"])]);
+    let verbs = verbs_since(&terminal, sent);
+    assert!(
+        verbs.iter().all(|verb| !"obts".contains(*verb)),
+        "replayed on the switch back: {verbs:?}"
+    );
+    assert_eq!(terminal.opens, 1);
+    assert_eq!(projection_generation(&server, &terminal), generation);
+    assert!(!terminal.suspended());
+    assert!(
+        !terminal.alternate(),
+        "the inline surface is on the main screen"
+    );
+    // The resume frame carries the bar refresh: window 1 is now the last one.
+    assert_eq!(
+        native_bar_seg(&mut terminal, "1:logs")["p"]["text"],
+        "1:logs-"
+    );
+    let without_bar = |mut tree: Value| {
+        take_node(&mut tree, "rmux:bar:0").unwrap();
+        tree
+    };
+    assert_eq!(
+        without_bar(terminal.tree.clone().unwrap()),
+        without_bar(before),
+        "every node survived"
+    );
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.hidden.is_none());
 }
 
 /// `MSG_RESIZE` after the terminal changed to `sx`x`sy`, run through the

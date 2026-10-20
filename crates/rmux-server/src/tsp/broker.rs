@@ -175,7 +175,9 @@ pub use super::lifetime::{
     drain_anchors, pane_alternate, pane_exited, pane_prompt, pane_reset, pane_respawn,
 };
 pub use super::pane_message::pane_message;
-pub use super::project::{close_projection, project_pending, restore_grid};
+pub use super::project::{
+    close_hidden, close_projection, drop_hidden, hide_projection, project_pending, restore_grid,
+};
 pub fn refresh_client(server: &mut Server, client: ClientId) {
     close_projection(server, client);
     super::client_runtime::probe_client(server, client);

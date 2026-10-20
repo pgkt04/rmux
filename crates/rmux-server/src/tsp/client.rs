@@ -24,6 +24,13 @@ pub struct Request {
     pub completed: bool,
     pub hello: Option<Hello>,
 }
+/// Where a client keeps one of its projections.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Slot {
+    Shown,
+    Covered,
+    Hidden,
+}
 #[derive(Debug)]
 pub struct ClientTspState {
     pub capability: Capability,
@@ -35,6 +42,10 @@ pub struct ClientTspState {
     /// inline surface live under a screen surface, so closing the screen shows
     /// it again without a replay.
     pub covered: Option<super::projection::Projection>,
+    /// The inline projection of a window the client left: suspended on the
+    /// host, which shows the grid, so coming back resumes it without a replay.
+    /// Only set while `projection` is `None`.
+    pub hidden: Option<super::projection::Projection>,
     pub projection_generation: u64,
     pub confirmed_blobs: BTreeSet<String>,
     pub(crate) projection_hello: Option<serde_json::Value>,
@@ -61,6 +72,7 @@ impl Default for ClientTspState {
             timer: None,
             projection: None,
             covered: None,
+            hidden: None,
             projection_generation: 0,
             confirmed_blobs: BTreeSet::new(),
             projection_hello: None,
@@ -99,6 +111,7 @@ impl ClientTspState {
         self.projection_hello = None;
         self.projection = None;
         self.covered = None;
+        self.hidden = None;
         self.visible = true;
         self.diagnostic = None;
         self.rebuild_attempted = false;
@@ -107,6 +120,39 @@ impl ClientTspState {
         self.transition_pane = None;
         self.bar_failed = false;
         self.bar_segs.clear();
+    }
+    pub fn slot(&self, slot: Slot) -> Option<&super::projection::Projection> {
+        match slot {
+            Slot::Shown => self.projection.as_ref(),
+            Slot::Covered => self.covered.as_ref(),
+            Slot::Hidden => self.hidden.as_ref(),
+        }
+    }
+    pub fn slot_mut(&mut self, slot: Slot) -> Option<&mut super::projection::Projection> {
+        match slot {
+            Slot::Shown => self.projection.as_mut(),
+            Slot::Covered => self.covered.as_mut(),
+            Slot::Hidden => self.hidden.as_mut(),
+        }
+    }
+    /// The slot whose projection the host knows as `outer`.
+    pub fn slot_of(&self, outer: &str) -> Option<Slot> {
+        [Slot::Shown, Slot::Covered, Slot::Hidden]
+            .into_iter()
+            .find(|slot| self.slot(*slot).is_some_and(|p| p.outer == outer))
+    }
+    /// Every projection the host has open: shown, covered, hidden.
+    pub fn projections(&self) -> impl Iterator<Item = &super::projection::Projection> {
+        self.projection
+            .iter()
+            .chain(&self.covered)
+            .chain(&self.hidden)
+    }
+    pub fn projections_mut(&mut self) -> impl Iterator<Item = &mut super::projection::Projection> {
+        self.projection
+            .iter_mut()
+            .chain(self.covered.iter_mut())
+            .chain(self.hidden.iter_mut())
     }
     pub fn request(&mut self, owner: RequestOwner) -> u64 {
         self.next_request = self.next_request.wrapping_add(1).max(1);
