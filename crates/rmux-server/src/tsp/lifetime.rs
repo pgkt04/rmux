@@ -38,17 +38,15 @@ pub fn apply_change(server: &mut Server, pane: PaneId, change: SurfaceChange) {
     }
     let clients: Vec<_> = server.client_order.iter().copied().collect();
     for client in &clients {
-        let affected = server
-            .clients
-            .get(*client)
-            .and_then(|c| c.tsp.projection.as_ref())
-            .is_some_and(|p| {
+        let affected = server.clients.get(*client).is_some_and(|c| {
+            c.tsp.projection.iter().chain(&c.tsp.covered).any(|p| {
                 p.pane == pane
                     && change
                         .evicted
                         .iter()
                         .any(|e| p.outer.ends_with(&format!(":s{}", e.surface.0)))
-            });
+            })
+        });
         if affected {
             super::project::close_projection(server, *client);
         }

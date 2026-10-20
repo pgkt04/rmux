@@ -257,15 +257,13 @@ impl Projection {
         if frame.sf != self.logical {
             return Err(ProjectionError::WrongSurface);
         }
-        if accepted.accepted_ops.len() != accepted.original_indices.len()
-            || accepted
-                .original_indices
-                .iter()
-                .enumerate()
-                .any(|(i, &index)| {
-                    frame.ops.get(index) != accepted.accepted_ops.get(i)
-                        || (i > 0 && accepted.original_indices[i - 1] >= index)
-                })
+        if accepted
+            .original_indices
+            .iter()
+            .enumerate()
+            .any(|(i, &index)| {
+                index >= frame.ops.len() || (i > 0 && accepted.original_indices[i - 1] >= index)
+            })
         {
             return Err(ProjectionError::InvalidAcceptedMap);
         }
@@ -284,7 +282,8 @@ impl Projection {
         if !self.has_credit() {
             self.reconcile();
         }
-        for (value, &index) in accepted.accepted_ops.iter().zip(&accepted.original_indices) {
+        for &index in &accepted.original_indices {
+            let value = &frame.ops[index];
             match op_name(value) {
                 Some("add") => {
                     if let Some(parent) = value[2].as_str() {

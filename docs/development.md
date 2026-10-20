@@ -435,6 +435,27 @@ terminal acking immediately, server time per keystroke frame went from 0.5,
 every size. A `del` still scans the outer topology once per projection. At
 `-v`, each frame logs `tsp …: frame <sf> s=… ops=…: <nodes> nodes, <bytes>
 bytes, <µs>us`.
+A screen surface the program opens over its open inline surface (omp's rewind
+page) becomes an outer screen surface over the client's still-open outer inline
+surface, on the main screen, as Tern does for
+a program in its own pane. Closing it only sends its `x`: the host shows the
+inline surface again and the next frames are live diffs, with no replay. Frames
+for the covered surface still queue on its projection, the host's acks for it
+still pay the program's credits, and a `gone` or `error` on it rebuilds both
+projections. Teardown closes the screen surface, then the inline one with the
+grid restore. Another screen replacing the page keeps the covered inline.
+The broker runs on every loop turn, so its hot checks do not allocate: the
+display contract keeps kinds and features as bitsets over the static tables,
+borrows viewer hellos, and `project_pending` asks whether a contract exists
+without building one. Frames apply without cloning their ops.
+A macOS pty moves at most 1 KiB per read or write, so a pane read drains what is
+there (up to 64 KiB) in one turn, and the tty keeps writing protocol bytes while
+the host drains them (up to 64 KiB per turn). Measured in headless Tern 0.8.4 on
+mbp (2026-10-20) with real omp on a 300-turn synthetic session, first rewind
+frame acked after `o`: 165 ms before, about 70 ms after (omp direct in Tern:
+about 45 ms); back to the transcript: 125 ms before, about 17 ms after (direct:
+about 17 ms). The 656 KB page write from omp into the pane pty takes about the
+same time as it does into Tern's pty, and the rest is the broker's frame apply.
 Native tty teardown closes the outer surface and restores terminal modes before
 a final owned DA1 barrier. rmux keeps raw input active to consume delayed TSP
 replies and delays `MSG_EXITED` until the barrier completes. If the terminal

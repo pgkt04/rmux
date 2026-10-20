@@ -1,9 +1,9 @@
 // Ported from tmux tty.c, server-client.c @ 8f25579c
 use super::{
     broker::{Renderer, now_ms},
-    client::RequestOwner,
+    client::{ClientTspState, RequestOwner},
     projection::Projection,
-    surface::SurfaceMode,
+    surface::{SurfaceId, SurfaceMode},
     wire::WireMessage,
 };
 use crate::{
@@ -37,25 +37,98 @@ fn back_to_grid(tty: &Tty) -> Vec<u8> {
     bytes.extend(tty.alternate_screen(true));
     bytes
 }
+/// `x` for `projection`; an inline one also gives the cell view its screen back.
+fn close_bytes(projection: &Projection, tty: &Tty) -> Vec<u8> {
+    let mut bytes = WireMessage::json(
+        b'x',
+        &serde_json::json!({"id": projection.outer, "keep": false}),
+    )
+    .encode();
+    if projection.inline {
+        bytes.extend(back_to_grid(tty));
+    }
+    bytes
+}
+/// What `Tty::stop` sends for the open projections: the screen first, then
+/// the inline surface under it.
+fn teardown(tsp: &ClientTspState, tty: &Tty) -> Vec<u8> {
+    tsp.projection
+        .iter()
+        .chain(&tsp.covered)
+        .flat_map(|projection| close_bytes(projection, tty))
+        .collect()
+}
+fn shows(projection: &Projection, pane: PaneId, logical: &str, handle: SurfaceId) -> bool {
+    projection.pane == pane
+        && projection.logical == logical
+        && projection.outer.ends_with(&format!(":s{}", handle.0))
+}
 pub fn close_projection(server: &mut Server, id: ClientId) {
     let Some(c) = server.clients.get_mut(id) else {
         return;
     };
-    if let Some(mut projection) = c.tsp.projection.take() {
-        if let Some(tty) = c.tty.as_mut() {
-            if !tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED) {
-                return;
-            }
-            tty.cancel_protocol(projection.generation);
-            tty.set_teardown(Vec::new());
-            let mut close = projection.close().encode();
-            if projection.inline {
-                close.extend(back_to_grid(tty));
-            }
-            let _ = tty.close_protocol(ProtocolTransaction::new(close).teardown());
-        }
-        restore_grid(server, id);
+    if c.tsp.projection.is_none() && c.tsp.covered.is_none() {
+        return;
     }
+    let mut closing: Vec<_> = c.tsp.projection.take().into_iter().collect();
+    closing.extend(c.tsp.covered.take());
+    if let Some(tty) = c.tty.as_mut() {
+        if !tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED) {
+            return;
+        }
+        let mut close = Vec::new();
+        for mut projection in closing {
+            tty.cancel_protocol(projection.generation);
+            projection.close();
+            close.extend(close_bytes(&projection, tty));
+        }
+        tty.set_teardown(Vec::new());
+        let _ = tty.close_protocol(ProtocolTransaction::new(close).teardown());
+    }
+    restore_grid(server, id);
+}
+/// Close the screen projection over `covered` and leave the inline one as it
+/// is: the host shows it again with no resend. False when the close does not
+/// fit the queue.
+fn close_over_covered(server: &mut Server, id: ClientId) -> bool {
+    let Some(c) = server.clients.get_mut(id) else {
+        return false;
+    };
+    let (Some(tty), Some(screen)) = (c.tty.as_mut(), c.tsp.projection.as_ref()) else {
+        return false;
+    };
+    let close = ProtocolTransaction::new(close_bytes(screen, tty)).teardown();
+    let generation = screen.generation;
+    tty.cancel_protocol(generation);
+    if tty.queue_protocol(close).is_err() {
+        return false;
+    }
+    c.tsp.projection = None;
+    let bytes = teardown(&c.tsp, tty);
+    tty.set_teardown(bytes);
+    true
+}
+/// The open inline projection of `pane` stays live under a screen surface
+/// while the program's inline surface does.
+fn coverable(server: &Server, projection: &Projection, pane: PaneId) -> bool {
+    let Some(handle) = super::client_runtime::outer_surface(&projection.outer) else {
+        return false;
+    };
+    projection.inline
+        && projection.is_open()
+        && projection.pane == pane
+        && server
+            .panes
+            .get(pane)
+            .and_then(|p| p.tsp.as_ref())
+            .is_some_and(|state| {
+                state.surfaces.get(handle).is_some_and(|surface| {
+                    surface.is_open()
+                        && surface.mode == SurfaceMode::Inline
+                        && surface.buffer == state.surfaces.buffer()
+                        && surface.wire_id == projection.logical
+                })
+            })
 }
 pub fn project_pending(server: &mut Server, id: ClientId) {
     let Some(pane) = super::contract::client_pane(server, id) else {
@@ -84,60 +157,108 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
         close_projection(server, id);
         return;
     }
-    if super::contract::display_contract(server, pane).0.is_none() {
+    if !super::contract::has_display_contract(server, pane) {
         close_projection(server, id);
         return;
     }
-    let replace = server
-        .clients
-        .get(id)
-        .and_then(|c| c.tsp.projection.as_ref())
-        .is_none_or(|p| {
-            p.pane != pane || p.logical != logical || !p.outer.ends_with(&format!(":s{}", handle.0))
-        });
-    if replace {
-        close_projection(server, id);
-        let hello = server
-            .panes
-            .get(pane)
-            .and_then(|p| p.tsp.as_ref())
-            .map(|s| s.program_hello.clone())
-            .unwrap_or_default();
-        let c = server.clients.get_mut(id).expect("checked client");
-        c.tsp.projection_generation = c.tsp.projection_generation.wrapping_add(1);
-        let generation = c.tsp.projection_generation;
-        let outer = format!(
-            "rmux:c{}g{}:p{}:v{}:s{}",
-            id.parts().0,
-            c.tsp.generation,
-            pane.parts().0,
-            generation,
-            handle.0
-        );
-        let credits = c.tsp.hello().map_or(1, |h| h.credits.min(2));
-        if c.tsp.projection_hello.as_ref() != Some(&hello) {
-            let token = c.tsp.request(RequestOwner::Replay {
-                pane,
-                projection: generation,
-            });
-            if c.tty.as_mut().is_none_or(|tty| {
-                tty.queue_da1(
-                    Da1Owner::Token(token),
-                    ProtocolTransaction::new(WireMessage::json(b'q', &hello).encode()),
-                )
-                .is_err()
-            }) {
-                c.tsp.requests.pop_back();
-                return;
-            }
-            c.tsp.projection_hello = Some(hello);
+    let Some(c) = server.clients.get(id) else {
+        return;
+    };
+    let started = c
+        .tty
+        .as_ref()
+        .is_some_and(|tty| tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED));
+    let current = c
+        .tsp
+        .projection
+        .as_ref()
+        .is_some_and(|p| shows(p, pane, &logical, handle));
+    let uncover = c
+        .tsp
+        .covered
+        .as_ref()
+        .is_some_and(|p| shows(p, pane, &logical, handle) && coverable(server, p, pane));
+    let keep_covered = !inline
+        && c.tsp
+            .covered
+            .as_ref()
+            .is_some_and(|p| coverable(server, p, pane));
+    let cover = !inline
+        && c.tsp.covered.is_none()
+        && c.tsp
+            .projection
+            .as_ref()
+            .is_some_and(|p| coverable(server, p, pane));
+    if !current {
+        if started && uncover && close_over_covered(server, id) {
+            let c = server.clients.get_mut(id).expect("checked client");
+            c.tsp.projection = c.tsp.covered.take();
+            super::status_bar::refresh(server, id);
+            send_pending(server, id, pane, handle);
+            super::client_runtime::release_drawn(server, pane);
+            return;
         }
-        let mut projection = Projection::new(pane, logical, outer, generation, credits);
-        projection.inline = inline;
-        c.tsp.projection = Some(projection);
-        super::status_bar::refresh(server, id);
+        if started && cover {
+            let c = server.clients.get_mut(id).expect("checked client");
+            c.tsp.covered = c.tsp.projection.take();
+        } else if !(started && keep_covered && close_over_covered(server, id)) {
+            close_projection(server, id);
+        }
+        if !open_projection(server, id, pane, logical, handle, inline) {
+            return;
+        }
     }
     send_pending(server, id, pane, handle);
+}
+/// A new outer surface for `handle`, sent from the next `send_pending`.
+fn open_projection(
+    server: &mut Server,
+    id: ClientId,
+    pane: PaneId,
+    logical: String,
+    handle: SurfaceId,
+    inline: bool,
+) -> bool {
+    let hello = server
+        .panes
+        .get(pane)
+        .and_then(|p| p.tsp.as_ref())
+        .map(|s| s.program_hello.clone())
+        .unwrap_or_default();
+    let c = server.clients.get_mut(id).expect("checked client");
+    c.tsp.projection_generation = c.tsp.projection_generation.wrapping_add(1);
+    let generation = c.tsp.projection_generation;
+    let outer = format!(
+        "rmux:c{}g{}:p{}:v{}:s{}",
+        id.parts().0,
+        c.tsp.generation,
+        pane.parts().0,
+        generation,
+        handle.0
+    );
+    let credits = c.tsp.hello().map_or(1, |h| h.credits.min(2));
+    if c.tsp.projection_hello.as_ref() != Some(&hello) {
+        let token = c.tsp.request(RequestOwner::Replay {
+            pane,
+            projection: generation,
+        });
+        if c.tty.as_mut().is_none_or(|tty| {
+            tty.queue_da1(
+                Da1Owner::Token(token),
+                ProtocolTransaction::new(WireMessage::json(b'q', &hello).encode()),
+            )
+            .is_err()
+        }) {
+            c.tsp.requests.pop_back();
+            return false;
+        }
+        c.tsp.projection_hello = Some(hello);
+    }
+    let mut projection = Projection::new(pane, logical, outer, generation, credits);
+    projection.inline = inline;
+    c.tsp.projection = Some(projection);
+    super::status_bar::refresh(server, id);
+    true
 }
 
 /// Canonical `t`/`s`. Each open projection of `handle` keeps the latest palette
@@ -162,22 +283,27 @@ pub fn queue_metadata(
         .iter()
         .copied()
         .filter(|id| {
-            server
-                .clients
-                .get(*id)
-                .and_then(|c| c.tsp.projection.as_ref())
-                .is_some_and(|p| p.pane == pane && p.logical == logical && !p.failed)
+            server.clients.get(*id).is_some_and(|c| {
+                c.tsp
+                    .projection
+                    .iter()
+                    .chain(&c.tsp.covered)
+                    .any(|p| p.pane == pane && p.logical == logical && !p.failed)
+            })
         })
         .collect();
     for id in ids {
-        if let Some(p) = server
-            .clients
-            .get_mut(id)
-            .and_then(|c| c.tsp.projection.as_mut())
-        {
-            let _ = p.queue_metadata(verb, value);
+        let Some(c) = server.clients.get_mut(id) else {
+            continue;
+        };
+        let shown = |p: &&mut Projection| p.pane == pane && p.logical == logical && !p.failed;
+        if let Some(covered) = c.tsp.covered.as_mut().filter(shown) {
+            let _ = covered.queue_metadata(verb, value);
         }
-        send_pending(server, id, pane, handle);
+        if let Some(p) = c.tsp.projection.as_mut().filter(shown) {
+            let _ = p.queue_metadata(verb, value);
+            send_pending(server, id, pane, handle);
+        }
     }
 }
 
@@ -195,8 +321,8 @@ fn send_pending(
     let generation = server
         .clients
         .get(id)
-        .map(|c| c.tsp.projection_generation)
-        .unwrap_or(0);
+        .and_then(|c| c.tsp.projection.as_ref())
+        .map_or(0, |p| p.generation);
     let outcome = {
         let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
             return;
@@ -292,14 +418,8 @@ fn send_pending(
             }
             let queued = tty.queue_protocol(transaction);
             if queued.is_ok() && opening {
-                let outer = &c.tsp.projection.as_ref()?.outer;
-                let mut teardown =
-                    WireMessage::json(b'x', &serde_json::json!({"id": outer, "keep": false}))
-                        .encode();
-                if leave_alternate {
-                    teardown.extend(back_to_grid(tty));
-                }
-                tty.set_teardown(teardown);
+                let bytes = teardown(&c.tsp, tty);
+                tty.set_teardown(bytes);
             }
             Some(queued)
         });

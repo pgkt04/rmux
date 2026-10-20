@@ -67,6 +67,52 @@ pub const FEATURES: &[&str] = &[
     "scroll",
     "styles",
 ];
+const _: () = assert!(KINDS.len() <= 64 && FEATURES.len() <= 64);
+
+/// A subset of [`KINDS`] or [`FEATURES`], one bit per entry. The broker
+/// recomputes the display contract on every loop turn, so it must compare and
+/// copy without allocating.
+#[derive(Clone, Copy, Debug)]
+pub struct NameSet {
+    table: &'static [&'static str],
+    bits: u64,
+}
+impl NameSet {
+    pub fn all(table: &'static [&'static str]) -> Self {
+        Self::matching(table, |_| true)
+    }
+    pub fn matching(table: &'static [&'static str], mut keep: impl FnMut(&str) -> bool) -> Self {
+        let bits = table
+            .iter()
+            .enumerate()
+            .filter(|(_, name)| keep(name))
+            .fold(0, |bits, (i, _)| bits | 1 << i);
+        Self { table, bits }
+    }
+    pub fn contains(&self, name: &str) -> bool {
+        self.table
+            .iter()
+            .position(|entry| *entry == name)
+            .is_some_and(|i| self.bits & 1 << i != 0)
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
+        self.table
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| self.bits & 1 << i != 0)
+            .map(|(_, name)| *name)
+    }
+}
+impl PartialEq for NameSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.bits == other.bits && std::ptr::eq(self.table, other.table)
+    }
+}
+impl Serialize for NameSet {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_seq(self.iter())
+    }
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Frame {
@@ -100,8 +146,8 @@ fn default_credits() -> usize {
 }
 #[derive(Clone, Debug, PartialEq)]
 pub struct DisplayContract {
-    pub kinds: BTreeSet<String>,
-    pub features: BTreeSet<String>,
+    pub kinds: NameSet,
+    pub features: NameSet,
     pub apc: usize,
     pub credits: usize,
     pub cols: u32,
@@ -110,25 +156,23 @@ pub struct DisplayContract {
     pub reduce_motion: Option<bool>,
 }
 impl DisplayContract {
-    pub fn intersect(viewers: &[Hello], leader: usize, cols: u32) -> Option<Self> {
-        let first = viewers.get(leader)?;
-        if viewers
-            .iter()
-            .any(|h| h.v != 1 || h.credits == 0 || h.apc < 64)
-        {
+    /// [`Self::intersect`] gives a contract for these viewers.
+    pub fn accepts(viewers: &[&Hello], leader: usize) -> bool {
+        leader < viewers.len()
+            && viewers
+                .iter()
+                .all(|h| h.v == 1 && h.credits > 0 && h.apc >= 64)
+    }
+    pub fn intersect(viewers: &[&Hello], leader: usize, cols: u32) -> Option<Self> {
+        if !Self::accepts(viewers, leader) {
             return None;
         }
+        let first = viewers[leader];
         Some(Self {
-            kinds: KINDS
-                .iter()
-                .filter(|k| viewers.iter().all(|h| h.kinds.contains(**k)))
-                .map(|s| (*s).into())
-                .collect(),
-            features: FEATURES
-                .iter()
-                .filter(|k| viewers.iter().all(|h| h.features.contains(**k)))
-                .map(|s| (*s).into())
-                .collect(),
+            kinds: NameSet::matching(KINDS, |k| viewers.iter().all(|h| h.kinds.contains(k))),
+            features: NameSet::matching(FEATURES, |k| {
+                viewers.iter().all(|h| h.features.contains(k))
+            }),
             apc: viewers.iter().map(|h| h.apc).min()?.min(65536),
             credits: viewers.iter().map(|h| h.credits).min()?.min(2),
             cols,
@@ -303,12 +347,14 @@ mod tests {
     #[test]
     fn capability_intersection_excludes_flow() {
         let mut h: Hello = serde_json::from_value(json!({"v":1,"kinds":["col","el"],"features":["flow","styles"],"credits":7,"apc":100000})).unwrap();
-        let contract = DisplayContract::intersect(&[h.clone()], 0, 80).unwrap();
+        let contract = DisplayContract::intersect(&[&h], 0, 80).unwrap();
         assert_eq!(contract.credits, 2);
         assert_eq!(contract.apc, 65536);
         assert!(!contract.features.contains("flow"));
+        assert!(contract.features.contains("styles"));
+        assert_eq!(contract.kinds.iter().collect::<Vec<_>>(), ["col", "el"]);
         h.credits = 0;
-        assert!(DisplayContract::intersect(&[h], 0, 80).is_none());
+        assert!(DisplayContract::intersect(&[&h], 0, 80).is_none());
     }
     #[test]
     fn golden() {

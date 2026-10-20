@@ -31,6 +31,10 @@ pub struct ClientTspState {
     pub requests: VecDeque<Request>,
     pub timer: Option<TimerId>,
     pub projection: Option<super::projection::Projection>,
+    /// The inline projection under a screen `projection`. The host keeps an
+    /// inline surface live under a screen surface, so closing the screen shows
+    /// it again without a replay.
+    pub covered: Option<super::projection::Projection>,
     pub projection_generation: u64,
     pub confirmed_blobs: BTreeSet<String>,
     pub(crate) projection_hello: Option<serde_json::Value>,
@@ -56,6 +60,7 @@ impl Default for ClientTspState {
             requests: VecDeque::new(),
             timer: None,
             projection: None,
+            covered: None,
             projection_generation: 0,
             confirmed_blobs: BTreeSet::new(),
             projection_hello: None,
@@ -93,6 +98,7 @@ impl ClientTspState {
         self.confirmed_blobs.clear();
         self.projection_hello = None;
         self.projection = None;
+        self.covered = None;
         self.visible = true;
         self.diagnostic = None;
         self.rebuild_attempted = false;

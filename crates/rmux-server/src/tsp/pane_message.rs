@@ -250,7 +250,7 @@ fn open(server: &mut Server, pane: PaneId, value: Value) {
             state.program_exited = false;
             if let (Some(id), Some(contract)) = (c.opened, state.contract.as_ref()) {
                 if let Some(surface) = state.surfaces.get_mut(id) {
-                    surface.document.set_kinds(contract.kinds.clone());
+                    surface.document.set_kinds(contract.kinds);
                 }
             }
             super::lifetime::apply_change(server, pane, c)
@@ -299,10 +299,11 @@ fn frame(server: &mut Server, pane: PaneId, value: Value) {
         let Some(client) = server.clients.get_mut(*id) else {
             continue;
         };
-        if let Some(projection) = client
+        for projection in client
             .tsp
             .projection
-            .as_mut()
+            .iter_mut()
+            .chain(client.tsp.covered.iter_mut())
             .filter(|p| p.pane == pane && p.logical == frame.sf)
         {
             drawn = true;

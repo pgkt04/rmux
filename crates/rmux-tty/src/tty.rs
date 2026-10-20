@@ -100,6 +100,8 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const PROTOCOL_WRITE_BUDGET: usize = 64 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TtyOptions {
     pub clear_on_attach: bool,
@@ -582,17 +584,29 @@ impl Tty {
     pub fn on_writable(&mut self) -> io::Result<usize> {
         self.write_pending = false;
         let fd = self.fd.as_fd();
-        let (n, is_protocol) =
+        // A macOS pty takes about 1 KiB per write: keep writing protocol bytes
+        // while the host drains them, rather than one write per loop turn.
+        let mut protocol = 0;
+        let cells = loop {
             match protocol::write_queued(&mut self.protocol_out, &mut self.out, |bytes| {
                 rmux_sys::fd::write(fd, bytes)
             }) {
-                Ok(result) => result,
+                Ok((n, true)) => {
+                    protocol += n;
+                    if n == 0 || protocol >= PROTOCOL_WRITE_BUDGET || self.protocol_out.is_empty() {
+                        break None;
+                    }
+                }
+                Ok((n, false)) => break Some(n),
                 Err(e)
                     if matches!(
                         e.kind(),
                         io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
                     ) =>
                 {
+                    if protocol > 0 {
+                        break None;
+                    }
                     self.write_pending = !self.out.is_empty() || !self.protocol_out.is_empty();
                     return Ok(0);
                 }
@@ -600,15 +614,18 @@ impl Tty {
                     self.reset_protocol();
                     return Err(e);
                 }
-            };
+            }
+        };
         self.finish_protocol_stop();
-        if !is_protocol && self.redraw_bytes > 0 {
-            self.redraw_bytes = self.redraw_bytes.saturating_sub(n);
-        } else if !is_protocol && self.block_maybe() {
-            return Ok(n);
+        if let Some(n) = cells {
+            if self.redraw_bytes > 0 {
+                self.redraw_bytes = self.redraw_bytes.saturating_sub(n);
+            } else if self.block_maybe() {
+                return Ok(protocol + n);
+            }
         }
         self.write_pending = !self.out.is_empty() || !self.protocol_out.is_empty();
-        Ok(n)
+        Ok(protocol + cells.unwrap_or(0))
     }
     pub(crate) fn block_maybe(&mut self) -> bool {
         let size = self.out.len();

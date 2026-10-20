@@ -1,4 +1,4 @@
-use super::wire::{Frame, KINDS, TEXT_KINDS};
+use super::wire::{Frame, KINDS, NameSet, TEXT_KINDS};
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
@@ -33,7 +33,7 @@ pub struct ApplyError {
 }
 #[derive(Debug)]
 pub struct ApplyResult {
-    pub accepted_ops: Vec<Value>,
+    /// Indices into the frame's ops that applied, ascending.
     pub original_indices: Vec<usize>,
     pub errors: Vec<ApplyError>,
     pub revision: u64,
@@ -55,7 +55,7 @@ pub struct TspDocument {
     pub revision: u64,
     pub palette: Option<Value>,
     pub sheets: Vec<(String, String)>,
-    kinds: BTreeSet<String>,
+    kinds: NameSet,
 }
 impl TspDocument {
     pub fn new(surface: impl Into<String>) -> Self {
@@ -81,10 +81,10 @@ impl TspDocument {
             revision: 0,
             palette: None,
             sheets: vec![],
-            kinds: KINDS.iter().map(|s| (*s).into()).collect(),
+            kinds: NameSet::all(KINDS),
         }
     }
-    pub fn set_kinds(&mut self, kinds: BTreeSet<String>) {
+    pub fn set_kinds(&mut self, kinds: NameSet) {
         self.kinds = kinds;
     }
     pub fn size(&self) -> usize {
@@ -242,17 +242,13 @@ impl TspDocument {
             return Err("unknown surface".into());
         }
         let mut r = ApplyResult {
-            accepted_ops: vec![],
             original_indices: vec![],
             errors: vec![],
             revision: self.revision,
         };
         for (op, v) in frame.ops.iter().enumerate() {
             match self.apply(v, now_ms) {
-                Ok(()) => {
-                    r.accepted_ops.push(v.clone());
-                    r.original_indices.push(op);
-                }
+                Ok(()) => r.original_indices.push(op),
                 Err(msg) => r.errors.push(ApplyError {
                     s: frame.s,
                     op,

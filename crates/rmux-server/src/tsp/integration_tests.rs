@@ -222,7 +222,11 @@ struct FakeTerminal {
     packets: Vec<(u8, Value)>,
     bytes: Vec<u8>,
     tree: Option<Value>,
+    tree_inline: bool,
     focus: Option<String>,
+    /// An inline surface under the screen `tree`, with its focus, as Tern
+    /// keeps it.
+    covered: Option<(Value, Option<String>)>,
     frames: VecDeque<Value>,
     grid: Server,
     grid_pane: PaneId,
@@ -318,7 +322,9 @@ impl FakeTerminal {
             packets: vec![],
             bytes: vec![],
             tree: None,
+            tree_inline: false,
             focus: None,
+            covered: None,
             frames: VecDeque::new(),
             grid,
             grid_pane,
@@ -409,8 +415,12 @@ impl FakeTerminal {
                         response.extend(apc(b'r', &self.hello))
                     }
                     b'o' => {
+                        let over_inline = body["mode"] == "screen"
+                            && self.tree.is_some()
+                            && self.tree_inline
+                            && self.covered.is_none();
                         assert!(
-                            self.tree.is_none(),
+                            self.tree.is_none() || over_inline,
                             "two simultaneous outer screen surfaces"
                         );
                         match body["mode"].as_str() {
@@ -421,13 +431,29 @@ impl FakeTerminal {
                             Some("screen") => {}
                             mode => panic!("outer surface mode {mode:?}"),
                         }
+                        if over_inline {
+                            self.covered = self.tree.take().map(|tree| (tree, self.focus.take()));
+                        }
+                        self.tree_inline = body["mode"] == "inline";
                         self.tree = Some(json!({"id":body["id"],"k":"surface","c":[]}));
                         self.opens += 1;
                     }
                     b'x' => {
-                        self.tree = None;
-                        self.focus = None;
-                        self.frames.clear();
+                        if self
+                            .covered
+                            .as_ref()
+                            .is_some_and(|(tree, _)| tree["id"] == body["id"])
+                        {
+                            self.covered = None;
+                        } else if let Some((tree, focus)) = self.covered.take() {
+                            self.tree = Some(tree);
+                            self.tree_inline = true;
+                            self.focus = focus;
+                        } else {
+                            self.tree = None;
+                            self.focus = None;
+                        }
+                        self.frames.retain(|frame| frame["sf"] != body["id"]);
                     }
                     b'f' => self.frames.push_back(body),
                     _ => {}
@@ -443,22 +469,34 @@ fn terminal_hello() -> Value {
 
 impl FakeTerminal {
     fn draw(&mut self, server: &mut Server) -> Option<u64> {
+        let mut drawn: Vec<(Value, u64)> = Vec::new();
         let mut last = None;
         while let Some(frame) = self.frames.pop_front() {
-            let tree = self.tree.as_mut().expect("frame before open");
+            let (tree, focus) = match self.covered.as_mut() {
+                Some((tree, focus)) if tree["id"] == frame["sf"] => (tree, focus),
+                _ => (
+                    self.tree.as_mut().expect("frame before open"),
+                    &mut self.focus,
+                ),
+            };
             assert_eq!(frame["sf"], tree["id"]);
             for op in frame["ops"].as_array().unwrap() {
-                apply_independent(tree, op, &mut self.focus);
+                apply_independent(tree, op, focus);
             }
-            last = Some(frame);
+            let sequence = frame["s"].as_u64().unwrap();
+            match drawn.iter_mut().find(|(sf, _)| *sf == frame["sf"]) {
+                Some(entry) => entry.1 = sequence,
+                None => drawn.push((frame["sf"].clone(), sequence)),
+            }
+            last = Some(sequence);
         }
-        let frame = last?;
-        let sequence = frame["s"].as_u64().unwrap();
-        self.send(
-            server,
-            &apc(b'e', &json!({"ev":"ack","sf":frame["sf"],"s":sequence})),
-        );
-        Some(sequence)
+        for (sf, sequence) in drawn {
+            self.send(
+                server,
+                &apc(b'e', &json!({"ev":"ack","sf":sf,"s":sequence})),
+            );
+        }
+        last
     }
 
     fn text(&mut self, id: &str) -> String {
@@ -1838,6 +1876,73 @@ fn stopping_the_tty_closes_an_inline_projection_first() {
     tern.pump(&mut fixture.server);
     assert!(tern.tree.is_none(), "Tern got the close before the restore");
     assert!(!tern.alternate(), "the restore leaves the alternate screen");
+}
+
+fn open_page_over_transcript(server: &mut Server, pane: PaneId, terminal: &mut FakeTerminal) {
+    let mut page = apc(
+        b'o',
+        &json!({"id":"page","mode":"screen","title":"omp","role":"omp.rewind"}),
+    );
+    page.extend(apc(
+        b'f',
+        &json!({"sf":"page","s":1,"ops":[["add","turn","page",null,{"id":"turn","k":"text","p":{"text":"turn 1"}}]]}),
+    ));
+    pane_runtime::pane_parse_buffer(server, pane, &page).unwrap();
+    terminal.pump(server);
+    terminal.draw(server);
+}
+
+#[test]
+fn closing_a_page_over_the_transcript_shows_it_again_without_a_replay() {
+    let (mut server, pane, mut terminal) = stock_native();
+    let transcript = terminal.tree.as_ref().unwrap()["id"].clone();
+    let opens = terminal.opens;
+    open_page_over_transcript(&mut server, pane, &mut terminal);
+    assert_eq!(terminal.text("turn"), "turn 1");
+    assert_eq!(
+        terminal.covered.as_ref().map(|(tree, _)| &tree["id"]),
+        Some(&transcript),
+        "the transcript stays open under the page"
+    );
+    server.panes.get_mut(pane).unwrap().output.clear();
+    let mut back = apc(b'x', &json!({"id":"page","keep":false}));
+    back.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":2,"ops":[["set","transcript",{"text":"after the page"}]]}),
+    ));
+    pane_runtime::pane_parse_buffer(&mut server, pane, &back).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert!(terminal.covered.is_none());
+    assert_eq!(terminal.tree.as_ref().unwrap()["id"], transcript);
+    assert_eq!(terminal.text("transcript"), "after the page");
+    assert_eq!(terminal.opens, opens + 1, "only the page was opened");
+    let output = std::mem::take(&mut server.panes.get_mut(pane).unwrap().output);
+    assert!(
+        Framing::default().feed(&output).iter().any(|packet| matches!(
+            packet,
+            Packet::Message(b'e', body) if body["ev"] == "ack" && body["sf"] == "program" && body["s"] == 2
+        )),
+        "the program's transcript frame is acked"
+    );
+}
+
+#[test]
+fn stopping_the_tty_under_a_page_closes_both_surfaces() {
+    let (mut server, pane, mut terminal) = stock_native();
+    open_page_over_transcript(&mut server, pane, &mut terminal);
+    assert!(terminal.covered.is_some());
+    server
+        .clients
+        .get_mut(terminal.client)
+        .unwrap()
+        .tty
+        .as_mut()
+        .unwrap()
+        .stop(&mut server.tparm, &TtyOptions::default());
+    terminal.pump(&mut server);
+    assert!(terminal.tree.is_none() && terminal.covered.is_none());
+    assert!(!terminal.alternate());
 }
 
 #[test]

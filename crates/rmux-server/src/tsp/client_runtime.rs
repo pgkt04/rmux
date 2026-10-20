@@ -193,31 +193,30 @@ pub fn client_sentinel(server: &mut Server, client: ClientId, raw: &[u8]) {
     }
 }
 
-fn outer_surface(outer: &str) -> Option<SurfaceId> {
+pub(super) fn outer_surface(outer: &str) -> Option<SurfaceId> {
     outer.rsplit_once(":s")?.1.parse().ok().map(SurfaceId)
 }
 
-fn mapped_surface(server: &Server, client: ClientId, sf: &str) -> Option<(PaneId, SurfaceId)> {
-    let c = server.clients.get(client)?;
-    let tty = c.tty.as_ref()?;
-    if !tty.flags().contains(TtyFlags::STARTED)
-        || tty.protocol_generation() != c.tsp.generation
-        || !c.flags.contains(ClientFlags::ATTACHED)
-        || c.flags.intersects(
+fn client_live(c: &crate::client::Client) -> bool {
+    c.tty.as_ref().is_some_and(|tty| {
+        tty.flags().contains(TtyFlags::STARTED) && tty.protocol_generation() == c.tsp.generation
+    }) && c.flags.contains(ClientFlags::ATTACHED)
+        && !c.flags.intersects(
             ClientFlags::CONTROL
                 | ClientFlags::DEAD
                 | ClientFlags::EXIT
                 | ClientFlags::EXITED
                 | ClientFlags::SUSPENDED,
         )
-    {
+}
+
+fn mapped_surface(server: &Server, client: ClientId, sf: &str) -> Option<(PaneId, SurfaceId)> {
+    let c = server.clients.get(client)?;
+    if !client_live(c) {
         return None;
     }
     let projection = c.tsp.projection.as_ref()?;
-    if !projection.is_open()
-        || projection.generation != c.tsp.projection_generation
-        || projection.outer != sf
-    {
+    if !projection.is_open() || projection.outer != sf {
         return None;
     }
     let session = server.sessions.get(c.session?)?;
@@ -242,6 +241,23 @@ fn mapped_surface(server: &Server, client: ClientId, sf: &str) -> Option<(PaneId
         return None;
     }
     Some((projection.pane, id))
+}
+
+/// The inline surface under the client's screen projection.
+fn covered_surface(server: &Server, client: ClientId, sf: &str) -> Option<(PaneId, SurfaceId)> {
+    let c = server.clients.get(client)?;
+    let covered = c.tsp.covered.as_ref()?;
+    if !client_live(c) || !covered.is_open() || covered.outer != sf {
+        return None;
+    }
+    let state = server.panes.get(covered.pane)?.tsp.as_ref()?;
+    if !state.registered || state.renderer != Renderer::Native || state.switch.is_some() {
+        return None;
+    }
+    let id = outer_surface(&covered.outer)?;
+    let surface = state.surfaces.get(id)?;
+    (surface.is_open() && surface.listens() && surface.wire_id == covered.logical)
+        .then_some((covered.pane, id))
 }
 
 pub fn client_protocol_fault(server: &mut Server, client: ClientId) {
@@ -327,31 +343,40 @@ pub fn release_drawn(server: &mut Server, pane: PaneId) {
     let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
         return;
     };
+    if let Some(surface) = state.surfaces.selected() {
+        release_surface(server, pane, surface.id);
+    }
+}
+
+/// Ack the program's frames of `surface_id` that every native viewer drew.
+fn release_surface(server: &mut Server, pane: PaneId, surface_id: SurfaceId) {
+    let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
+        return;
+    };
     if !state.registered || state.renderer != Renderer::Native || state.switch.is_some() {
         return;
     }
     let Some(surface) = state
         .surfaces
-        .selected()
+        .get(surface_id)
         .filter(|surface| surface.listens())
     else {
         return;
     };
-    let surface_id = surface.id;
     let logical = surface.wire_id.clone();
     let viewers = super::contract::native_viewers(server, pane);
     let mut minimum = None;
     for client in viewers {
-        let Some(projection) = server
-            .clients
-            .get(client)
-            .and_then(|c| c.tsp.projection.as_ref())
-        else {
+        let Some(c) = server.clients.get(client) else {
             return;
         };
-        if mapped_surface(server, client, &projection.outer) != Some((pane, surface_id)) {
+        let Some(projection) = c.tsp.projection.iter().chain(&c.tsp.covered).find(|p| {
+            mapped_surface(server, client, &p.outer)
+                .or_else(|| covered_surface(server, client, &p.outer))
+                == Some((pane, surface_id))
+        }) else {
             return;
-        }
+        };
         minimum = Some(minimum.map_or(projection.drawn_revision, |old: u64| {
             old.min(projection.drawn_revision)
         }));
@@ -521,14 +546,14 @@ fn client_gone(
     if nodes.is_empty() {
         return;
     }
-    let Some(projection) = server
-        .clients
-        .get(client)
-        .and_then(|c| c.tsp.projection.as_ref())
-    else {
-        return;
-    };
-    if nodes.iter().any(|id| id == &projection.outer) {
+    let lost_outer = server.clients.get(client).is_some_and(|c| {
+        c.tsp
+            .projection
+            .iter()
+            .chain(&c.tsp.covered)
+            .any(|p| nodes.contains(&p.outer))
+    });
+    if lost_outer {
         reopen_projection(server, client);
         return;
     }
@@ -585,6 +610,7 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
         return;
     };
     let Some((pane, surface_id)) = mapped_surface(server, client, sf) else {
+        covered_event(server, client, sf, name, &value);
         return;
     };
     match name {
@@ -610,6 +636,42 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
         }
         "gone" => client_gone(server, client, pane, surface_id, &value),
         _ => client_event(server, client, pane, surface_id, name, &value),
+    }
+}
+
+/// The host still acks the inline surface under a screen surface and may
+/// evict its nodes; its input events are stale.
+fn covered_event(server: &mut Server, client: ClientId, sf: &str, name: &str, value: &Value) {
+    let Some((pane, surface_id)) = covered_surface(server, client, sf) else {
+        return;
+    };
+    match name {
+        "ack" => {
+            let Some(sequence) = value.get("s").and_then(Value::as_u64) else {
+                return;
+            };
+            if server
+                .clients
+                .get_mut(client)
+                .and_then(|c| c.tsp.covered.as_mut())
+                .is_some_and(|p| p.ack(sequence).is_ok())
+            {
+                release_surface(server, pane, surface_id);
+            }
+        }
+        "gone" => client_gone(server, client, pane, surface_id, value),
+        "error" => {
+            let mapped = server
+                .clients
+                .get(client)
+                .and_then(|c| c.tsp.covered.as_ref())
+                .map(|p| p.map_error(value));
+            if let Some(Ok(Some(error))) = mapped {
+                broker::event(server, pane, &error);
+            }
+            rebuild_projection(server, client);
+        }
+        _ => {}
     }
 }
 
@@ -1027,7 +1089,7 @@ mod tests {
     }
 
     #[test]
-    fn mutation_checks_readonly_node_generation_and_selected_window() {
+    fn mutation_checks_readonly_node_and_selected_window() {
         let (mut server, pane, session, surface) = fixture();
         let client = add_client(&mut server, session);
         let sf = projection(&mut server, client, pane, surface);
@@ -1059,30 +1121,6 @@ mod tests {
             json!({"ev":"edit","sf":"stale","id":"edit","text":"blocked"}),
         );
         assert!(server.panes.get(pane).unwrap().output.is_empty());
-        let original_generation = server
-            .clients
-            .get(client)
-            .unwrap()
-            .tsp
-            .projection_generation;
-        server
-            .clients
-            .get_mut(client)
-            .unwrap()
-            .tsp
-            .projection_generation += 1;
-        event(
-            &mut server,
-            client,
-            json!({"ev":"edit","sf":sf,"id":"edit","text":"blocked"}),
-        );
-        assert!(server.panes.get(pane).unwrap().output.is_empty());
-        server
-            .clients
-            .get_mut(client)
-            .unwrap()
-            .tsp
-            .projection_generation = original_generation;
         let other = window::window_create(&mut server, 80, 24, 0, 0).unwrap();
         let link = session::session_attach(&mut server, session, other, 1).unwrap();
         server.sessions.get_mut(session).unwrap().current = Some(link);

@@ -2,7 +2,7 @@
 // Renderer epochs and the ready barrier are an rmux TSP extension.
 use super::{
     broker::{self, PaneTspState, Renderer, SwitchState},
-    wire::{DisplayContract, WireMessage},
+    wire::{DisplayContract, Hello, WireMessage},
 };
 use crate::{
     client::ClientFlags,
@@ -117,10 +117,7 @@ pub(crate) fn desired_view(server: &Server, pane: PaneId) -> &'static str {
     let Some(state) = p.tsp.as_ref() else {
         return "ansi";
     };
-    if display_contract_for_viewers(server, pane, p, state, &ids)
-        .0
-        .is_some()
-    {
+    if has_contract_for_viewers(server, pane, p, state, &ids) {
         "native"
     } else {
         "ansi"
@@ -141,6 +138,31 @@ pub fn display_contract(
     display_contract_for_viewers(server, pane, p, state, &ids)
 }
 
+/// [`display_contract`] is `Some`, without building it: the broker asks this
+/// on every loop turn.
+pub fn has_display_contract(server: &Server, pane: PaneId) -> bool {
+    let Some(p) = server.panes.get(pane) else {
+        return false;
+    };
+    let Some(state) = p.tsp.as_ref() else {
+        return false;
+    };
+    let ids = viewers(server, pane);
+    has_contract_for_viewers(server, pane, p, state, &ids)
+}
+
+fn has_contract_for_viewers(
+    server: &Server,
+    pane: PaneId,
+    p: &Pane,
+    state: &PaneTspState,
+    ids: &[ClientId],
+) -> bool {
+    contract_hellos(server, pane, p, state, ids)
+        .0
+        .is_some_and(|(hellos, leader)| DisplayContract::accepts(&hellos, leader))
+}
+
 fn display_contract_for_viewers(
     server: &Server,
     pane: PaneId,
@@ -148,6 +170,21 @@ fn display_contract_for_viewers(
     state: &PaneTspState,
     ids: &[ClientId],
 ) -> (Option<DisplayContract>, Option<ClientId>) {
+    let (hellos, leader) = contract_hellos(server, pane, p, state, ids);
+    let contract =
+        hellos.and_then(|(hellos, index)| DisplayContract::intersect(&hellos, index, p.sx));
+    (contract, leader)
+}
+
+/// The hellos of the viewers that would show the pane natively and the
+/// leader's index among them; `None` when the pane needs the grid.
+fn contract_hellos<'a>(
+    server: &'a Server,
+    pane: PaneId,
+    p: &Pane,
+    state: &PaneTspState,
+    ids: &[ClientId],
+) -> (Option<(Vec<&'a Hello>, usize)>, Option<ClientId>) {
     let eligible: Vec<_> = ids
         .iter()
         .copied()
@@ -194,10 +231,10 @@ fn display_contract_for_viewers(
     }
     let hellos: Vec<_> = eligible
         .iter()
-        .filter_map(|id| server.clients.get(*id)?.tsp.hello().cloned())
+        .filter_map(|id| server.clients.get(*id)?.tsp.hello())
         .collect();
     let index = eligible.iter().position(|id| Some(*id) == leader).unwrap();
-    (DisplayContract::intersect(&hellos, index, p.sx), leader)
+    (Some((hellos, index)), leader)
 }
 
 /// The writable client with the newest input: the one in use.
@@ -569,7 +606,13 @@ pub fn recompute(server: &mut Server) {
 
 fn recompute_pane(server: &mut Server, pane: PaneId, force: bool) {
     let ids = viewers(server, pane);
-    let (contract, leader) = display_contract(server, pane);
+    let Some(p) = server.panes.get(pane) else {
+        return;
+    };
+    let Some(state) = p.tsp.as_ref() else {
+        return;
+    };
+    let (contract, leader) = display_contract_for_viewers(server, pane, p, state, &ids);
     let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
         return;
     };

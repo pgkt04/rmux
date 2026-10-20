@@ -369,42 +369,40 @@ pub fn pane_ready(
         && !server.pane_io_failed.contains(&pane)
         && !server.pane_read_disabled.contains(&pane)
     {
-        let mut buffer = [0u8; 8192];
-        loop {
-            let Some(p) = server.panes.get(pane) else {
-                return Ok(());
-            };
-            let Some(fd) = p.fd.as_ref() else {
+        if server.panes.get(pane).is_none() {
+            return Ok(());
+        }
+        // A macOS pty hands over at most 1 KiB per read: take what is there,
+        // up to the budget, so a big TSP frame does not cost a loop turn per KiB.
+        let mut buffer = [0u8; super::io::IO_BUDGET];
+        let mut filled = 0;
+        let mut ended = false;
+        while filled < buffer.len() {
+            let Some(fd) = server.panes.get(pane).and_then(|p| p.fd.as_ref()) else {
                 break;
             };
-            match rmux_sys::fd::read(fd.as_fd(), &mut buffer) {
+            match rmux_sys::fd::read(fd.as_fd(), &mut buffer[filled..]) {
                 Ok(0) => {
-                    server
-                        .panes
-                        .get_mut(pane)
-                        .expect("read pane")
-                        .flags
-                        .insert(PaneFlags::EXITED);
-                    server.pane_io_failed.insert(pane);
+                    ended = true;
                     break;
                 }
-                Ok(n) => {
-                    pane_read(server, pane, &buffer[..n]).map_err(io::Error::other)?;
-                    break;
-                }
+                Ok(n) => filled += n,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(_) => {
-                    server
-                        .panes
-                        .get_mut(pane)
-                        .expect("read pane")
-                        .flags
-                        .insert(PaneFlags::EXITED);
-                    server.pane_io_failed.insert(pane);
+                    ended = true;
                     break;
                 }
             }
+        }
+        if filled > 0 {
+            pane_read(server, pane, &buffer[..filled]).map_err(io::Error::other)?;
+        }
+        if ended {
+            if let Some(p) = server.panes.get_mut(pane) {
+                p.flags.insert(PaneFlags::EXITED);
+            }
+            server.pane_io_failed.insert(pane);
         }
     }
     if let Some(p) = server
