@@ -415,6 +415,13 @@ impl FakeTerminal {
             Packet::ReplySentinel => {}
             Packet::Cells(bytes) => {
                 pane_runtime::pane_parse_buffer(&mut self.grid, self.grid_pane, &bytes).unwrap();
+                // Only rsttyd gives the whole pane to the grid on suspend; Tern
+                // keeps a live inline surface's dock strip over the last row.
+                assert!(
+                    !(self.alternate() && self.tree_inline && self.tree.is_some())
+                        || (self.hello["term"] == "rsttyd" && self.suspending()),
+                    "an inline surface stays over the alternate screen"
+                );
             }
             Packet::Message(verb, body) => {
                 self.packets.push((verb, body.clone()));
@@ -558,6 +565,16 @@ impl FakeTerminal {
         self.tree
             .as_ref()
             .is_some_and(|tree| tree["suspended"] == true)
+    }
+
+    /// `suspended`, or a suspend frame received and not yet drawn.
+    fn suspending(&self) -> bool {
+        self.suspended()
+            || self.frames.iter().any(|frame| {
+                frame["ops"]
+                    .as_array()
+                    .is_some_and(|ops| ops.iter().any(|op| op == &json!(["suspend"])))
+            })
     }
 
     fn detach(&self, server: &mut Server) {
@@ -922,11 +939,17 @@ fn stock_native_with_program(hello: Value, features: Value) -> (Server, PaneId, 
 }
 
 fn native_status_terminal() -> (Server, PaneId, FakeTerminal) {
-    stock_native_with_program(
-        json!({"r":"hello","v":1,"kinds":["col","text","editor","input","status","seg"],
-        "features":["edit","undo","send","settle","dock"],"credits":2}),
-        json!(["edit", "undo", "send"]),
-    )
+    native_status_terminal_with(None)
+}
+
+/// `term`: the host's name in its hello reply, none for an anonymous host.
+fn native_status_terminal_with(term: Option<&str>) -> (Server, PaneId, FakeTerminal) {
+    let mut hello = json!({"r":"hello","v":1,"kinds":["col","text","editor","input","status","seg"],
+        "features":["edit","undo","send","settle","dock"],"credits":2});
+    if let Some(term) = term {
+        hello["term"] = term.into();
+    }
+    stock_native_with_program(hello, json!(["edit", "undo", "send"]))
 }
 
 fn native_keys(server: &mut Server, terminal: &mut FakeTerminal, keys: &[u8]) {
@@ -1166,10 +1189,11 @@ fn native_message_keeps_readonly_prompt_focus_and_multiline_order() {
 }
 
 /// The native status terminal with a second window `1:logs` beside the
-/// current `0`, `mouse` as given: the server, the terminal, the session and
-/// the two winlinks.
+/// current `0`, `mouse` and the host's `term` as given: the server, the
+/// terminal, the session and the two winlinks.
 fn native_two_window_bar(
     mouse: bool,
+    term: Option<&str>,
 ) -> (
     Server,
     FakeTerminal,
@@ -1177,7 +1201,7 @@ fn native_two_window_bar(
     crate::ids::WinlinkId,
     crate::ids::WinlinkId,
 ) {
-    let (mut server, _, mut terminal) = native_status_terminal();
+    let (mut server, _, mut terminal) = native_status_terminal_with(term);
     let session = server
         .clients
         .get(terminal.client)
@@ -1234,7 +1258,7 @@ fn native_action(server: &mut Server, terminal: &FakeTerminal, id: &Value, act: 
 
 #[test]
 fn native_bar_click_runs_the_status_mouse_binding() {
-    let (mut server, mut terminal, session, _, second) = native_two_window_bar(true);
+    let (mut server, mut terminal, session, _, second) = native_two_window_bar(true, None);
     let seg = native_bar_seg(&mut terminal, "1:logs");
     assert_eq!(seg["p"]["actions"], json!({"click": "status"}));
     // `MouseDown1Status { switch-client -t= }`, `=` the clicked window.
@@ -1245,7 +1269,7 @@ fn native_bar_click_runs_the_status_mouse_binding() {
 #[test]
 fn native_bar_click_follows_a_rebound_status_binding() {
     use crate::cmd::key_bindings::KeyInitRuntime;
-    let (mut server, mut terminal, session, first, second) = native_two_window_bar(true);
+    let (mut server, mut terminal, session, first, second) = native_two_window_bar(true, None);
     let list = crate::cmd::parse::from_string(
         &mut server,
         b"bind -n MouseDown1Status rename-window -t= clicked",
@@ -1263,7 +1287,7 @@ fn native_bar_click_follows_a_rebound_status_binding() {
 
 #[test]
 fn native_bar_ignores_unknown_segments_other_actions_and_mouse_off() {
-    let (mut server, mut terminal, session, first, _) = native_two_window_bar(true);
+    let (mut server, mut terminal, session, first, _) = native_two_window_bar(true, None);
     let seg = native_bar_seg(&mut terminal, "1:logs");
     for (id, act) in [
         (json!("rmux:bar:0:99"), "status"),
@@ -1274,7 +1298,7 @@ fn native_bar_ignores_unknown_segments_other_actions_and_mouse_off() {
         assert_eq!(server.sessions.get(session).unwrap().current, Some(first));
     }
 
-    let (mut server, mut terminal, session, first, _) = native_two_window_bar(false);
+    let (mut server, mut terminal, session, first, _) = native_two_window_bar(false, None);
     let seg = native_bar_seg(&mut terminal, "1:logs");
     assert!(seg["p"].get("actions").is_none());
     native_action(&mut server, &terminal, &seg["id"], "status");
@@ -1313,9 +1337,11 @@ fn frame_heads(terminal: &FakeTerminal, sent: usize) -> Vec<Value> {
         .collect()
 }
 
+/// rsttyd gives the whole pane to the grid on `["suspend"]`: the projection
+/// hides instead of closing.
 #[test]
-fn switching_to_a_grid_window_suspends_the_native_projection() {
-    let (mut server, mut terminal, _, _, second) = native_two_window_bar(false);
+fn switching_to_a_grid_window_suspends_the_native_projection_on_rsttyd() {
+    let (mut server, mut terminal, _, _, second) = native_two_window_bar(false, Some("rsttyd"));
     let logs = server.winlinks.get(second).unwrap().window;
     let logs_pane = server.windows.get(logs).unwrap().active.unwrap();
     pane_runtime::pane_parse_buffer(&mut server, logs_pane, b"logs pane").unwrap();
@@ -1323,9 +1349,10 @@ fn switching_to_a_grid_window_suspends_the_native_projection() {
     switch_window(&mut server, &mut terminal, b"\x021");
     assert_eq!(frame_heads(&terminal, sent), vec![json!(["suspend"])]);
     let verbs = verbs_since(&terminal, sent);
-    assert!(
-        verbs.iter().all(|verb| !"xob".contains(*verb)),
-        "the projection was closed or replaced: {verbs:?}"
+    assert_eq!(
+        verbs,
+        vec!['f'],
+        "one suspend frame, nothing else: {verbs:?}"
     );
     assert_eq!(terminal.opens, 1);
     assert!(
@@ -1342,8 +1369,8 @@ fn switching_to_a_grid_window_suspends_the_native_projection() {
 }
 
 #[test]
-fn switching_back_resumes_the_native_projection_without_a_replay() {
-    let (mut server, mut terminal, _, _, _) = native_two_window_bar(false);
+fn switching_back_resumes_the_native_projection_without_a_replay_on_rsttyd() {
+    let (mut server, mut terminal, _, _, _) = native_two_window_bar(false, Some("rsttyd"));
     let before = terminal.tree.clone().unwrap();
     let generation = projection_generation(&server, &terminal);
     assert!(generation.is_some());
@@ -1353,9 +1380,10 @@ fn switching_back_resumes_the_native_projection_without_a_replay() {
     switch_window(&mut server, &mut terminal, b"\x020");
     assert_eq!(frame_heads(&terminal, sent), vec![json!(["resume"])]);
     let verbs = verbs_since(&terminal, sent);
-    assert!(
-        verbs.iter().all(|verb| !"obts".contains(*verb)),
-        "replayed on the switch back: {verbs:?}"
+    assert_eq!(
+        verbs,
+        vec!['f'],
+        "one resume frame, nothing else: {verbs:?}"
     );
     assert_eq!(terminal.opens, 1);
     assert_eq!(projection_generation(&server, &terminal), generation);
@@ -1461,6 +1489,59 @@ fn blob_that_arrives_after_its_frame_is_pushed_at_once() {
     terminal.draw(&mut server);
     assert_eq!(verbs_since(&terminal, sent), vec!['f']);
     assert_eq!(terminal.text("transcript"), "two");
+}
+
+/// Tern keeps a live suspended surface's dock strip over the last grid row,
+/// and an unknown host may do the same: the switch closes the projection
+/// (`x`, `keep:false`) and the return reopens it with a replay.
+#[test]
+fn switching_closes_and_reopens_the_native_projection_on_other_hosts() {
+    for term in [Some("tern"), None] {
+        let (mut server, mut terminal, _, _, second) = native_two_window_bar(false, term);
+        let logs = server.winlinks.get(second).unwrap().window;
+        let logs_pane = server.windows.get(logs).unwrap().active.unwrap();
+        pane_runtime::pane_parse_buffer(&mut server, logs_pane, b"logs pane").unwrap();
+        let generation = projection_generation(&server, &terminal);
+        let sent = terminal.packets.len();
+        switch_window(&mut server, &mut terminal, b"\x021");
+        let verbs = verbs_since(&terminal, sent);
+        assert_eq!(verbs, vec!['x'], "{term:?}: close only: {verbs:?}");
+        assert_eq!(terminal.packets[sent].1["keep"], false, "{term:?}");
+        assert!(
+            terminal.tree.is_none(),
+            "{term:?}: the host dropped the surface"
+        );
+        assert!(terminal.alternate(), "{term:?}");
+        assert_eq!(terminal.row(0), "logs pane", "{term:?}");
+        let c = server.clients.get(terminal.client).unwrap();
+        assert!(
+            c.tsp.projection.is_none() && c.tsp.hidden.is_none(),
+            "{term:?}"
+        );
+
+        let sent = terminal.packets.len();
+        switch_window(&mut server, &mut terminal, b"\x020");
+        let verbs = verbs_since(&terminal, sent);
+        assert!(verbs.contains(&'o'), "{term:?}: reopened: {verbs:?}");
+        assert!(
+            frame_heads(&terminal, sent)
+                .iter()
+                .all(|head| head != &json!(["resume"])),
+            "{term:?}: nothing to resume"
+        );
+        assert_eq!(terminal.opens, 2, "{term:?}");
+        assert_ne!(
+            projection_generation(&server, &terminal),
+            generation,
+            "{term:?}"
+        );
+        assert!(!terminal.alternate(), "{term:?}");
+        assert_eq!(
+            terminal.text("transcript"),
+            "retained transcript",
+            "{term:?}"
+        );
+    }
 }
 
 /// `MSG_RESIZE` after the terminal changed to `sx`x`sy`, run through the

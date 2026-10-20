@@ -103,6 +103,15 @@ impl ClientTspState {
             None
         }
     }
+    /// The host gives the whole pane back to the grid on `["suspend"]`, so a
+    /// window switch can keep the inline projection hidden instead of closing
+    /// it. rsttyd hides the surface's DOM; Tern 0.8.4 keeps a live suspended
+    /// surface's dock strip over the last grid row, and only `x` returns the
+    /// full grid, so every other host closes.
+    pub fn host_yields_pane_on_suspend(&self) -> bool {
+        self.hello()
+            .is_some_and(|h| h.term.as_deref() == Some("rsttyd"))
+    }
     pub fn invalidate(&mut self, generation: u64) {
         self.generation = generation;
         self.capability = Capability::Unknown;

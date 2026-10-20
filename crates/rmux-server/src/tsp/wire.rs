@@ -123,6 +123,9 @@ pub struct Frame {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Hello {
     pub v: u8,
+    /// The host's name in its `hello` reply (`tern`, `rsttyd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub term: Option<String>,
     #[serde(default)]
     pub kinds: BTreeSet<String>,
     #[serde(default)]

@@ -351,7 +351,8 @@ fn close_pane_projections(server: &mut Server, pane: PaneId) -> Vec<ClientId> {
 }
 
 /// No client views `pane` any more: keep each shown projection of it hidden
-/// (`["suspend"]`, grid up) so coming back resumes it without a replay.
+/// (`["suspend"]`, grid up) so coming back resumes it without a replay; a
+/// host that keeps part of a suspended surface over the grid closes it.
 fn hide_pane_projections(server: &mut Server, pane: PaneId) {
     let ids = clients_where(server, |c| {
         c.tsp.projection.as_ref().is_some_and(|p| p.pane == pane)

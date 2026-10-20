@@ -147,11 +147,13 @@ pub fn drop_hidden(server: &mut Server, id: ClientId) {
 /// Keep the client's open inline projection instead of closing it: the host
 /// gets `["suspend"]` and keeps the surface, the cells go back to the
 /// alternate screen. Anything else closes: a screen surface, a covered pair,
-/// a projection the host has not opened yet.
+/// a projection the host has not opened yet, a host that keeps part of a
+/// suspended surface over the grid.
 pub fn hide_projection(server: &mut Server, id: ClientId) {
     let hideable = server.clients.get(id).is_some_and(|c| {
         c.tsp.covered.is_none()
             && c.tsp.hidden.is_none()
+            && c.tsp.host_yields_pane_on_suspend()
             && c.tty
                 .as_ref()
                 .is_some_and(|tty| tty.flags().contains(rmux_tty::tty::TtyFlags::STARTED))

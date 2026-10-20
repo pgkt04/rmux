@@ -407,21 +407,28 @@ event in place; capability/limit changes still replace the projection.
 Exact outgoing app `hello` is cached per tty generation so retained-pane
 projection replacements skip redundant queries/DA1. Each replacement still
 closes/opens and replays the retained document. A window switch is not a
-replacement: when the client leaves a window whose pane projects an open inline
-surface, the projection moves to the client's one hidden slot instead of
-closing. The host gets a frame that starts with `["suspend"]` and keeps the
-surface (rs-ttyd hides its DOM, Tern shows the grid), the cells go back to the
-alternate screen and the grid redraws in full. While hidden the projection is
-silent: the program's frames and metadata queue on it, the host's acks still
-count, a hidden projection is never "drawn" (stock programs keep getting their
-credits from `release_undrawn`), and the `PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT`
-reconcile bounds the queue, so a long-hidden projection resumes with a replay
-into the open surface (no `o`, same id). Coming back to the window leaves the
-alternate screen and sends one frame starting with `["resume"]` followed by the
-queued diffs and the refreshed bar. The slot holds inline projections only (a
-screen page or a covered pair closes as before) and is closed with its own `x`
-when another surface or pane is selected, when the pane's contract changes or
-its program leaves, and on teardown; a `gone` for it just drops it.
+replacement on rs-ttyd (`"term":"rsttyd"` in the viewer's hello reply,
+`ClientTspState::host_yields_pane_on_suspend`): when the client leaves a
+window whose pane projects an open inline surface, the projection moves to the
+client's one hidden slot instead of closing. The host gets a frame that starts
+with `["suspend"]` and keeps the surface (rs-ttyd hides its DOM and gives the
+whole pane to the grid), the cells go back to the alternate screen and the
+grid redraws in full. While hidden the projection is silent: the program's
+frames and metadata queue on it, the host's acks still count, a hidden
+projection is never "drawn" (stock programs keep getting their credits from
+`release_undrawn`), and the `PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile
+bounds the queue, so a long-hidden projection resumes with a replay into the
+open surface (no `o`, same id). Coming back to the window leaves the alternate
+screen and sends one frame starting with `["resume"]` followed by the queued
+diffs and the refreshed bar. The slot holds inline projections only (a screen
+page or a covered pair closes as before) and is closed with its own `x` when
+another surface or pane is selected, when the pane's contract changes or its
+program leaves, and on teardown; a `gone` for it just drops it. Every other
+host (Tern, an unknown `term`) closes on the switch (`x`, `keep:false`) and
+reopens with a replay on the return, as a replacement does: Tern 0.8.4 keeps a
+live suspended inline surface's `dock` strip over the last grid row (rmux's
+status line), over the alternate screen too, and program sheets cannot reach
+the region elements, so only `x` gives the full grid back.
 Replay serialization reads canonical nodes/properties directly rather than
 allocating a temporary JSON document. One topology pass prepares routing and
 error coverage; root properties, child/settled order, focus/suspension, and all
