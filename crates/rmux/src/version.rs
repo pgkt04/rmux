@@ -25,6 +25,16 @@ pub fn getversion() -> &'static str {
     VERSION
 }
 
+/// rmux's own release, independent of the tmux version it ports.
+pub const RELEASE: &str = env!("CARGO_PKG_VERSION");
+pub const GIT_SHA: &str = env!("RMUX_GIT_SHA");
+pub const TARGET: &str = env!("RMUX_TARGET");
+
+/// What `rmux version` prints.
+pub fn release_line() -> String {
+    format!("rmux {RELEASE} ({GIT_SHA}, {TARGET})")
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -34,5 +44,12 @@ mod tests {
             rmux_server::options::environment::TMUX_VERSION
         );
         assert_eq!(super::VERSION, "next-3.9");
+    }
+
+    #[test]
+    fn release_line_names_release_and_target() {
+        let line = super::release_line();
+        assert!(line.starts_with(&format!("rmux {} (", env!("CARGO_PKG_VERSION"))));
+        assert!(line.ends_with(&format!(", {})", super::TARGET)));
     }
 }

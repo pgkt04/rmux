@@ -3,7 +3,15 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=PKG_CONFIG_PATH");
+    println!("cargo:rerun-if-env-changed=RMUX_UTF8PROC_STATIC_DIR");
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+        return;
+    }
+    // Homebrew's utf8proc has no .a, so release builds point here at one
+    // they built, keeping the shipped binary free of /opt/homebrew.
+    if let Some(dir) = std::env::var_os("RMUX_UTF8PROC_STATIC_DIR").filter(|dir| !dir.is_empty()) {
+        println!("cargo:rustc-link-search=native={}", dir.to_string_lossy());
+        println!("cargo:rustc-link-lib=static=utf8proc");
         return;
     }
     // The oracle tmux on macOS is built with HAVE_UTF8PROC, so the width

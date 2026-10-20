@@ -1,0 +1,136 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "release tag to create (e.g. v0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
+
+# No test suite here: CI on main already ran it for this commit. This only
+# builds, checks what the binaries link against, and publishes them.
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          # glibc, never musl: rmux relies on glibc wcwidth and locales.
+          # ubuntu-22.04 sets the floor at glibc 2.35.
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      RMUX_DEFAULT_TERM: tmux-256color
+    steps:
+      - uses: actions/checkout@v4
+      - name: tag must match Cargo.toml, or rmux update loops
+        run: |
+          crate="v$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
+          [ "$crate" = "$TAG" ] ||
+            { echo "::error::tag $TAG != Cargo.toml $crate"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libncurses-dev
+      - if: runner.os == 'macOS'
+        run: brew install pkg-config
+      # Homebrew's utf8proc ships no .a; link a static one so the binary
+      # does not need Homebrew at run time.
+      - name: static utf8proc
+        if: runner.os == 'macOS'
+        env:
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+        run: |
+          dir="$RUNNER_TEMP/utf8proc-2.11.3"
+          curl -fsSL https://github.com/JuliaStrings/utf8proc/archive/refs/tags/v2.11.3.tar.gz |
+            tar -xz -C "$RUNNER_TEMP"
+          make -C "$dir" libutf8proc.a
+          echo "RMUX_UTF8PROC_STATIC_DIR=$dir" >> "$GITHUB_ENV"
+          echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      - run: echo "RMUX_GIT_SHA=${GITHUB_SHA::12}" >> "$GITHUB_ENV"
+      - run: cargo build --release --locked -p rmux --target ${{ matrix.target }}
+      - name: check the binary
+        env:
+          BIN: target/${{ matrix.target }}/release/rmux
+          TERM: xterm-256color
+        run: |
+          v="$("$BIN" -V)"
+          [ "$v" = "rmux next-3.9" ] ||
+            { echo "::error::rmux -V printed '$v'"; exit 1; }
+          release="$("$BIN" version)"
+          echo "$release"
+          case "$release" in
+            "rmux ${TAG#v} ("*) ;;
+            *) echo "::error::rmux version printed '$release'"; exit 1 ;;
+          esac
+          "$BIN" -L smoke -f /dev/null new-session -d
+          "$BIN" -L smoke kill-server
+      - name: check what macOS links against
+        if: runner.os == 'macOS'
+        run: |
+          libs="$(otool -L target/${{ matrix.target }}/release/rmux | tail -n +2)"
+          echo "$libs"
+          if echo "$libs" | grep -Eq 'utf8proc|/opt/homebrew|/usr/local'; then
+            echo "::error::rmux links a non-system library"; exit 1
+          fi
+      - name: check what Linux links against
+        if: runner.os == 'Linux'
+        run: |
+          bin=target/${{ matrix.target }}/release/rmux
+          allowed=" libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 "
+          bad=
+          for lib in $(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+            echo "NEEDED $lib"
+            case "$allowed" in
+              *" $lib "*) ;;
+              *) bad="$bad $lib" ;;
+            esac
+          done
+          [ -z "$bad" ] || { echo "::error::unexpected NEEDED:$bad"; exit 1; }
+          echo "needs glibc $(objdump -T "$bin" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)"
+      - run: tar -C target/${{ matrix.target }}/release -czf "rmux-$TAG-${{ matrix.target }}.tar.gz" rmux
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rmux-${{ matrix.target }}
+          path: rmux-${{ env.TAG }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+
+  publish:
+    # one job owns the release, so the build matrix cannot race on creating it
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: checksums
+        run: |
+          cd dist
+          sha256sum -- *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS

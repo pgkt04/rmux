@@ -19,6 +19,33 @@ cargo install --locked --path crates/rmux
 Optional: add `--features sixel` for images or `--features systemd` for
 Linux socket activation.
 
+## Install and update
+
+Releases ship prebuilt binaries for `aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (glibc 2.35+).
+Download `rmux-<tag>-<target>.tar.gz` and `SHA256SUMS` from
+[releases](https://github.com/pgkt04/rmux/releases), then:
+
+```sh
+sha256sum --ignore-missing -c SHA256SUMS   # macOS: shasum -a 256 --ignore-missing -c
+tar -xzf rmux-v0.2.0-x86_64-unknown-linux-gnu.tar.gz
+mv rmux ~/.local/bin/                      # anywhere on PATH
+```
+
+After that, rmux updates itself:
+
+```sh
+rmux update                     # install the latest release
+rmux update --check             # exit 10 if a newer release exists
+rmux update --version v0.2.0    # install that release (also downgrades)
+rmux update --to /home/aria/.local/bin/rmux   # also update another copy, e.g. as root
+rmux version                    # release, commit and target of this binary
+```
+
+It keeps the old binary next to the new one as
+`rmux.rollback-<date>-pre-v<old>`. Running servers are never restarted: they
+keep the old build until `kill-server`, which ends their sessions.
+
 ## Use
 
 ```sh

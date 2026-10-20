@@ -329,3 +329,37 @@ fn unanswered_terminal_draws_small_screen_before_probe_deadline() {
         );
     }
 }
+
+#[test]
+fn dash_v_still_prints_the_tmux_version() {
+    let out = run(&rmux(), &["-V"], &[], &[]);
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "rmux next-3.9\n");
+}
+
+#[test]
+fn version_prints_release_commit_and_target() {
+    let out = run(&rmux(), &["version"], &[], &[]);
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8(out.stdout).unwrap();
+    let line = stdout.strip_suffix('\n').expect("one line");
+    assert!(!line.contains('\n'), "{line:?}");
+    let rest = line
+        .strip_prefix(&format!("rmux {} (", env!("CARGO_PKG_VERSION")))
+        .and_then(|rest| rest.strip_suffix(')'))
+        .unwrap_or_else(|| panic!("{line:?}"));
+    let (sha, target) = rest.split_once(", ").unwrap_or_else(|| panic!("{line:?}"));
+    assert!(!sha.is_empty() && !sha.contains(' '), "{line:?}");
+    assert!(!target.is_empty() && !target.contains(' '), "{line:?}");
+}
+
+#[test]
+fn version_rejects_extra_arguments() {
+    let out = run(&rmux(), &["version", "extra"], &[], &[]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "usage: rmux version\n"
+    );
+}

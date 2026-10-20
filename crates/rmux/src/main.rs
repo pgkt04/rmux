@@ -21,6 +21,7 @@ OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 mod client;
 mod paths;
+mod update;
 mod version;
 
 use std::io::Write;
@@ -37,7 +38,7 @@ use rmux_util::bytes::find_case_insensitive;
 pub const PROGNAME: &str = "rmux";
 
 /// `usage` text (`tmux.c:73-76`) with the rmux program name.
-pub const USAGE: &str = "usage: rmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n            [-S socket-path] [-T features] [command [flags]]\n       rmux omp-plugin [directory]    export the bundled omp plugin\n";
+pub const USAGE: &str = "usage: rmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n            [-S socket-path] [-T features] [command [flags]]\n       rmux omp-plugin [directory]    export the bundled omp plugin\n       rmux update [--check] [--version tag] [--to path]...   install the latest release\n       rmux version                   print the release, commit and target\n";
 
 /// Internal reexec marker for the server child (replaces the `fork` in
 /// `server_start`, `server.c:189-193`).
@@ -326,6 +327,19 @@ fn main() {
         .is_some_and(|a| a == INTERNAL_SERVER_FLAG.as_bytes())
     {
         internal_server(&args[1..]);
+    }
+
+    if args.first().is_some_and(|arg| arg == b"version") {
+        if args.len() > 1 {
+            eprintln!("usage: rmux version");
+            std::process::exit(1);
+        }
+        println!("{}", version::release_line());
+        return;
+    }
+
+    if args.first().is_some_and(|arg| arg == b"update") {
+        std::process::exit(update::main(&args[1..]));
     }
 
     if args.first().is_some_and(|arg| arg == b"omp-plugin") {

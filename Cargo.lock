@@ -198,6 +198,7 @@ dependencies = [
  "rmux-sys",
  "rmux-tty",
  "rmux-util",
+ "sha2",
 ]
 
 [[package]]

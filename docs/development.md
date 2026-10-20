@@ -633,6 +633,42 @@ plain or VT-parsed appends, CRLF between appends and anchored viewport scrolling
 Copy/view mouse drags use resolved pane geometry and cancellable 50 ms edge
 timers; mode commands retain their queue event, including raw mouse fields.
 
+## Releases
+
+Bump `version` under `[workspace.package]` in the root `Cargo.toml`, commit,
+push, wait for CI on main, then tag:
+
+```sh
+git tag v0.2.0 && git push origin v0.2.0
+```
+
+`.github/workflows/release.yml` (also runnable by hand with a `tag` input)
+fails unless the tag is `v` + that version, since `rmux update` compares the
+two. It runs no tests; CI already did. Targets:
+
+- `aarch64-apple-darwin` on `macos-latest`, `MACOSX_DEPLOYMENT_TARGET=11.0`.
+  Homebrew's utf8proc has no `.a`, so the job builds utf8proc v2.11.3's
+  `libutf8proc.a` and sets `RMUX_UTF8PROC_STATIC_DIR`; `rmux-sys/build.rs` then
+  links it statically instead of asking pkg-config.
+- `x86_64-unknown-linux-gnu` on `ubuntu-22.04` and `aarch64-unknown-linux-gnu`
+  on `ubuntu-22.04-arm`: glibc 2.35 floor. Never musl; rmux relies on glibc
+  wcwidth and locales.
+
+Builds set `RMUX_DEFAULT_TERM=tmux-256color` (no host probe) and
+`RMUX_GIT_SHA` to the 12-character commit, used when git is unavailable.
+Each binary must print `rmux next-3.9` for `-V` and `rmux <version> (` for
+`rmux version`, start and kill a detached server, and link only system
+libraries: `otool -L` without utf8proc, `/opt/homebrew` or `/usr/local`;
+`readelf -d` NEEDED within libc, libm, libgcc_s and the ld-linux loader. The
+job logs the highest `GLIBC_` symbol version.
+
+Assets: `rmux-<tag>-<target>.tar.gz`, holding only `rmux` at the root, plus
+`SHA256SUMS` from `sha256sum`. `rmux update` fetches
+`https://github.com/pgkt04/rmux/releases/latest` (redirect to
+`/releases/tag/<tag>`) and `/releases/download/<tag>/<asset>`.
+`RMUX_UPDATE_BASE_URL` replaces the `https://github.com/pgkt04/rmux` prefix;
+it is a test hook for serving fake releases, not a user setting.
+
 ## Pinned oracle
 
 Supply an existing tmux git checkout containing the pin. The build script uses
