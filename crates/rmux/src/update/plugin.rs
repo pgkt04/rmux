@@ -1,10 +1,9 @@
-//! Whether an update changes the omp plugin the user exported earlier.
+//! Whether an update's bundled omp plugin differs from this binary's.
 
 use std::path::Path;
 use std::process::{Command, Stdio};
 
-const PACKAGE_JSON: &[u8] = include_bytes!("../../omp/package.json");
-const RMUX_TS: &[u8] = include_bytes!("../../omp/rmux.ts");
+use crate::omp_plugin;
 
 /// `Some(note)` when the omp plugin bundled in `new_exe` differs from this binary's.
 pub fn note(new_exe: &Path) -> Option<String> {
@@ -15,10 +14,7 @@ pub fn note(new_exe: &Path) -> Option<String> {
     if same? {
         None
     } else {
-        Some(
-            "the bundled omp plugin changed; run: rmux omp-plugin ~/.omp/local-plugins/rmux-terminal, then restart omp"
-                .to_owned(),
-        )
+        Some("the bundled omp plugin changed; run: rmux update-plugin, then restart omp".to_owned())
     }
 }
 
@@ -34,9 +30,7 @@ fn bundled_matches(new_exe: &Path, dir: &Path) -> Option<bool> {
     if !status.success() {
         return None;
     }
-    let package_json = std::fs::read(dir.join("package.json")).ok()?;
-    let rmux_ts = std::fs::read(dir.join("rmux.ts")).ok()?;
-    Some(package_json == PACKAGE_JSON && rmux_ts == RMUX_TS)
+    omp_plugin::matches(dir)
 }
 
 #[cfg(test)]
@@ -90,9 +84,7 @@ mod tests {
         assert_eq!(results[0], None);
         assert_eq!(
             results[1].as_deref(),
-            Some(
-                "the bundled omp plugin changed; run: rmux omp-plugin ~/.omp/local-plugins/rmux-terminal, then restart omp"
-            )
+            Some("the bundled omp plugin changed; run: rmux update-plugin, then restart omp")
         );
         assert_eq!(results[2], None);
         assert_eq!(results[3], None);

@@ -20,6 +20,7 @@ OUT OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #![forbid(unsafe_code)]
 
 mod client;
+mod omp_plugin;
 mod paths;
 mod update;
 mod version;
@@ -38,7 +39,7 @@ use rmux_util::bytes::find_case_insensitive;
 pub const PROGNAME: &str = "rmux";
 
 /// `usage` text (`tmux.c:73-76`) with the rmux program name.
-pub const USAGE: &str = "usage: rmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n            [-S socket-path] [-T features] [command [flags]]\n       rmux omp-plugin [directory]    export the bundled omp plugin\n       rmux update [--check] [--version tag] [--to path]...   install the latest release\n       rmux version                   print the release, commit and target\n";
+pub const USAGE: &str = "usage: rmux [-2CDhlNuVv] [-c shell-command] [-f file] [-L socket-name]\n            [-S socket-path] [-T features] [command [flags]]\n       rmux omp-plugin [directory]                export the bundled omp plugin\n       rmux install-plugin [--dir path]           install the bundled omp plugin\n       rmux update-plugin [--check] [--dir path]  refresh the installed omp plugin\n       rmux uninstall-plugin [--dir path]         remove the omp plugin\n       rmux update [--check] [--version tag] [--to path]...   install the latest release\n       rmux version                               print the release, commit and target\n";
 
 /// Internal reexec marker for the server child (replaces the `fork` in
 /// `server_start`, `server.c:189-193`).
@@ -342,33 +343,26 @@ fn main() {
         std::process::exit(update::main(&args[1..]));
     }
 
+    match args.first().map(Vec::as_slice) {
+        Some(b"install-plugin") => std::process::exit(omp_plugin::install_main(&args[1..])),
+        Some(b"update-plugin") => std::process::exit(omp_plugin::update_main(&args[1..])),
+        Some(b"uninstall-plugin") => std::process::exit(omp_plugin::uninstall_main(&args[1..])),
+        _ => {}
+    }
+
     if args.first().is_some_and(|arg| arg == b"omp-plugin") {
         if args.len() > 2 {
             errx(b"usage: rmux omp-plugin [directory]");
         }
         if let Some(directory) = args.get(1) {
             let directory = std::path::Path::new(std::ffi::OsStr::from_bytes(directory));
-            if let Err(error) = std::fs::create_dir_all(directory) {
-                errx(error.to_string().as_bytes());
-            }
-            for (name, contents) in [
-                (
-                    "package.json",
-                    include_bytes!("../omp/package.json").as_slice(),
-                ),
-                ("rmux.ts", include_bytes!("../omp/rmux.ts").as_slice()),
-            ] {
-                if let Err(error) = std::fs::write(directory.join(name), contents) {
-                    errx(error.to_string().as_bytes());
-                }
+            if let Err(error) = omp_plugin::export(directory) {
+                errx(error.as_bytes());
             }
             println!("{}", directory.display());
             return;
         }
-        if let Err(error) = std::io::stdout()
-            .lock()
-            .write_all(include_bytes!("../omp/rmux.ts"))
-        {
+        if let Err(error) = std::io::stdout().lock().write_all(omp_plugin::RMUX_TS) {
             errx(error.to_string().as_bytes());
         }
         return;

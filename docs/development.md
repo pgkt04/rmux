@@ -489,10 +489,38 @@ does not answer, a one-second timeout after output drains releases the tty;
 pending replies are drained before restoring the shell's termios.
 
 `crates/rmux/omp/{package.json,rmux.ts}` is embedded in the executable;
-`rmux omp-plugin DIRECTORY` exports the managed `rmux-terminal` package, while
-the command without a directory prints the standalone extension. Cargo packages
-include both files. `omp plugin install DIRECTORY` registers the package so it
-appears in `/plugins`; do not also load a loose copy of the extension.
+`rmux omp-plugin DIRECTORY` is the low-level export of the managed
+`rmux-terminal` package, which `rmux update` runs from the new binary to compare
+bundles; without a directory it prints the standalone extension. Cargo packages
+include both files. Do not also load a loose copy of the extension.
+
+The user-facing commands default to `$HOME/.omp/local-plugins/rmux-terminal`
+(`--dir PATH` overrides; no HOME and no `--dir` is an error) and spawn `omp`
+from `PATH`:
+
+- `rmux install-plugin` writes `package.json` and `rmux.ts` into the directory,
+  overwriting what is there, then runs `omp plugin install DIR`, which symlinks
+  `~/.omp/plugins/node_modules/rmux-terminal` to it so it appears in
+  `/plugins`. Without omp on `PATH` it exits 1 and prints the command to run.
+- `rmux update-plugin` exits 1 if `DIR/package.json` is missing or is not the
+  `rmux-terminal` package (it never creates the directory or overwrites a
+  foreign package) and exits 0 without calling omp when both files already
+  match the bundle. Otherwise it rewrites both files and re-runs
+  `omp plugin install DIR`: omp records the version in
+  `~/.omp/plugins/omp-plugins.lock.json`, and `omp plugin upgrade` refuses
+  linked local plugins. If omp is missing it only warns and still exits 0, since
+  the symlink already serves the new files. `--check` writes nothing and exits
+  10 when the bundle differs.
+- `rmux uninstall-plugin` runs `omp plugin uninstall rmux-terminal` when
+  `omp plugin list --json` lists it, then deletes `rmux.ts`, then
+  `package.json`, then the directory if empty. A missing directory is fine. A
+  present directory without a `package.json` naming `rmux-terminal` is an
+  error (exit 1): omp is not called and nothing is touched. If DIR is a
+  symlink, only the two files inside the target are removed; the link and the
+  target directory stay.
+
+omp failures exit 1 with omp's output and status on stderr.
+
 The extension uses omp's public widget factory to obtain the live TUI and
 stops/starts only that UI to repeat
 the stock program's `hello`, never restarting the agent or changing sessions.
@@ -679,7 +707,10 @@ Assets: `rmux-<tag>-<target>.tar.gz`, holding only `rmux` at the root, plus
 `https://github.com/pgkt04/rmux/releases/latest` (redirect to
 `/releases/tag/<tag>`) and `/releases/download/<tag>/<asset>`.
 `RMUX_UPDATE_BASE_URL` replaces the `https://github.com/pgkt04/rmux` prefix;
-it is a test hook for serving fake releases, not a user setting.
+it is a test hook for serving fake releases, not a user setting. When the new
+binary's exported plugin differs from the current binary's bundled one,
+`rmux update` prints
+`the bundled omp plugin changed; run: rmux update-plugin, then restart omp`.
 
 ## Pinned oracle
 

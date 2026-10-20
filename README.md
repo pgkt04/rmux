@@ -79,12 +79,16 @@ Press **Ctrl-b**, then a key:
 Install the bundled plugin once, then start a fresh omp inside rmux:
 
 ```sh
-rmux omp-plugin ~/.omp/local-plugins/rmux-terminal
-omp plugin install ~/.omp/local-plugins/rmux-terminal
+rmux install-plugin
 rmux
 # Inside the rmux session:
 omp
 ```
+
+`rmux install-plugin` writes the plugin to `~/.omp/local-plugins/rmux-terminal`
+and runs `omp plugin install` on it. Pass `--dir PATH` to use another location
+(and pass the same `--dir` to the other plugin commands). `rmux uninstall-plugin`
+removes it again.
 
 The plugin switches between native and text views without losing your
 conversation or draft. Splits use text; zoom a pane or close the other pane
@@ -100,8 +104,11 @@ their own styling. Native layout and font sizing still follow the host.
 Use `/terminal-reprobe` in omp if the view gets stuck, or `PI_TUI_NATIVE=0 omp`
 to use text only.
 
-After updating rmux, re-export the plugin and start a fresh omp. Existing
-servers keep their old code. To try the new version without ending sessions:
+To update, run `rmux update`, then `rmux update-plugin`, then start a fresh
+omp. `rmux update` tells you when the bundled plugin changed;
+`rmux update-plugin --check` exits 10 when the bundled plugin differs from the
+installed one, without changing anything. Existing servers keep their old code.
+To try the new version without ending sessions:
 
 ```sh
 rmux -L updated new-session

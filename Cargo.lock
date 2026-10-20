@@ -198,6 +198,7 @@ dependencies = [
  "rmux-sys",
  "rmux-tty",
  "rmux-util",
+ "serde_json",
  "sha2",
 ]
 
