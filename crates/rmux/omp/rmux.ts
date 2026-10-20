@@ -28,6 +28,25 @@ export default function (pi: ExtensionAPI) {
 		pi.logger.debug("rmux terminal renderer reprobed", { view });
 	}
 
+	async function ownPaneSession(socket: string, pane: string): Promise<string | undefined> {
+		const [identity, tty] = await Promise.all([
+			pi.exec("rmux", ["-N", "-S", socket, "display-message", "-p", "-t", pane, "#{session_id} #{pane_tty}"], { timeout: 5000 }),
+			pi.exec("ps", ["-o", "tty=", "-p", String(process.pid)], { timeout: 5000 }),
+		]);
+		const match = /^(\$\d+) (\/\S+)$/.exec(identity.stdout.trim());
+		if (identity.code !== 0 || !match) {
+			pi.logger.debug("rmux pane unavailable; plugin inactive", { socket, pane, error: identity.stderr.trim() });
+			return undefined;
+		}
+		const own = tty.stdout.trim();
+		const ownTty = own.startsWith("/") ? own : `/dev/${own}`;
+		if (tty.code !== 0 || !own || ownTty !== match[2]) {
+			pi.logger.debug("rmux pane is not omp's terminal; plugin inactive", { socket, pane, paneTty: match[2], ownTty });
+			return undefined;
+		}
+		return match[1];
+	}
+
 	pi.on("session_start", async (_event, ctx) => {
 		generation++;
 		const current = generation;
@@ -37,6 +56,10 @@ export default function (pi: ExtensionAPI) {
 		observer = undefined;
 		ui = undefined;
 		if (!ctx.hasUI || !process.env.RMUX || !/^%\d+$/.test(process.env.RMUX_PANE ?? "")) return;
+		const socket = process.env.RMUX.split(",")[0];
+		const pane = process.env.RMUX_PANE!;
+		const session = await ownPaneSession(socket, pane);
+		if (current !== generation || !session) return;
 		disabled = process.env.PI_TUI_NATIVE === "0";
 		ctx.ui.setWidget("rmux-terminal", tui => {
 			ui = tui;
@@ -45,19 +68,12 @@ export default function (pi: ExtensionAPI) {
 		ctx.ui.setWidget("rmux-terminal", undefined);
 		if (disabled) return;
 
-		const socket = process.env.RMUX.split(",")[0];
-		const pane = process.env.RMUX_PANE!;
-		const session = await pi.exec("rmux", ["-N", "-S", socket, "display-message", "-p", "-t", pane, "#{session_id}"], { timeout: 5000 });
-		if (current !== generation) return;
-		if (session.code !== 0 || !/^\$\d+$/.test(session.stdout.trim())) {
-			throw new Error(`rmux observer could not find this pane's session: ${session.stderr.trim()}`);
-		}
 		const environment = { ...process.env };
 		delete environment.RMUX;
 		delete environment.RMUX_PANE;
 		const child = Bun.spawn([
 			"rmux", "-N", "-S", socket, "-C", "attach-session", "-r", "-E",
-			"-f", "no-output,ignore-size", "-t", session.stdout.trim(),
+			"-f", "no-output,ignore-size", "-t", session,
 		], { env: environment, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
 		observer = child;
 		child.stdin.write(`refresh-client -B 'rmux-omp:${pane}:#{pane_tsp_view}'\n`);
@@ -216,7 +232,7 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 			const current = generation;
-			const result = await pi.exec("rmux", ["-N", "display-message", "-p", "-t", process.env.RMUX_PANE, "#{pane_tsp_view}"], { timeout: 5000 });
+			const result = await pi.exec("rmux", ["-N", "-S", process.env.RMUX.split(",")[0], "display-message", "-p", "-t", process.env.RMUX_PANE, "#{pane_tsp_view}"], { timeout: 5000 });
 			const view = result.stdout.trim();
 			if (current !== generation || !ui) return;
 			if (result.code !== 0 || (view !== "native" && view !== "ansi")) {

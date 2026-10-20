@@ -1,6 +1,6 @@
 {
   "name": "rmux-terminal",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Preserve omp across native and text terminal attachments in rmux",
   "license": "ISC",
   "private": true,
