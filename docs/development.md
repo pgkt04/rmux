@@ -169,8 +169,13 @@ cargo test --workspace --doc
 ```
 
 Before publishing changes, run the formatting and full-workspace Clippy gates
-above as well as the tests. CI uses the current stable toolchain on Linux and
-macOS; a passing targeted test does not cover formatting or new stable lints.
+above as well as the tests. CI (`.github/workflows/ci.yml`, about 7 minutes)
+uses the current stable toolchain on Linux and macOS; a passing targeted test
+does not cover formatting or new stable lints. The full upstream regress suite
+is in `.github/workflows/oracle.yml`: weekly, by hand, and on changes to
+`harness/`, `scripts/build-oracle.sh` or the workflow. It runs all 201 scripts
+against the oracle, then against rmux with `--rmux`, using that runner's oracle
+run as the baseline. Expect about an hour.
 
 Tests run under [cargo-nextest](https://nexte.st) (`brew install cargo-nextest`),
 configured in `.config/nextest.toml`. The default profile skips the copy-mode

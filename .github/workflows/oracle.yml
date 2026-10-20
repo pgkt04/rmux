@@ -1,0 +1,59 @@
+name: Oracle
+on:
+  schedule:
+    - cron: "0 18 * * 0"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "harness/**"
+      - "scripts/build-oracle.sh"
+      - ".github/workflows/oracle.yml"
+  pull_request:
+    paths:
+      - "harness/**"
+      - "scripts/build-oracle.sh"
+      - ".github/workflows/oracle.yml"
+
+concurrency:
+  group: oracle-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regress:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@v4
+        with:
+          repository: tmux/tmux
+          ref: 8f25579c5aef8d93924a20681f394e2a582fd3ad
+          path: upstream-tmux
+      - if: runner.os == 'macOS'
+        run: brew install autoconf automake pkg-config libevent ncurses utf8proc
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y autoconf automake pkg-config libevent-dev libncurses-dev libutf8proc-dev
+      - run: sh scripts/build-oracle.sh
+        env:
+          TMUX_SRC: ${{ github.workspace }}/upstream-tmux
+      - run: cargo test -p rmux-harness differential -- --nocapture
+      - run: cargo run -p rmux-harness --bin regress -- --source upstream-tmux --binary oracle/bin/tmux --timeout 240 --json harness/runs/oracle-ci.json
+      # This runner's oracle run is the baseline, so an upstream script that
+      # fails here is reported as oracle-fail, not as an rmux failure.
+      - if: ${{ !cancelled() }}
+        run: cargo build -p rmux
+      - if: ${{ !cancelled() }}
+        run: cargo run -p rmux-harness --bin regress -- --source upstream-tmux --binary target/debug/rmux --rmux --baseline harness/runs/oracle-ci.json --timeout 240 --json harness/runs/rmux-ci.json
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regress-${{ matrix.os }}
+          path: |
+            harness/runs/oracle-ci.json
+            harness/runs/rmux-ci.json
