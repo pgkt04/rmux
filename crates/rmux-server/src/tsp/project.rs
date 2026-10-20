@@ -462,6 +462,70 @@ pub fn queue_metadata(
     }
 }
 
+/// A `b` that arrived after a frame referencing it went out (omp sends its
+/// first blob after the `blobs` query round trip, so the frame is projected
+/// first). Each projection of a surface that references `digest` sends it on
+/// its own; a frame prepared first carries it instead.
+pub fn queue_blob(server: &mut Server, pane: PaneId, digest: &str) {
+    let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
+        return;
+    };
+    let Some(blob) = state.blobs.peek(digest) else {
+        return;
+    };
+    // The id as the frame wrote it, so the host matches it to the node.
+    let referencing: Vec<(super::surface::SurfaceId, String, String)> = state
+        .surfaces
+        .iter()
+        .filter_map(|surface| {
+            let id = surface
+                .document
+                .blob_references()
+                .into_iter()
+                .find(|id| id.eq_ignore_ascii_case(digest))?;
+            Some((surface.id, surface.document.surface.clone(), id))
+        })
+        .collect();
+    if referencing.is_empty() {
+        return;
+    }
+    let mime = blob.mime.clone();
+    let bytes = std::sync::Arc::clone(&blob.bytes);
+    let ids: Vec<ClientId> = server.client_order.iter().copied().collect();
+    for client in ids {
+        for (handle, logical, id) in &referencing {
+            let Some(c) = server.clients.get_mut(client) else {
+                break;
+            };
+            let blob = || super::replay::ReplayBlob {
+                id: id.clone(),
+                mime: mime.clone(),
+                bytes: std::sync::Arc::clone(&bytes),
+            };
+            let shown = |p: &&mut Projection| p.pane == pane && p.logical == *logical && !p.failed;
+            let ClientTspState {
+                confirmed_blobs,
+                projection,
+                covered,
+                hidden,
+                ..
+            } = &mut c.tsp;
+            for aside in [covered, hidden] {
+                if let Some(aside) = aside.as_mut().filter(shown) {
+                    aside.queue_blob(blob(), confirmed_blobs);
+                }
+            }
+            if projection
+                .as_mut()
+                .filter(shown)
+                .is_some_and(|p| p.queue_blob(blob(), confirmed_blobs))
+            {
+                send_pending(server, client, pane, *handle, Slot::Shown);
+            }
+        }
+    }
+}
+
 /// Queue what the projection in `slot` has ready for the tty.
 fn send_pending(
     server: &mut Server,

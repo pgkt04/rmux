@@ -401,8 +401,10 @@ fn blob(server: &mut Server, pane: PaneId, message: WireMessage) {
                 &message.body,
             )
         });
-    if let Some(Err(error)) = result {
-        super::lifetime::protocol_error(server, pane, &error);
+    match result {
+        Some(Ok(digest)) => super::project::queue_blob(server, pane, &digest),
+        Some(Err(error)) => super::lifetime::protocol_error(server, pane, &error),
+        None => {}
     }
 }
 fn metadata(server: &mut Server, pane: PaneId, verb: u8, value: Value) {

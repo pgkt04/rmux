@@ -141,6 +141,10 @@ pub struct Projection {
     /// Blobs this projection admitted before a frame. The host keeps them,
     /// so later frames do not send them again.
     admitted_blobs: BTreeSet<String>,
+    /// Blobs a sent frame references that arrived after it (the program's
+    /// first blob comes after its `blobs` query round trip). Sent on their own,
+    /// like metadata, unless a frame prepared first carries them.
+    late_blobs: Vec<replay::ReplayBlob>,
 }
 impl Projection {
     pub fn new(
@@ -188,6 +192,7 @@ impl Projection {
             bar_css: BAR_CSS.to_owned(),
             bar_sheet: None,
             admitted_blobs: BTreeSet::new(),
+            late_blobs: Vec::new(),
         }
     }
 
@@ -605,9 +610,11 @@ impl Projection {
         } else {
             self.bar_sheet.clone()
         };
-        // The canonical metadata at this revision subsumes the pending batch.
+        // The canonical metadata at this revision subsumes the pending batch,
+        // and the plan carries every referenced blob the host lacks.
         self.pending_palette = None;
         self.pending_sheets.clear();
+        self.late_blobs.clear();
         self.view_parents = parents
             .iter()
             .map(|(id, parent)| {
@@ -692,6 +699,7 @@ impl Projection {
             return Ok(None);
         };
         let blobs_out = live_blobs(document, blobs, confirmed, &self.admitted_blobs);
+        self.late_blobs.clear();
         let mut messages = Vec::new();
         let frame = replay::frame_message(&self.outer, sequence, ops);
         if frame.body.len() > JOINED_LIMIT {
@@ -806,8 +814,8 @@ impl Projection {
         true
     }
 
-    /// Next unsent palette or sheet, in canonical order: one palette, then sheets
-    /// in first-install order. `None` when the metadata queue is empty.
+    /// Next unsent palette, sheet or late blob, in canonical order: one palette,
+    /// then sheets in first-install order, then blobs. `None` when the queue is empty.
     pub fn peek_metadata(&self) -> Option<WireMessage> {
         // An old snapshot must finish before any newer canonical metadata; a
         // hidden projection carries its metadata in the `["resume"]` frame.
@@ -825,11 +833,13 @@ impl Projection {
             }
             return Some(WireMessage::json(b't', &body));
         }
-        let (name, css) = self.pending_sheets.first()?;
-        Some(WireMessage::json(
-            b's',
-            &json!({"sf": self.outer, "name": name, "css": css}),
-        ))
+        if let Some((name, css)) = self.pending_sheets.first() {
+            return Some(WireMessage::json(
+                b's',
+                &json!({"sf": self.outer, "name": name, "css": css}),
+            ));
+        }
+        self.late_blobs.first().map(replay::blob_message)
     }
 
     pub fn note_metadata(&mut self) -> bool {
@@ -846,7 +856,28 @@ impl Projection {
             self.pending_sheets.remove(0);
             return true;
         }
+        if !self.late_blobs.is_empty() {
+            let blob = self.late_blobs.remove(0);
+            self.admitted_blobs.insert(blob.id);
+            return true;
+        }
         false
+    }
+
+    /// A blob that arrived after a sent frame referenced it. Sent by
+    /// `peek_metadata` unless a frame prepared first carries it. False when the
+    /// host has it, or it is already waiting.
+    pub fn queue_blob(&mut self, blob: replay::ReplayBlob, confirmed: &BTreeSet<String>) -> bool {
+        if self.closed
+            || self.failed
+            || confirmed.contains(&blob.id)
+            || self.admitted_blobs.contains(&blob.id)
+            || self.late_blobs.iter().any(|late| late.id == blob.id)
+        {
+            return false;
+        }
+        self.late_blobs.push(blob);
+        true
     }
 
     /// Sequence of the stable batch awaiting queue admission.

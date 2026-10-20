@@ -117,7 +117,12 @@ impl Framing {
                         break;
                     };
                     assert!(bytes[6] == b';' || end > 7, "TSP APC missing separator");
-                    let body = serde_json::from_slice(&bytes[8..end]).expect("complete TSP APC");
+                    // A `b` body is `id=…;mime=…;base64`, not JSON.
+                    let body = if bytes[6] == b'b' {
+                        Value::String(String::from_utf8(bytes[8..end].to_vec()).unwrap())
+                    } else {
+                        serde_json::from_slice(&bytes[8..end]).expect("complete TSP APC")
+                    };
                     packets.push(Packet::Message(bytes[6], body));
                     at += end + 2;
                 }
@@ -1376,6 +1381,86 @@ fn switching_back_resumes_the_native_projection_without_a_replay() {
     assert_eq!(terminal.text("transcript"), "retained transcript");
     let c = server.clients.get(terminal.client).unwrap();
     assert!(c.tsp.hidden.is_none());
+}
+
+/// One `b` APC as a program writes it: `id=…;mime=…;<base64>`.
+fn blob_apc(id: &str, bytes: &[u8]) -> Vec<u8> {
+    use base64::Engine;
+    let mut apc = format!("\x1b_tsp;b;id={id};mime=image/png;").into_bytes();
+    apc.extend(
+        base64::engine::general_purpose::STANDARD
+            .encode(bytes)
+            .into_bytes(),
+    );
+    apc.extend(b"\x1b\\");
+    apc
+}
+
+#[test]
+fn blob_that_arrives_after_its_frame_is_pushed_at_once() {
+    use sha2::Digest;
+    let (mut server, pane, mut terminal) = stock_native_with_hello(json!({
+        "r":"hello","v":1,"term":"fixture","version":"1","kinds":["col","text","editor","image"],
+        "features":["edit","undo","send","settle","blobs"],"apc":65536,"credits":2,
+        "cell":{"w":8,"h":16},"dark":true,"reduceMotion":false}));
+    let bytes = b"\x89PNG late blob";
+    let id = format!("{:x}", sha2::Sha256::digest(bytes));
+    // omp's first blob: the frame goes out at once, the bytes follow the
+    // `blobs` query round trip.
+    let mut program = apc(b'q', &json!({"q":"blobs","ids":[id]}));
+    program.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":2,"ops":[
+        ["add","shot","program",null,{"id":"shot","k":"image","p":{"blob":id,"w":4,"h":4}}]]}),
+    ));
+    let sent = terminal.packets.len();
+    pane_runtime::pane_parse_buffer(&mut server, pane, &program).unwrap();
+    let reply = apc(b'r', &json!({"r":"blobs","have":[]}));
+    let output = &server.panes.get(pane).unwrap().output;
+    assert!(
+        output.windows(reply.len()).any(|window| window == reply),
+        "rmux answers the query itself: {}",
+        String::from_utf8_lossy(output)
+    );
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(
+        verbs_since(&terminal, sent),
+        vec!['f'],
+        "the frame went without the blob"
+    );
+    assert_eq!(
+        node_mut(terminal.tree.as_mut().unwrap(), "shot").unwrap()["p"]["blob"],
+        id
+    );
+
+    let sent = terminal.packets.len();
+    pane_runtime::pane_parse_buffer(&mut server, pane, &blob_apc(&id, bytes)).unwrap();
+    terminal.pump(&mut server);
+    assert_eq!(
+        verbs_since(&terminal, sent),
+        vec!['b'],
+        "the late blob reaches the host on its own, with no new frame"
+    );
+    let body = terminal.packets[sent].1.as_str().unwrap();
+    assert!(
+        body.starts_with(&format!("id={id};mime=image/png;")),
+        "{body}"
+    );
+
+    // The host keeps it: the next frame does not send it again, and a repeat
+    // of the same `b` is not pushed twice.
+    let sent = terminal.packets.len();
+    let mut again = blob_apc(&id, bytes);
+    again.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":3,"ops":[["set","transcript",{"text":"two"}]]}),
+    ));
+    pane_runtime::pane_parse_buffer(&mut server, pane, &again).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(verbs_since(&terminal, sent), vec!['f']);
+    assert_eq!(terminal.text("transcript"), "two");
 }
 
 /// `MSG_RESIZE` after the terminal changed to `sx`x`sy`, run through the
