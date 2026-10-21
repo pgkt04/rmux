@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/rmux-sys", "crates/rmux-util", "crates/rmux-emu", "crates/rmux-tty", "crates/rmux-server", "crates/rmux", "harness"]
 
 [workspace.package]
-version = "0.3.2"
+version = "0.4.0"
 edition = "2024"
 license = "ISC"
 rust-version = "1.85"
