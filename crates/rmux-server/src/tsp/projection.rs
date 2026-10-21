@@ -7,7 +7,7 @@ use super::{
     status_bar::{BAR_CSS, BAR_ID, BAR_SHEET},
     wire::{Frame, JOINED_LIMIT, WireMessage},
 };
-use crate::ids::PaneId;
+use crate::ids::{PaneId, TimerId};
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeSet, HashMap, VecDeque, hash_map};
 use std::sync::Arc;
@@ -145,6 +145,9 @@ pub struct Projection {
     /// first blob comes after its `blobs` query round trip). Sent on their own,
     /// like metadata, unless a frame prepared first carries them.
     late_blobs: Vec<replay::ReplayBlob>,
+    /// The host has not yet said which blobs it holds (`q blobs` at open);
+    /// nothing is prepared until it does or this timeout fires.
+    awaiting_blobs: Option<TimerId>,
 }
 impl Projection {
     pub fn new(
@@ -193,11 +196,18 @@ impl Projection {
             bar_sheet: None,
             admitted_blobs: BTreeSet::new(),
             late_blobs: Vec::new(),
+            awaiting_blobs: None,
         }
     }
 
     pub fn is_open(&self) -> bool {
         self.opened && !self.closed && !self.failed
+    }
+
+    /// Open, or opening once the host says which blobs it holds: the client
+    /// shows the pane natively either way.
+    pub fn is_open_or_opening(&self) -> bool {
+        !self.closed && !self.failed && (self.opened || self.awaiting_blobs.is_some())
     }
 
     pub fn in_flight(&self) -> usize {
@@ -252,6 +262,19 @@ impl Projection {
     /// `hide`/`reveal` not yet carried by a frame.
     pub fn visibility_pending(&self) -> bool {
         self.visibility_dirty
+    }
+
+    pub(super) fn wait_for_blobs(&mut self, timeout: TimerId) {
+        self.awaiting_blobs = Some(timeout);
+    }
+
+    pub(super) fn awaiting_blobs(&self) -> Option<TimerId> {
+        self.awaiting_blobs
+    }
+
+    /// The timeout of the wait this ends, if one was running.
+    pub(super) fn end_blob_wait(&mut self) -> Option<TimerId> {
+        self.awaiting_blobs.take()
     }
 
     fn visibility_op(&self) -> Value {
@@ -437,6 +460,9 @@ impl Projection {
         self.available()?;
         if document.surface != self.logical {
             return Err(ProjectionError::WrongSurface);
+        }
+        if self.awaiting_blobs.is_some() {
+            return Ok(None);
         }
         if self.awaiting_frame.is_some() {
             return Ok(self.prepared_held());

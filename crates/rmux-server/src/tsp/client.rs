@@ -23,6 +23,8 @@ pub struct Request {
     pub owner: RequestOwner,
     pub completed: bool,
     pub hello: Option<Hello>,
+    /// The blob ids a `q blobs` in this request asked about.
+    pub blobs: Vec<String>,
 }
 /// Where a client keeps one of its projections.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -175,6 +177,7 @@ impl ClientTspState {
             owner,
             completed: false,
             hello: None,
+            blobs: Vec::new(),
         });
         token
     }

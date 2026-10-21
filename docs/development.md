@@ -435,6 +435,32 @@ reopens with a replay on the return, as a replacement does: Tern 0.8.4 keeps a
 live suspended inline surface's `dock` strip over the last grid row (rmux's
 status line), over the alternate screen too, and program sheets cannot reach
 the region elements, so only `x` gives the full grid back.
+A replay carries every blob its document references that the host is not known
+to hold, so an omp↔omp window switch used to resend megabytes of images the
+page already had. A host whose `hello` reply lists the `blobstore` feature
+promises that its answer to `q blobs` covers the whole terminal, across
+surfaces and projection close/open (Tern and rs-ttyd 1.4.0 send `blobs` but not
+`blobstore`; for them nothing below happens). Opening a projection for such a
+host (`tsp/project.rs::open_projection`) asks
+`{"q":"blobs","ids":[...]}` with every verified blob the surface's document
+references, lowercase, cut to fit one APC of the host's `apc`, in the same
+DA1-fenced transaction and `Replay` request as the program `hello` (the
+request is created for the query alone when the hello is unchanged). Every
+open asks again: a reloaded page has an empty store, and a `gone` for any of
+the client's projections clears `confirmed_blobs` (the host may have lost its
+store with the surface). Until that request's DA1 returns, or 1 s passes
+(`client_runtime.rs::time_blob_wait`), the new projection sends nothing
+(`Projection::awaiting_blobs`) but already counts as native
+(`Projection::is_open_or_opening`), so the cell grid does not paint in
+between; then the replay goes out without the blobs the host's `have`
+listed. The answer replaces what the client is known to hold for the asked
+ids (`accept_blobs`); on the timeout the request expires and the asked ids are
+dropped from `confirmed_blobs`, so the replay sends every blob as before; a
+timeout only ever drops ids, which can only cause a resend. A late answer for
+a replaced or closed projection is ignored (pane + projection generation).
+Closing a projection that still waits sends no `x` (the host never saw its
+`o`) and cancels its timer; its request still ends at its DA1. A blob that
+arrives while the projection waits rides the replay.
 A broker-aware program's frame is acked when the viewer in use has drawn it
 (`tsp/client_runtime.rs::release_surface`). The viewer in use is the writable
 native viewer with the newest input, ties going to the lowest client id: the

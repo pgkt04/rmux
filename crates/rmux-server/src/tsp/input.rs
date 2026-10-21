@@ -246,7 +246,7 @@ pub fn native_client(server: &Server, id: ClientId) -> bool {
             || c.tsp
                 .projection
                 .as_ref()
-                .is_some_and(|p| p.is_open() && !p.failed)
+                .is_some_and(|p| p.is_open_or_opening())
     })
 }
 pub fn native_pane_client(client: &crate::client::Client, pane: PaneId) -> bool {
@@ -255,5 +255,5 @@ pub fn native_pane_client(client: &crate::client::Client, pane: PaneId) -> bool 
             .tsp
             .projection
             .as_ref()
-            .is_some_and(|p| p.pane == pane && p.is_open() && !p.failed)
+            .is_some_and(|p| p.pane == pane && p.is_open_or_opening())
 }

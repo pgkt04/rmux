@@ -13,7 +13,7 @@ use rmux_tty::tty::{Tty, TtyHostInfo, TtyOptions};
 use rmux_util::bytes::ByteString;
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     io::{self, Read, Write},
     os::fd::{AsFd, AsRawFd, BorrowedFd, OwnedFd},
     os::unix::ffi::OsStrExt,
@@ -245,6 +245,12 @@ struct FakeTerminal {
     grid: Server,
     grid_pane: PaneId,
     opens: usize,
+    /// The blob ids the host holds, from every `b` it received; its `q blobs`
+    /// answer when `answers_blobs`. Otherwise the query and the DA1 fence
+    /// right after it stay unanswered.
+    blobs: BTreeSet<String>,
+    answers_blobs: bool,
+    held_fence: bool,
 }
 
 fn model() -> (Server, PaneId, SessionId) {
@@ -343,6 +349,9 @@ impl FakeTerminal {
             grid,
             grid_pane,
             opens: 0,
+            blobs: BTreeSet::new(),
+            answers_blobs: true,
+            held_fence: false,
         };
         broker::probe_client(server, id);
         terminal.pump(server);
@@ -411,7 +420,13 @@ impl FakeTerminal {
 
     fn receive(&mut self, packet: Packet, response: &mut Vec<u8>) {
         match packet {
-            Packet::Sentinel => response.extend_from_slice(b"\x1b[?1;2c"),
+            Packet::Sentinel => {
+                if self.held_fence {
+                    self.held_fence = false;
+                } else {
+                    response.extend_from_slice(b"\x1b[?1;2c")
+                }
+            }
             Packet::ReplySentinel => {}
             Packet::Cells(bytes) => {
                 pane_runtime::pane_parse_buffer(&mut self.grid, self.grid_pane, &bytes).unwrap();
@@ -434,6 +449,22 @@ impl FakeTerminal {
                 match verb {
                     b'q' if body["q"] == "hello" && self.native => {
                         response.extend(apc(b'r', &self.hello))
+                    }
+                    b'q' if body["q"] == "blobs" && self.native => {
+                        if self.answers_blobs {
+                            let have: Vec<&Value> = body["ids"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter(|id| self.blobs.contains(id.as_str().unwrap()))
+                                .collect();
+                            response.extend(apc(b'r', &json!({"r":"blobs","have":have})));
+                        } else {
+                            self.held_fence = true;
+                        }
+                    }
+                    b'b' => {
+                        self.blobs.insert(blob_id(&body));
                     }
                     b'o' => {
                         let over_inline = body["mode"] == "screen"
@@ -1542,6 +1573,649 @@ fn switching_closes_and_reopens_the_native_projection_on_other_hosts() {
             "{term:?}"
         );
     }
+}
+
+/// The `id` of a `b` body `id=…;mime=…;<base64>`.
+fn blob_id(body: &Value) -> String {
+    body.as_str()
+        .unwrap()
+        .strip_prefix("id=")
+        .unwrap()
+        .split(';')
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+/// The ids of the `b` APCs since `sent`, in order.
+fn blobs_since(terminal: &FakeTerminal, sent: usize) -> Vec<String> {
+    terminal.packets[sent..]
+        .iter()
+        .filter(|(verb, _)| *verb == b'b')
+        .map(|(_, body)| blob_id(body))
+        .collect()
+}
+
+/// The `ids` of each `q blobs` since `sent`.
+fn blobs_queries_since(terminal: &FakeTerminal, sent: usize) -> Vec<Value> {
+    terminal.packets[sent..]
+        .iter()
+        .filter(|(verb, body)| *verb == b'q' && body["q"] == "blobs")
+        .map(|(_, body)| body["ids"].clone())
+        .collect()
+}
+
+/// The verbs since `sent` from the new projection's `o` on.
+fn verbs_from_open(terminal: &FakeTerminal, sent: usize) -> Vec<char> {
+    let verbs = verbs_since(terminal, sent);
+    let open = verbs
+        .iter()
+        .position(|verb| *verb == 'o')
+        .unwrap_or_else(|| panic!("no new projection: {verbs:?}"));
+    verbs[open..].to_vec()
+}
+
+/// Each `q` APC in `bytes`: its body and the offset right after its terminator.
+fn queries(bytes: &[u8]) -> Vec<(Value, usize)> {
+    let query = b"\x1b_tsp;q;";
+    let mut out = Vec::new();
+    let mut at = 0;
+    while let Some(start) = bytes[at..]
+        .windows(query.len())
+        .position(|window| window == query)
+    {
+        let start = at + start + query.len();
+        let Some(end) = bytes[start..]
+            .windows(2)
+            .position(|window| window == b"\x1b\\")
+        else {
+            break;
+        };
+        let end = start + end;
+        out.push((serde_json::from_slice(&bytes[start..end]).unwrap(), end + 2));
+        at = end + 2;
+    }
+    out
+}
+
+/// The offset of each DA1 query `ESC [ c` in `bytes`.
+fn fences(bytes: &[u8]) -> Vec<usize> {
+    bytes
+        .windows(3)
+        .enumerate()
+        .filter(|(_, window)| *window == b"\x1b[c")
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// The DA1 fence right after the `q blobs` APC in `bytes`: the query and the
+/// fence are one protocol transaction.
+fn fence_follows_blobs_query(bytes: &[u8]) -> bool {
+    queries(bytes)
+        .iter()
+        .find(|(body, _)| body["q"] == "blobs")
+        .is_some_and(|(_, end)| bytes[*end..].starts_with(b"\x1b[c"))
+}
+
+/// What `close_bytes` adds after an inline surface's `x`.
+const BACK_TO_GRID: &[u8] = b"\x1b[r\x1b8\x1b[A\x1b[M";
+
+fn bytes_contain(bytes: &[u8], needle: &[u8]) -> bool {
+    bytes.windows(needle.len()).any(|window| window == needle)
+}
+
+/// Window 0's two images in `two_omp_windows`.
+const SHOTS: [&[u8]; 2] = [b"\x89PNG shot a", b"\x89PNG shot b"];
+
+/// rsttyd with a whole-terminal blob store: `blobstore` beside its 1.4.0
+/// features.
+fn blobstore_hello() -> Value {
+    json!({"r":"hello","v":1,"term":"rsttyd","version":"1.5.0","kinds":["col","text","editor","image"],
+        "features":["dock","adopt","program-palette","scroll","settle","edit","undo","blobs","styles","blobstore"],
+        "apc":65536,"credits":2,"cell":{"w":8,"h":16},"dark":true,"reduceMotion":false})
+}
+
+fn rsttyd_1_4_hello() -> Value {
+    json!({"r":"hello","v":1,"term":"rsttyd","version":"1.4.0","kinds":["col","text","editor","image"],
+        "features":["dock","adopt","program-palette","scroll","settle","edit","undo","blobs","styles"],
+        "apc":65536,"credits":2,"cell":{"w":8,"h":16},"dark":true,"reduceMotion":false})
+}
+
+fn tern_hello() -> Value {
+    json!({"r":"hello","v":1,"term":"tern","version":"0.8.4","kinds":["col","text","editor","image"],
+        "features":["blobs","settle","adopt","dock","program-palette","reduce-motion","aside","scroll","styles","flow"],
+        "apc":65536,"credits":2,"cell":{"w":8,"h":16},"dark":true,"reduceMotion":false})
+}
+
+/// Two omp windows on one terminal: window 0's program shows two images,
+/// window 1's a transcript with program `other_features`. Window 1 is current,
+/// so `C-b 0` opens a new projection of window 0 (rsttyd keeps one suspended
+/// surface, which the other window's open closed; every other host closes on
+/// the switch). The server, the terminal, the two panes and window 0's blob
+/// ids, sorted as the query lists them.
+fn two_omp_windows(
+    hello: Value,
+    other_features: Value,
+) -> (Server, FakeTerminal, PaneId, PaneId, Vec<String>) {
+    let (mut server, pane, mut terminal) = stock_native_with_hello(hello);
+    let shots = SHOTS;
+    let mut ids: Vec<String> = shots.iter().map(|bytes| sha256_hex(bytes)).collect();
+    ids.sort();
+    let mut program = blob_apc(&sha256_hex(shots[0]), shots[0]);
+    program.extend(blob_apc(&sha256_hex(shots[1]), shots[1]));
+    program.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":2,"ops":[
+            ["add","shot-a","program",null,{"id":"shot-a","k":"image","p":{"blob":sha256_hex(shots[0]),"w":4,"h":4}}],
+            ["add","shot-b","program",null,{"id":"shot-b","k":"image","p":{"blob":sha256_hex(shots[1]),"w":4,"h":4}}]]}),
+    ));
+    let sent = terminal.packets.len();
+    pane_runtime::pane_parse_buffer(&mut server, pane, &program).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    let mut first = blobs_since(&terminal, sent);
+    first.sort();
+    assert_eq!(first, ids, "the first frame carries both blobs");
+    assert_eq!(terminal.blobs.iter().cloned().collect::<Vec<_>>(), ids);
+
+    let session = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .session
+        .unwrap();
+    let window = window::window_create(&mut server, 80, 24, 0, 0).unwrap();
+    let other =
+        window::window_add_pane(&mut server, window, None, 0, SpawnFlags::default()).unwrap();
+    server.windows.get_mut(window).unwrap().active = Some(other);
+    crate::layout::init(&mut server, window, other);
+    session::session_attach(&mut server, session, window, 1).unwrap();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    let mut program = apc(
+        b'q',
+        &json!({"q":"hello","v":[1],"app":"omp","features":other_features}),
+    );
+    program.extend(apc(
+        b'o',
+        &json!({"id":"program","mode":"inline","title":"omp"}),
+    ));
+    program.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":1,"ops":[["add","transcript","program",null,{"id":"transcript","k":"text","p":{"text":"other transcript"}}]]}),
+    ));
+    pane_runtime::pane_parse_buffer(&mut server, other, &program).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(terminal.text("transcript"), "other transcript");
+    assert_eq!(terminal.opens, 2);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(
+        c.tsp.hidden.is_none(),
+        "the other window's open closed the suspended surface"
+    );
+    (server, terminal, pane, other, ids)
+}
+
+/// The replay the client is holding, after the terminal answered the pump.
+fn settle_replay(server: &mut Server, terminal: &mut FakeTerminal) {
+    terminal.pump(server);
+    terminal.draw(server);
+    crate::client::tick::tick(server);
+    terminal.pump(server);
+    terminal.draw(server);
+}
+
+/// The host's `r blobs` and the DA1 reply that closes the request.
+fn answer_blobs(server: &mut Server, terminal: &mut FakeTerminal, have: &[String]) {
+    let mut reply = apc(b'r', &json!({"r":"blobs","have":have}));
+    reply.extend(b"\x1b[?1;2c");
+    terminal.send(server, &reply);
+    settle_replay(server, terminal);
+}
+
+fn awaiting_blobs(server: &Server, terminal: &FakeTerminal) -> bool {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .projection
+        .as_ref()
+        .is_some_and(|p| p.awaiting_blobs().is_some())
+}
+
+fn confirmed_blobs(server: &Server, terminal: &FakeTerminal) -> Vec<String> {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .confirmed_blobs
+        .iter()
+        .cloned()
+        .collect()
+}
+
+fn assert_both_shots(terminal: &mut FakeTerminal, ids: &[String]) {
+    let mut shown: Vec<String> = ["shot-a", "shot-b"]
+        .iter()
+        .map(|id| {
+            node_mut(terminal.tree.as_mut().unwrap(), id).unwrap()["p"]["blob"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        })
+        .collect();
+    shown.sort();
+    assert_eq!(shown, ids);
+}
+
+#[test]
+fn blobstore_host_is_asked_before_a_new_projection_and_gets_no_blob_it_has() {
+    let (mut server, mut terminal, _, _, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    terminal.answers_blobs = false;
+    let sent = terminal.packets.len();
+    let bytes = terminal.bytes.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert!(
+        fence_follows_blobs_query(&terminal.bytes[bytes..]),
+        "the DA1 fence closes the query"
+    );
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(verbs.last(), Some(&'q'), "{verbs:?}");
+    assert!(
+        !verbs
+            .iter()
+            .any(|verb| matches!(verb, 'o' | 't' | 's' | 'b')),
+        "nothing of the new projection before the answer: {verbs:?}"
+    );
+    assert!(
+        frame_heads(&terminal, sent)
+            .iter()
+            .all(|head| head == &json!(["suspend"])),
+        "no frame but the left window's suspend: {verbs:?}"
+    );
+    assert_eq!(terminal.opens, 2);
+    assert!(awaiting_blobs(&server, &terminal));
+    // The waiting client is a native one: no grid or status-line repaint of
+    // the pane follows the fence.
+    assert!(
+        terminal.bytes[bytes..].ends_with(b"\x1b[c"),
+        "bytes after the fence while waiting: {:?}",
+        String::from_utf8_lossy(&terminal.bytes[bytes..])
+    );
+
+    let sent = terminal.packets.len();
+    answer_blobs(&mut server, &mut terminal, &ids);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_eq!(terminal.opens, 3);
+    assert!(!awaiting_blobs(&server, &terminal));
+    assert_eq!(confirmed_blobs(&server, &terminal), ids);
+    assert_both_shots(&mut terminal, &ids);
+}
+
+#[test]
+fn blobstore_host_that_lost_its_store_gets_every_blob_before_the_frame() {
+    let (mut server, mut terminal, _, _, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    terminal.blobs.clear();
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'b', 'b', 'f']);
+    let mut sent_blobs = blobs_since(&terminal, sent);
+    sent_blobs.sort();
+    assert_eq!(sent_blobs, ids);
+    assert_eq!(terminal.opens, 3);
+    assert!(confirmed_blobs(&server, &terminal).is_empty());
+    assert_both_shots(&mut terminal, &ids);
+}
+
+#[test]
+fn blobstore_host_gets_only_the_blob_it_lacks() {
+    let (mut server, mut terminal, _, _, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    terminal.blobs.remove(&ids[1]);
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'b', 'f']);
+    assert_eq!(blobs_since(&terminal, sent), vec![ids[1].clone()]);
+    assert_eq!(confirmed_blobs(&server, &terminal), vec![ids[0].clone()]);
+    assert_both_shots(&mut terminal, &ids);
+}
+
+/// The deferred 1 s timer of the shown projection's blob wait.
+fn fire_blob_timeout(server: &mut Server, terminal: &FakeTerminal) {
+    let timer = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .projection
+        .as_ref()
+        .unwrap()
+        .awaiting_blobs()
+        .expect("waiting for the host's answer");
+    let crate::server::event_loop::LoopAction::Deferred(id) =
+        *server.event_loop.timer_action(timer).unwrap()
+    else {
+        panic!("typed timeout")
+    };
+    server.deferred.remove(&id).unwrap()(server);
+}
+
+#[test]
+fn blobstore_host_that_never_answers_gets_every_blob_after_a_second() {
+    let (mut server, mut terminal, _, _, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(confirmed_blobs(&server, &terminal), ids);
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert_eq!(terminal.text("transcript"), "other transcript");
+
+    terminal.answers_blobs = false;
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(verbs.last(), Some(&'q'), "{verbs:?}");
+    assert_eq!(terminal.opens, 4);
+
+    fire_blob_timeout(&mut server, &terminal);
+    assert!(!awaiting_blobs(&server, &terminal));
+    let sent = terminal.packets.len();
+    settle_replay(&mut server, &mut terminal);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'b', 'b', 'f']);
+    let mut sent_blobs = blobs_since(&terminal, sent);
+    sent_blobs.sort();
+    assert_eq!(sent_blobs, ids);
+    assert_eq!(terminal.opens, 5);
+    assert!(
+        confirmed_blobs(&server, &terminal).is_empty(),
+        "the ids asked about are forgotten on the timeout"
+    );
+    assert_both_shots(&mut terminal, &ids);
+
+    // The host's late answer changes nothing.
+    let sent = terminal.packets.len();
+    answer_blobs(&mut server, &mut terminal, &ids);
+    assert!(confirmed_blobs(&server, &terminal).is_empty());
+    let verbs = verbs_since(&terminal, sent);
+    assert!(verbs.is_empty(), "{verbs:?}");
+}
+
+#[test]
+fn blobstore_host_answer_replaces_what_rmux_knows_it_has() {
+    let (mut server, mut terminal, _, _, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_eq!(confirmed_blobs(&server, &terminal), ids);
+
+    // The page reloaded: its store is empty.
+    terminal.blobs.clear();
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert!(
+        blobs_queries_since(&terminal, sent).is_empty(),
+        "a document without blobs asks nothing"
+    );
+    assert_eq!(terminal.text("transcript"), "other transcript");
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'b', 'b', 'f']);
+    let mut sent_blobs = blobs_since(&terminal, sent);
+    sent_blobs.sort();
+    assert_eq!(sent_blobs, ids);
+    assert!(confirmed_blobs(&server, &terminal).is_empty());
+    assert_both_shots(&mut terminal, &ids);
+}
+
+/// Tern and rsttyd 1.4.0 announce `blobs`, not `blobstore`: no query, no
+/// wait, every blob in the replay as before.
+#[test]
+fn hosts_without_a_blob_store_get_every_blob_with_no_query() {
+    for hello in [tern_hello(), rsttyd_1_4_hello()] {
+        let term = hello["term"].clone();
+        let (mut server, mut terminal, _, _, ids) = two_omp_windows(hello, json!([]));
+        terminal.answers_blobs = false;
+        let sent = terminal.packets.len();
+        let bytes = terminal.bytes.len();
+        switch_window(&mut server, &mut terminal, b"\x020");
+        assert!(
+            blobs_queries_since(&terminal, 0).is_empty(),
+            "{term}: never asked"
+        );
+        // The program hello is unchanged: the switch writes no query and no
+        // DA1 at all, as before.
+        let written = &terminal.bytes[bytes..];
+        assert!(queries(written).is_empty(), "{term}: a query on the wire");
+        assert!(fences(written).is_empty(), "{term}: a DA1 on the wire");
+        assert!(
+            server
+                .clients
+                .get(terminal.client)
+                .unwrap()
+                .tsp
+                .requests
+                .is_empty(),
+            "{term}: a request left open"
+        );
+        assert_eq!(
+            verbs_from_open(&terminal, sent),
+            vec!['o', 'b', 'b', 'f'],
+            "{term}"
+        );
+        let mut sent_blobs = blobs_since(&terminal, sent);
+        sent_blobs.sort();
+        assert_eq!(sent_blobs, ids, "{term}");
+        assert_eq!(terminal.opens, 3, "{term}");
+        assert!(!awaiting_blobs(&server, &terminal), "{term}");
+        assert_both_shots(&mut terminal, &ids);
+    }
+}
+
+/// omp's first blob follows its `blobs` round trip, so a frame may reference
+/// a blob rmux does not hold yet. It arrives while the new projection waits
+/// for the host's answer: it goes with the replay, once.
+#[test]
+fn late_blob_reaches_a_blobstore_host_that_is_still_being_asked() {
+    let (mut server, mut terminal, pane, _, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    let late = b"\x89PNG shot c";
+    let late_id = sha256_hex(late);
+    let mut program = apc(b'q', &json!({"q":"blobs","ids":[late_id]}));
+    program.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":3,"ops":[
+            ["add","shot-c","program",null,{"id":"shot-c","k":"image","p":{"blob":late_id,"w":4,"h":4}}]]}),
+    ));
+    pane_runtime::pane_parse_buffer(&mut server, pane, &program).unwrap();
+
+    terminal.answers_blobs = false;
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(
+        blobs_queries_since(&terminal, sent),
+        vec![json!(ids)],
+        "only the blobs rmux holds are asked about"
+    );
+    assert!(awaiting_blobs(&server, &terminal));
+
+    let sent = terminal.packets.len();
+    pane_runtime::pane_parse_buffer(&mut server, pane, &blob_apc(&late_id, late)).unwrap();
+    terminal.pump(&mut server);
+    assert!(
+        verbs_since(&terminal, sent).is_empty(),
+        "the late blob waits with the replay"
+    );
+
+    answer_blobs(&mut server, &mut terminal, &ids);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'b', 'f']);
+    assert_eq!(blobs_since(&terminal, sent), vec![late_id.clone()]);
+    assert_eq!(terminal.opens, 3);
+    assert_eq!(
+        node_mut(terminal.tree.as_mut().unwrap(), "shot-c").unwrap()["p"]["blob"],
+        late_id
+    );
+    assert_both_shots(&mut terminal, &ids);
+}
+
+/// A program hello the host has not seen and the blob query share one
+/// transaction: `q hello`, `q blobs`, one DA1 fence.
+#[test]
+fn program_hello_and_blob_query_go_out_under_one_fence() {
+    let (mut server, mut terminal, _, _, ids) = two_omp_windows(blobstore_hello(), json!(["edit"]));
+    terminal.answers_blobs = false;
+    let sent = terminal.packets.len();
+    let bytes = terminal.bytes.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    let written = &terminal.bytes[bytes..];
+    let names: Vec<Value> = queries(written)
+        .into_iter()
+        .map(|(body, _)| body["q"].clone())
+        .collect();
+    assert_eq!(names, vec![json!("hello"), json!("blobs")]);
+    assert_eq!(fences(written).len(), 1, "one DA1 closes both queries");
+    assert!(fence_follows_blobs_query(written));
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(verbs.last(), Some(&'q'), "{verbs:?}");
+    assert!(!verbs.contains(&'o'), "{verbs:?}");
+    assert!(awaiting_blobs(&server, &terminal));
+
+    // The terminal answered the program hello at once; its blobs answer and
+    // the DA1 reply release the replay.
+    let sent = terminal.packets.len();
+    answer_blobs(&mut server, &mut terminal, &ids);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_eq!(confirmed_blobs(&server, &terminal), ids);
+    assert_eq!(terminal.opens, 3);
+    assert_both_shots(&mut terminal, &ids);
+}
+
+/// A page reload with the pty kept: the host's store is empty and it reports
+/// the shown surface gone. The reopen asks about that surface's blobs only;
+/// every other blob rmux had confirmed is lost too, so a later frame that
+/// references one carries it.
+#[test]
+fn reloaded_blobstore_host_gets_the_blobs_confirmed_before_the_reload() {
+    let (mut server, mut terminal, _, other, ids) = two_omp_windows(blobstore_hello(), json!([]));
+    let own = b"\x89PNG shot y";
+    let own_id = sha256_hex(own);
+    let mut program = blob_apc(&own_id, own);
+    program.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":2,"ops":[
+            ["add","shot-y","program",null,{"id":"shot-y","k":"image","p":{"blob":own_id,"w":4,"h":4}}]]}),
+    ));
+    let sent = terminal.packets.len();
+    pane_runtime::pane_parse_buffer(&mut server, other, &program).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(blobs_since(&terminal, sent), vec![own_id.clone()]);
+
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(confirmed_blobs(&server, &terminal), ids);
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!([own_id])]);
+    let mut all = ids.clone();
+    all.push(own_id.clone());
+    all.sort();
+    assert_eq!(confirmed_blobs(&server, &terminal), all);
+
+    terminal.blobs.clear();
+    let sent = terminal.packets.len();
+    host_lost_surface(&mut server, &mut terminal);
+    terminal.draw(&mut server);
+    assert_eq!(
+        blobs_queries_since(&terminal, sent),
+        vec![json!([own_id])],
+        "the reopen asks about its own surface only"
+    );
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'b', 'f']);
+    assert_eq!(blobs_since(&terminal, sent), vec![own_id.clone()]);
+    assert!(
+        confirmed_blobs(&server, &terminal).is_empty(),
+        "the reload lost every blob, asked about or not"
+    );
+
+    // Window 1's program now shows window 0's first image: the same bytes,
+    // the same id, which rmux had confirmed before the reload.
+    let shared_id = sha256_hex(SHOTS[0]);
+    let mut program = blob_apc(&shared_id, SHOTS[0]);
+    program.extend(apc(
+        b'f',
+        &json!({"sf":"program","s":3,"ops":[
+            ["add","shot-x","program",null,{"id":"shot-x","k":"image","p":{"blob":shared_id,"w":4,"h":4}}]]}),
+    ));
+    let sent = terminal.packets.len();
+    pane_runtime::pane_parse_buffer(&mut server, other, &program).unwrap();
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    let verbs = verbs_since(&terminal, sent);
+    assert!(
+        verbs.contains(&'f') && !verbs.contains(&'o'),
+        "a live frame: {verbs:?}"
+    );
+    assert_eq!(
+        blobs_since(&terminal, sent),
+        vec![shared_id.clone()],
+        "the live frame carries the blob the reloaded host lost"
+    );
+    assert_eq!(
+        node_mut(terminal.tree.as_mut().unwrap(), "shot-x").unwrap()["p"]["blob"],
+        shared_id
+    );
+}
+
+/// Leaving a window whose projection still waits for the host's answer: the
+/// host never saw that surface, so there is no `x` and no anchor row to
+/// remove.
+#[test]
+fn leaving_a_waiting_projection_closes_it_without_a_word_to_the_host() {
+    let (mut server, mut terminal, _, _, _) = two_omp_windows(blobstore_hello(), json!([]));
+    terminal.answers_blobs = false;
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert!(awaiting_blobs(&server, &terminal));
+    let outer = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .projection
+        .as_ref()
+        .unwrap()
+        .outer
+        .clone();
+
+    let sent = terminal.packets.len();
+    let bytes = terminal.bytes.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert!(
+        !terminal.packets[sent..]
+            .iter()
+            .any(|(verb, body)| *verb == b'x' && body["id"] == outer),
+        "an `x` for a surface the host never opened: {:?}",
+        verbs_since(&terminal, sent)
+    );
+    assert!(
+        !bytes_contain(&terminal.bytes[bytes..], BACK_TO_GRID),
+        "an anchor row removed for a surface the host never opened"
+    );
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_eq!(terminal.text("transcript"), "other transcript");
+    assert_eq!(terminal.opens, 3);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(
+        c.tsp.projections().all(|p| p.awaiting_blobs().is_none()),
+        "no projection waits any more"
+    );
 }
 
 /// `MSG_RESIZE` after the terminal changed to `sx`x`sy`, run through the

@@ -1,13 +1,13 @@
 // Ported from tmux tty.c, tty-keys.c, server-client.c @ 8f25579c
 use super::{
     broker::{self, Renderer},
-    client::{Capability, RequestOwner, Slot},
+    client::{Capability, ClientTspState, RequestOwner, Slot},
     surface::SurfaceId,
     wire::{Hello, WireMessage},
 };
 use crate::{
     client::ClientFlags,
-    ids::{ClientId, PaneId},
+    ids::{ClientId, PaneId, TimerId},
     model::Server,
 };
 use rmux_tty::{
@@ -17,18 +17,22 @@ use rmux_tty::{
 use serde_json::{Value, json};
 use std::{collections::VecDeque, time::Duration};
 
+pub(super) fn cancel_timer(server: &mut Server, timer: TimerId) {
+    if let Some(crate::server::event_loop::LoopAction::Deferred(id)) =
+        server.event_loop.timer_action(timer)
+    {
+        server.deferred.remove(id);
+    }
+    server.event_loop.cancel(timer);
+}
+
 fn cancel_probe_timer(server: &mut Server, client: ClientId) {
     let timer = server
         .clients
         .get_mut(client)
         .and_then(|c| c.tsp.timer.take());
     if let Some(timer) = timer {
-        if let Some(crate::server::event_loop::LoopAction::Deferred(id)) =
-            server.event_loop.timer_action(timer)
-        {
-            server.deferred.remove(id);
-        }
-        server.event_loop.cancel(timer);
+        cancel_timer(server, timer);
     }
 }
 
@@ -114,6 +118,67 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
     }
 }
 
+/// After 1 s without the host's answer to the `q blobs` of request `token`,
+/// the projection waiting on it sends its replay with every blob.
+pub(super) fn time_blob_wait(server: &mut Server, client: ClientId, token: u64) -> TimerId {
+    let generation = server.clients.get(client).map_or(0, |c| c.tsp.generation);
+    crate::server::event_loop::schedule_deferred(
+        server,
+        Duration::from_secs(1),
+        Box::new(move |server| {
+            let Some(c) = server.clients.get_mut(client) else {
+                return;
+            };
+            if c.tsp.generation != generation
+                || c.tty
+                    .as_ref()
+                    .is_none_or(|tty| tty.protocol_generation() != generation)
+            {
+                return;
+            }
+            let ClientTspState {
+                requests,
+                confirmed_blobs,
+                ..
+            } = &mut c.tsp;
+            let Some(request) = requests
+                .iter()
+                .find(|r| r.token == token && r.generation == generation && !r.completed)
+            else {
+                return;
+            };
+            let RequestOwner::Replay { pane, projection } = request.owner else {
+                return;
+            };
+            for id in &request.blobs {
+                confirmed_blobs.remove(id);
+            }
+            c.tsp.expire(token);
+            resume_after_blob_wait(server, client, pane, projection);
+        }),
+    )
+    .0
+}
+
+/// The projection `projection` of `pane` waits no longer for the host's
+/// blobs and sends its replay. The timeout of the wait, if it was waiting.
+fn resume_after_blob_wait(
+    server: &mut Server,
+    client: ClientId,
+    pane: PaneId,
+    projection: u64,
+) -> Option<TimerId> {
+    let timeout = server
+        .clients
+        .get_mut(client)?
+        .tsp
+        .projections_mut()
+        .find(|p| p.pane == pane && p.generation == projection)?
+        .end_blob_wait()?;
+    broker::project_pending(server, client);
+    Some(timeout)
+}
+
 pub fn client_sync(server: &mut Server, client: ClientId) {
     let Some(c) = server.clients.get(client) else {
         return;
@@ -187,6 +252,11 @@ pub fn client_sentinel(server: &mut Server, client: ClientId, raw: &[u8]) {
             }
             if resolved.is_some() {
                 broker::recompute(server);
+            }
+            if let Some(RequestOwner::Replay { pane, projection }) = resolved
+                && let Some(timeout) = resume_after_blob_wait(server, client, pane, projection)
+            {
+                cancel_timer(server, timeout);
             }
         }
         Some(Da1Owner::Stop) | None => {}
@@ -446,9 +516,16 @@ fn accept_blobs(server: &mut Server, client: ClientId, value: &Value) {
     };
     let verified = state.blobs.have(&ids);
     if let Some(c) = server.clients.get_mut(client) {
-        c.tsp
-            .confirmed_blobs
-            .extend(verified.into_iter().map(|id| id.to_ascii_lowercase()));
+        let ClientTspState {
+            requests,
+            confirmed_blobs,
+            ..
+        } = &mut c.tsp;
+        // The answer covers every asked id: one it leaves out is gone.
+        for id in requests.front().into_iter().flat_map(|r| &r.blobs) {
+            confirmed_blobs.remove(id);
+        }
+        confirmed_blobs.extend(verified.into_iter().map(|id| id.to_ascii_lowercase()));
     }
 }
 
@@ -545,17 +622,19 @@ fn client_gone(
         .clients
         .get(client)
         .and_then(|c| nodes.iter().find_map(|node| c.tsp.slot_of(node)));
-    match lost {
-        // The surface is gone on the host already; nothing to close there.
-        Some(Slot::Hidden) => {
+    if let Some(slot) = lost {
+        // A host that lost a surface may have lost its blob store with it (a
+        // page reload), so no blob it was known to hold is trusted any more.
+        if let Some(c) = server.clients.get_mut(client) {
+            c.tsp.confirmed_blobs.clear();
+        }
+        if slot == Slot::Hidden {
+            // The surface is gone on the host already; nothing to close there.
             broker::drop_hidden(server, client);
-            return;
-        }
-        Some(_) => {
+        } else {
             reopen_projection(server, client);
-            return;
         }
-        None => {}
+        return;
     }
     let Some(state) = server.panes.get_mut(pane).and_then(|p| p.tsp.as_mut()) else {
         return;

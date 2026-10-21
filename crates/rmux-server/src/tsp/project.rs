@@ -4,7 +4,7 @@ use super::{
     client::{ClientTspState, RequestOwner, Slot},
     projection::Projection,
     surface::{SurfaceId, SurfaceMode},
-    wire::WireMessage,
+    wire::{APC_LIMIT, WireMessage},
 };
 use crate::{
     client::ClientFlags,
@@ -59,9 +59,11 @@ fn close_bytes(projection: &Projection, tty: &Tty) -> Vec<u8> {
     bytes
 }
 /// What `Tty::stop` sends for the open projections: the screen first, then
-/// the inline surface under it, then a hidden one.
+/// the inline surface under it, then a hidden one. One still waiting for the
+/// host's blobs has sent nothing.
 fn teardown(tsp: &ClientTspState, tty: &Tty) -> Vec<u8> {
     tsp.projections()
+        .filter(|projection| projection.awaiting_blobs().is_none())
         .flat_map(|projection| close_bytes(projection, tty))
         .collect()
 }
@@ -110,6 +112,16 @@ pub fn close_hidden(server: &mut Server, id: ClientId) {
 fn close_projections(server: &mut Server, id: ClientId, closing: Vec<Projection>) {
     if closing.is_empty() {
         return;
+    }
+    // One still waiting for the host's blobs has queued nothing, not even its `o`.
+    let (waiting, closing): (Vec<_>, Vec<_>) = closing
+        .into_iter()
+        .partition(|projection| projection.awaiting_blobs().is_some());
+    for timeout in waiting
+        .into_iter()
+        .filter_map(|mut projection| projection.end_blob_wait())
+    {
+        super::client_runtime::cancel_timer(server, timeout);
     }
     let Some(c) = server.clients.get_mut(id) else {
         return;
@@ -243,6 +255,12 @@ fn close_over_covered(server: &mut Server, id: ClientId) -> bool {
     let (Some(tty), Some(screen)) = (c.tty.as_mut(), c.tsp.projection.as_ref()) else {
         return false;
     };
+    // One still waiting for the host's blobs has queued nothing, not even its `o`.
+    if let Some(timeout) = screen.awaiting_blobs() {
+        c.tsp.projection = None;
+        super::client_runtime::cancel_timer(server, timeout);
+        return true;
+    }
     let close = ProtocolTransaction::new(close_bytes(screen, tty)).teardown();
     let generation = screen.generation;
     tty.cancel_protocol(generation);
@@ -367,7 +385,9 @@ pub fn project_pending(server: &mut Server, id: ClientId) {
     }
     send_pending(server, id, pane, handle, Slot::Shown);
 }
-/// A new outer surface for `handle`, sent from the next `send_pending`.
+/// A new outer surface for `handle`, sent from the next `send_pending`. A host
+/// with a terminal-wide blob store first says which of the surface's blobs it
+/// has, so the replay leaves them out.
 fn open_projection(
     server: &mut Server,
     id: ClientId,
@@ -376,12 +396,25 @@ fn open_projection(
     handle: SurfaceId,
     inline: bool,
 ) -> bool {
-    let hello = server
-        .panes
-        .get(pane)
-        .and_then(|p| p.tsp.as_ref())
-        .map(|s| s.program_hello.clone())
-        .unwrap_or_default();
+    let state = server.panes.get(pane).and_then(|p| p.tsp.as_ref());
+    let hello = state.map(|s| s.program_hello.clone()).unwrap_or_default();
+    let blobs = server
+        .clients
+        .get(id)
+        .and_then(|c| c.tsp.hello())
+        .filter(|h| h.features.contains("blobstore"))
+        .zip(state)
+        .and_then(|(host, state)| {
+            let held = state
+                .surfaces
+                .get(handle)?
+                .document
+                .blob_references()
+                .into_iter()
+                .filter(|digest| state.blobs.peek(digest).is_some())
+                .collect();
+            blobs_query(held, host.apc)
+        });
     let c = server.clients.get_mut(id).expect("checked client");
     c.tsp.projection_generation = c.tsp.projection_generation.wrapping_add(1);
     let generation = c.tsp.projection_generation;
@@ -394,28 +427,74 @@ fn open_projection(
         handle.0
     );
     let credits = c.tsp.hello().map_or(1, |h| h.credits.min(2));
-    if c.tsp.projection_hello.as_ref() != Some(&hello) {
+    let send_hello = c.tsp.projection_hello.as_ref() != Some(&hello);
+    let mut awaiting = None;
+    if send_hello || blobs.is_some() {
         let token = c.tsp.request(RequestOwner::Replay {
             pane,
             projection: generation,
         });
+        let mut bytes = if send_hello {
+            WireMessage::json(b'q', &hello).encode()
+        } else {
+            Vec::new()
+        };
+        if let Some((query, _)) = &blobs {
+            bytes.extend_from_slice(query);
+        }
         if c.tty.as_mut().is_none_or(|tty| {
-            tty.queue_da1(
-                Da1Owner::Token(token),
-                ProtocolTransaction::new(WireMessage::json(b'q', &hello).encode()),
-            )
-            .is_err()
+            tty.queue_da1(Da1Owner::Token(token), ProtocolTransaction::new(bytes))
+                .is_err()
         }) {
             c.tsp.requests.pop_back();
             return false;
         }
-        c.tsp.projection_hello = Some(hello);
+        if send_hello {
+            c.tsp.projection_hello = Some(hello);
+        }
+        if let Some((_, asked)) = blobs {
+            c.tsp.requests.back_mut().expect("queued request").blobs = asked;
+            awaiting = Some(token);
+        }
     }
     let mut projection = Projection::new(pane, logical, outer, generation, credits);
     projection.inline = inline;
     c.tsp.projection = Some(projection);
+    if let Some(token) = awaiting {
+        let timeout = super::client_runtime::time_blob_wait(server, id, token);
+        if let Some(projection) = server
+            .clients
+            .get_mut(id)
+            .and_then(|c| c.tsp.projection.as_mut())
+        {
+            projection.wait_for_blobs(timeout);
+        }
+    }
     super::status_bar::refresh(server, id);
     true
+}
+
+/// The encoded `q blobs` for as many `ids` as fit one APC of `apc` bytes, and
+/// the ids it asks; the host is not asked about the rest.
+fn blobs_query(mut ids: Vec<String>, apc: usize) -> Option<(Vec<u8>, Vec<String>)> {
+    let limit = apc.min(APC_LIMIT);
+    // The APC payload: `tsp;q;` and the JSON. Each id is a hex digest, a
+    // JSON string of its length plus quotes.
+    let mut size = br#"tsp;q;{"q":"blobs","ids":[]}"#.len();
+    let mut fit = 0;
+    for id in &ids {
+        size += id.len() + 2 + usize::from(fit > 0);
+        if size > limit {
+            break;
+        }
+        fit += 1;
+    }
+    ids.truncate(fit);
+    if ids.is_empty() {
+        return None;
+    }
+    let query = WireMessage::json(b'q', &serde_json::json!({"q":"blobs","ids":ids})).encode();
+    Some((query, ids))
 }
 
 /// Canonical `t`/`s`. Each open projection of `handle` keeps the latest palette
@@ -700,5 +779,23 @@ fn send_metadata(server: &mut Server, id: ClientId, limit: usize, generation: u6
             }
             Some(Err(QueueFull)) | None => return,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blobs_query_asks_only_ids_that_fit_one_apc() {
+        let ids: Vec<String> = (0..4u8).map(|n| format!("{n:064x}")).collect();
+        let (query, asked) = blobs_query(ids.clone(), 228).unwrap();
+        assert_eq!(query.len() - 4, 228);
+        assert_eq!(asked, ids[..3]);
+        let (query, asked) = blobs_query(ids.clone(), 227).unwrap();
+        assert!(query.len() - 4 <= 227);
+        assert_eq!(asked, ids[..2]);
+        assert!(blobs_query(Vec::new(), 65536).is_none());
+        assert!(blobs_query(ids, 64).is_none());
     }
 }
