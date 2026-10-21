@@ -593,8 +593,12 @@ one-shot. Persistent mismatch gets at most three reprobes with 100/250/1000 ms
 backoff, then a warning; transient pending/detached states do not reset that
 budget. Matched renderers have no background reconciliation timer.
 It does not restart while `process.stdin.isPaused()` indicates an external UI
-owns the tty; lookup/reprobe completions are generation-bound. Listeners/timers
-are disposed on session replacement, shutdown, and observer completion/failure.
+owns the tty; lookup/reprobe completions are generation-bound. An observer that
+exits is replaced, because another client's `attach-session -d` detaches control
+clients too: the plugin looks up the pane's session again (the pane may have
+moved) and reattaches after 100/1000/5000 ms, and any view report resets that
+budget. Listeners/timers are disposed on session replacement, shutdown,
+observer failure, and after the third failed reattach, which warns.
 `/terminal-reprobe` repeats negotiation manually. The extension leaves the
 caller environment unchanged, honors startup `PI_TUI_NATIVE=0`, and terminates
 its observer on session shutdown. No omp source changes or private-field
@@ -624,6 +628,12 @@ ownership, and a transient split/zoom without restarting the TUI. A further
 2,000-resize run kept the server/native document alive with no TUI restarts.
 Deterministic observer runtime smoke verified bounded recovery across exhausted,
 pending/detached, and manual-reprobe states.
+Real omp 18.12.6 acceptance through the rsttyd native view reproduced the
+plugin 0.1.4 observer exiting on a later `attach-session -d`, after which a
+split left omp native under the "zoom this pane" note; with the reattach, the
+same split switched omp to text and closing it returned to native. Five
+back-to-back `-d` attaches, a pane moved to another session, and a reattach
+that kept failing (three attempts, then the warning) were also exercised.
 
 The executable installs panic/fatal reporting for both process roles before
 starting the client/internal server. Reports go to an owned state directory
