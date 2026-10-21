@@ -1,4 +1,5 @@
 import type { Subprocess } from "bun";
+import { fstatSync, statSync } from "node:fs";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import type { TUI } from "@oh-my-pi/pi-tui";
 
@@ -28,20 +29,39 @@ export default function (pi: ExtensionAPI) {
 		pi.logger.debug("rmux terminal renderer reprobed", { view });
 	}
 
+	function terminalDevices(): number[] {
+		const devices: number[] = [];
+		for (const fd of [0, 1, 2]) {
+			try {
+				const stat = fstatSync(fd);
+				if (stat.isCharacterDevice()) devices.push(stat.rdev);
+			} catch {}
+		}
+		return devices;
+	}
+
 	async function ownPaneSession(socket: string, pane: string): Promise<string | undefined> {
-		const [identity, tty] = await Promise.all([
-			pi.exec("rmux", ["-N", "-S", socket, "display-message", "-p", "-t", pane, "#{session_id} #{pane_tty}"], { timeout: 5000 }),
-			pi.exec("ps", ["-o", "tty=", "-p", String(process.pid)], { timeout: 5000 }),
-		]);
+		const identity = await pi.exec("rmux", ["-N", "-S", socket, "display-message", "-p", "-t", pane, "#{session_id} #{pane_tty}"], { timeout: 5000 });
 		const match = /^(\$\d+) (\/\S+)$/.exec(identity.stdout.trim());
 		if (identity.code !== 0 || !match) {
 			pi.logger.debug("rmux pane unavailable; plugin inactive", { socket, pane, error: identity.stderr.trim() });
 			return undefined;
 		}
-		const own = tty.stdout.trim();
-		const ownTty = own.startsWith("/") ? own : `/dev/${own}`;
-		if (tty.code !== 0 || !own || ownTty !== match[2]) {
-			pi.logger.debug("rmux pane is not omp's terminal; plugin inactive", { socket, pane, paneTty: match[2], ownTty });
+		// macOS ps reports "stdin" as the tty of processes in some panes, so the pane's
+		// device number is compared with omp's own terminal descriptors instead.
+		const paneTty = match[2];
+		let paneDevice: number;
+		try {
+			const stat = statSync(paneTty);
+			if (!stat.isCharacterDevice()) throw new Error("not a terminal device");
+			paneDevice = stat.rdev;
+		} catch (error) {
+			pi.logger.debug("rmux pane tty unavailable; plugin inactive", { socket, pane, paneTty, error: String(error) });
+			return undefined;
+		}
+		const ownDevices = terminalDevices();
+		if (!ownDevices.includes(paneDevice)) {
+			pi.logger.debug("rmux pane is not omp's terminal; plugin inactive", { socket, pane, paneTty, paneDevice, ownDevices });
 			return undefined;
 		}
 		return match[1];
