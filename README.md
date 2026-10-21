@@ -22,7 +22,7 @@ Linux socket activation.
 ## Install and update
 
 Releases ship prebuilt binaries for `aarch64-apple-darwin`,
-`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (glibc 2.35+).
+`x86_64-unknown-linux-gnu` and `aarch64-unknown-linux-gnu` (glibc 2.17+).
 Download `rmux-<tag>-<target>.tar.gz` and `SHA256SUMS` from
 [releases](https://github.com/pgkt04/rmux/releases), then:
 

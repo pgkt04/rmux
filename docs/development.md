@@ -691,16 +691,18 @@ two. It runs no tests; CI already did. Targets:
   `libutf8proc.a` and sets `RMUX_UTF8PROC_STATIC_DIR`; `rmux-sys/build.rs` then
   links it statically instead of asking pkg-config.
 - `x86_64-unknown-linux-gnu` on `ubuntu-22.04` and `aarch64-unknown-linux-gnu`
-  on `ubuntu-22.04-arm`: glibc 2.35 floor. Never musl; rmux relies on glibc
-  wcwidth and locales.
+  on `ubuntu-22.04-arm`, built with `cargo zigbuild --target <target>.2.17`
+  (cargo-zigbuild 0.23.4, zig 0.17.0) so they link against glibc 2.17
+  (`RMUX_GLIBC`) instead of the runner's 2.35. Never musl; rmux relies on
+  glibc wcwidth and locales.
 
 Builds set `RMUX_DEFAULT_TERM=tmux-256color` (no host probe) and
 `RMUX_GIT_SHA` to the 12-character commit, used when git is unavailable.
 Each binary must print `rmux next-3.9` for `-V` and `rmux <version> (` for
 `rmux version`, start and kill a detached server, and link only system
 libraries: `otool -L` without utf8proc, `/opt/homebrew` or `/usr/local`;
-`readelf -d` NEEDED within libc, libm, libgcc_s and the ld-linux loader. The
-job logs the highest `GLIBC_` symbol version.
+`readelf -d` NEEDED within libc, libm, libgcc_s and the ld-linux loader, and
+no `GLIBC_` symbol version above `RMUX_GLIBC`.
 
 Assets: `rmux-<tag>-<target>.tar.gz`, holding only `rmux` at the root, plus
 `SHA256SUMS` from `sha256sum`. `rmux update` fetches
