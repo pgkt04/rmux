@@ -419,9 +419,10 @@ client's one hidden slot instead of closing. The host gets a frame that starts
 with `["suspend"]` and keeps the surface (rs-ttyd hides its DOM and gives the
 whole pane to the grid), the cells go back to the alternate screen and the
 grid redraws in full. While hidden the projection is silent: the program's
-frames and metadata queue on it, the host's acks still count, a hidden
-projection is never "drawn" (stock programs keep getting their credits from
-`release_undrawn`), and the `PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile
+frames and metadata queue on it, the host's acks still pay the projection's
+own credits, a hidden projection is never "drawn" (stock programs keep
+getting their credits from `release_undrawn`), and the
+`PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile
 bounds the queue, so a long-hidden projection resumes with a replay into the
 open surface (no `o`, same id). Coming back to the window leaves the alternate
 screen and sends one frame starting with `["resume"]` followed by the queued
@@ -434,6 +435,16 @@ reopens with a replay on the return, as a replacement does: Tern 0.8.4 keeps a
 live suspended inline surface's `dock` strip over the last grid row (rmux's
 status line), over the alternate screen too, and program sheets cannot reach
 the region elements, so only `x` gives the full grid back.
+A broker-aware program's frame is acked when the viewer in use has drawn it
+(`tsp/client_runtime.rs::release_surface`). The viewer in use is the writable
+native viewer with the newest input, ties going to the lowest client id: the
+same client that leads presentation (`cell`, `dark`), picked by
+`tsp/contract.rs::viewer_in_use`. Other viewers don't gate the ack. A slow or
+stalled viewer just falls behind; once it runs out of credit its projection
+reconciles into a snapshot, and it catches up with a replay when it acks again.
+With no native viewer there is no ack. Until 2026-10-21 the ack waited for
+every viewer, so one slow client (a background phone tab) paced omp for
+everyone and `attach-session -d` was the workaround.
 Replay serialization reads canonical nodes/properties directly rather than
 allocating a temporary JSON document. One topology pass prepares routing and
 error coverage; root properties, child/settled order, focus/suspension, and all
@@ -577,8 +588,8 @@ Transitions hold pane input until matching ready, with a 64 KiB admission bound
 and tty backpressure. A missing completion after five seconds closes projections
 and shows a diagnostic plus the last real grid, not a fabricated usable program
 view. Detached native documents remain retained; a broker-aware program's frame
-credits require actual draws from every current native viewer and are never
-acknowledged without viewers.
+credits require actual draws from the viewer in use and are never acknowledged
+without viewers.
 `capture-pane` still captures the grid, not a semantic transcript. Replay and
 automated fake-terminal checks do not replace the real omp/Tern smoke acceptance.
 

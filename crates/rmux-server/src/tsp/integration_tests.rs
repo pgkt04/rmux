@@ -2286,75 +2286,128 @@ fn a_program_that_leaves_without_closing_gives_the_grid_back() {
 }
 
 #[test]
-fn source_ack_requires_every_viewer_and_none_when_detached() {
+fn source_ack_follows_the_viewer_in_use_and_the_slow_viewer_catches_up() {
     let mut fixture = Fixture::new();
+    let acks = |fixture: &Fixture| {
+        fixture
+            .replies
+            .iter()
+            .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
+            .count()
+    };
+    let work = |fixture: &mut Fixture| {
+        let fd = fixture
+            .server
+            .panes
+            .get(fixture.pane)
+            .unwrap()
+            .fd
+            .as_ref()
+            .unwrap();
+        write_all_fd(fd.as_fd(), &apc(b'q', &json!({"q":"fixture-work"})));
+        fixture.drive();
+    };
+
+    let mut active = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
+    fixture.settle(&mut active);
+    fixture.drive();
     let mut slow = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
-    fixture.settle(&mut slow);
-    fixture.drive();
-    let before = fixture
-        .replies
-        .iter()
-        .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
-        .count();
-    let mut second = FakeTerminal::attach(&mut fixture.server, Some(fixture.session), true);
-    second.pump(&mut fixture.server);
-    assert!(
-        second.tree.is_some() && !second.frames.is_empty(),
-        "newcomer receives a snapshot"
-    );
-    second.draw(&mut fixture.server);
-    fixture.drive();
-    assert_eq!(
-        fixture
-            .replies
-            .iter()
-            .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
-            .count(),
-        before
-    );
-    let fd = fixture
-        .server
-        .panes
-        .get(fixture.pane)
-        .unwrap()
-        .fd
-        .as_ref()
-        .unwrap();
-    write_all_fd(fd.as_fd(), &apc(b'q', &json!({"q":"fixture-work"})));
-    fixture.drive();
-    broker::project_pending(&mut fixture.server, slow.client);
-    broker::project_pending(&mut fixture.server, second.client);
     slow.pump(&mut fixture.server);
-    second.pump(&mut fixture.server);
-    second.draw(&mut fixture.server);
+    assert!(slow.tree.is_some(), "newcomer receives a snapshot");
+    slow.draw(&mut fixture.server);
+    fixture
+        .server
+        .clients
+        .get_mut(active.client)
+        .unwrap()
+        .activity_time = (i64::MAX, 0);
+    broker::recompute(&mut fixture.server);
+    fixture.drive();
+    let before = acks(&fixture);
+
+    work(&mut fixture);
+    broker::project_pending(&mut fixture.server, active.client);
+    broker::project_pending(&mut fixture.server, slow.client);
+    active.pump(&mut fixture.server);
+    slow.pump(&mut fixture.server);
+    active.draw(&mut fixture.server);
     fixture.drive();
     assert_eq!(
-        fixture
-            .replies
-            .iter()
-            .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
-            .count(),
-        before,
-        "fast viewer cannot pay slow viewer draw debt"
+        acks(&fixture),
+        before + 1,
+        "the viewer in use pays the debt; the slow viewer does not hold it"
     );
+
     slow.draw(&mut fixture.server);
     fixture.drive();
-    let drawn = fixture
-        .replies
-        .iter()
-        .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
-        .count();
-    assert_eq!(drawn, before + 1);
-    slow.detach(&mut fixture.server);
-    second.detach(&mut fixture.server);
+    assert_eq!(acks(&fixture), before + 1, "no second ack for paid debt");
+
+    let mut expected = before + 1;
+    for round in 2..=5 {
+        work(&mut fixture);
+        broker::project_pending(&mut fixture.server, active.client);
+        active.pump(&mut fixture.server);
+        active.draw(&mut fixture.server);
+        fixture.drive();
+        expected += 1;
+        assert_eq!(
+            acks(&fixture),
+            expected,
+            "a stalled viewer never stalls the program"
+        );
+        assert_eq!(active.text("counter"), format!("counter:{round}"));
+        assert_eq!(fixture.state()["counter"], round);
+    }
+
+    for _ in 0..8 {
+        broker::project_pending(&mut fixture.server, slow.client);
+        slow.pump(&mut fixture.server);
+        slow.draw(&mut fixture.server);
+        fixture.drive();
+        if slow.frames.is_empty() && slow.text("counter") == active.text("counter") {
+            break;
+        }
+    }
+    assert!(slow.frames.is_empty(), "slow viewer caught up");
+    assert_eq!(slow.text("counter"), active.text("counter"));
+    assert_eq!(acks(&fixture), expected, "catch-up pays no debt");
+
+    fixture
+        .server
+        .clients
+        .get_mut(active.client)
+        .unwrap()
+        .activity_time = (1, 0);
+    fixture
+        .server
+        .clients
+        .get_mut(slow.client)
+        .unwrap()
+        .activity_time = (2, 0);
+    broker::recompute(&mut fixture.server);
+    work(&mut fixture);
+    broker::project_pending(&mut fixture.server, active.client);
+    broker::project_pending(&mut fixture.server, slow.client);
+    active.pump(&mut fixture.server);
+    slow.pump(&mut fixture.server);
+    active.draw(&mut fixture.server);
     fixture.drive();
-    let acks = fixture
-        .replies
-        .iter()
-        .filter(|(verb, body)| *verb == b'e' && body["ev"] == "ack")
-        .count();
+    assert_eq!(acks(&fixture), expected, "an idle viewer pays no debt");
+    slow.draw(&mut fixture.server);
+    fixture.drive();
+    expected += 1;
     assert_eq!(
-        acks, drawn,
+        acks(&fixture),
+        expected,
+        "the ack moved with the viewer in use"
+    );
+
+    active.detach(&mut fixture.server);
+    slow.detach(&mut fixture.server);
+    fixture.drive();
+    assert_eq!(
+        acks(&fixture),
+        expected,
         "no source ack is invented for an empty viewer set"
     );
 }

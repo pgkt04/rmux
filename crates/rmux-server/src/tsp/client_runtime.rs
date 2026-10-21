@@ -327,16 +327,8 @@ fn reopen_projection(server: &mut Server, client: ClientId) {
     broker::project_pending(server, client);
 }
 
-fn drawn_prefix(
-    debts: &mut VecDeque<super::broker::DrawDebt>,
-    viewers: impl Iterator<Item = Option<u64>>,
-) -> Option<u64> {
-    let mut minimum = None;
-    for viewer in viewers {
-        let revision = viewer?;
-        minimum = Some(minimum.map_or(revision, |old: u64| old.min(revision)));
-    }
-    let revision = minimum?;
+/// Pop the debts drawn up to `revision`; the last popped sequence is the ack.
+fn drawn_prefix(debts: &mut VecDeque<super::broker::DrawDebt>, revision: u64) -> Option<u64> {
     let mut sequence = None;
     while debts.front().is_some_and(|debt| debt.revision <= revision) {
         sequence = debts.pop_front().map(|debt| debt.sequence);
@@ -353,7 +345,8 @@ pub fn release_drawn(server: &mut Server, pane: PaneId) {
     }
 }
 
-/// Ack the program's frames of `surface_id` that every native viewer drew.
+/// Ack the program's frames of `surface_id` that the viewer in use drew.
+/// Other viewers may fall behind; they catch up with a replay.
 fn release_surface(server: &mut Server, pane: PaneId, surface_id: SurfaceId) {
     let Some(state) = server.panes.get(pane).and_then(|p| p.tsp.as_ref()) else {
         return;
@@ -370,23 +363,20 @@ fn release_surface(server: &mut Server, pane: PaneId, surface_id: SurfaceId) {
     };
     let logical = surface.wire_id.clone();
     let viewers = super::contract::native_viewers(server, pane);
-    let mut minimum = None;
-    for client in viewers {
-        let Some(c) = server.clients.get(client) else {
-            return;
-        };
-        let Some(projection) = c.tsp.projections().find(|p| {
-            mapped_surface(server, client, &p.outer)
-                .or_else(|| aside_surface(server, client, &p.outer).map(|(_, pane, id)| (pane, id)))
-                == Some((pane, surface_id))
-        }) else {
-            return;
-        };
-        minimum = Some(minimum.map_or(projection.drawn_revision, |old: u64| {
-            old.min(projection.drawn_revision)
-        }));
-    }
-    let Some(minimum) = minimum else { return };
+    let Some(active) = super::contract::viewer_in_use(server, &viewers) else {
+        return;
+    };
+    let Some(c) = server.clients.get(active) else {
+        return;
+    };
+    let Some(projection) = c.tsp.projections().find(|p| {
+        mapped_surface(server, active, &p.outer)
+            .or_else(|| aside_surface(server, active, &p.outer).map(|(_, pane, id)| (pane, id)))
+            == Some((pane, surface_id))
+    }) else {
+        return;
+    };
+    let drawn = projection.drawn_revision;
     let state = server
         .panes
         .get_mut(pane)
@@ -395,7 +385,7 @@ fn release_surface(server: &mut Server, pane: PaneId, surface_id: SurfaceId) {
     let Some(debts) = state.debts.get_mut(&surface_id) else {
         return;
     };
-    if let Some(sequence) = drawn_prefix(debts, std::iter::once(Some(minimum))) {
+    if let Some(sequence) = drawn_prefix(debts, drawn) {
         let ack = json!({"ev":"ack","sf":logical,"s":sequence});
         broker::event(server, pane, &ack);
     }
@@ -1004,7 +994,7 @@ mod tests {
     }
 
     #[test]
-    fn credit_prefix_requires_every_viewer_and_nonempty_set() {
+    fn drawn_prefix_pops_the_cumulative_prefix() {
         let mut debts = VecDeque::from([
             DrawDebt {
                 revision: 1,
@@ -1015,28 +1005,22 @@ mod tests {
                 sequence: 99,
             },
         ]);
-        assert_eq!(drawn_prefix(&mut debts, [].into_iter()), None);
-        assert_eq!(drawn_prefix(&mut debts, [Some(4), None].into_iter()), None);
-        assert_eq!(
-            drawn_prefix(&mut debts, [Some(4), Some(0)].into_iter()),
-            None
-        );
-        assert_eq!(
-            drawn_prefix(&mut debts, [Some(4), Some(1)].into_iter()),
-            Some(5)
-        );
-        assert_eq!(
-            drawn_prefix(&mut debts, [Some(4), Some(4)].into_iter()),
-            Some(99)
-        );
-        assert_eq!(drawn_prefix(&mut debts, [Some(9)].into_iter()), None);
+        assert_eq!(drawn_prefix(&mut debts, 0), None);
+        assert_eq!(debts.len(), 2);
+        assert_eq!(drawn_prefix(&mut debts, 1), Some(5));
+        assert_eq!(debts.len(), 1);
+        assert_eq!(drawn_prefix(&mut debts, 9), Some(99));
+        assert!(debts.is_empty());
+        assert_eq!(drawn_prefix(&mut debts, 9), None);
     }
 
     #[test]
-    fn two_draws_required_and_future_ack_never_reaches_program() {
+    fn ack_follows_the_viewer_in_use_and_future_ack_never_reaches_program() {
         let (mut server, pane, session, surface) = fixture();
         let a = add_client(&mut server, session);
         let b = add_client(&mut server, session);
+        server.clients.get_mut(a).unwrap().activity_time = (2, 0);
+        server.clients.get_mut(b).unwrap().activity_time = (1, 0);
         let sa = projection(&mut server, a, pane, surface);
         release_drawn(&mut server, pane);
         assert!(server.panes.get(pane).unwrap().output.is_empty());
@@ -1054,14 +1038,14 @@ mod tests {
                 .drawn_revision,
             0
         );
-        event(&mut server, a, json!({"ev":"ack","sf":sa,"s":1}));
         assert!(server.panes.get(pane).unwrap().output.is_empty());
         event(&mut server, b, json!({"ev":"ack","sf":sb,"s":1}));
+        assert!(server.panes.get(pane).unwrap().output.is_empty());
+        event(&mut server, a, json!({"ev":"ack","sf":sa,"s":1}));
         assert_eq!(
             server.panes.get(pane).unwrap().output,
             WireMessage::json(b'e', &json!({"ev":"ack","sf":"logical","s":7})).encode()
         );
-        event(&mut server, b, json!({"ev":"ack","sf":sb,"s":1}));
         assert_eq!(
             server.panes.get(pane).unwrap().tsp.as_ref().unwrap().debts[&surface].len(),
             0

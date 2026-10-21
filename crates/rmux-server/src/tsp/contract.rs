@@ -190,7 +190,7 @@ fn contract_hellos<'a>(
         .copied()
         .filter(|id| viewer_eligible(server, pane, *id))
         .collect();
-    let leader = latest_writer(server, &eligible).or_else(|| eligible.iter().copied().min());
+    let leader = viewer_in_use(server, &eligible);
     let offers_v1 = state.program_hello["v"]
         .as_array()
         .is_some_and(|v| v.iter().any(|version| version.as_u64() == Some(1)));
@@ -258,6 +258,11 @@ fn latest_writer(server: &Server, ids: &[ClientId]) -> Option<ClientId> {
                 .cmp(&server.clients.get(*b).unwrap().activity_time)
                 .then_with(|| b.cmp(a))
         })
+}
+
+/// The viewer in use: the writable one with the newest input, else the lowest client id.
+pub fn viewer_in_use(server: &Server, ids: &[ClientId]) -> Option<ClientId> {
+    latest_writer(server, ids).or_else(|| ids.iter().copied().min())
 }
 
 /// The viewers that get the native projection when the pane has a contract.
@@ -2133,11 +2138,14 @@ mod tests {
     }
 
     #[test]
-    fn departed_viewer_releases_draw_debt_only_with_remaining_real_draw() {
+    fn draw_debt_follows_the_viewer_in_use_not_the_slowest() {
         let (mut server, pane, session) = fixture();
         let first = client(&mut server, session, true, false);
         let second = client(&mut server, session, true, false);
+        server.clients.get_mut(first).unwrap().activity_time = (2, 0);
+        server.clients.get_mut(second).unwrap().activity_time = (1, 0);
         let (contract, leader) = display_contract(&server, pane);
+        assert_eq!(leader, Some(first));
         let s = state_mut(&mut server, pane);
         s.contract = contract;
         s.leader = leader;
@@ -2196,9 +2204,6 @@ mod tests {
             c.tsp.projection = Some(projection);
         }
         super::super::client_runtime::release_drawn(&mut server, pane);
-        assert!(server.panes.get(pane).unwrap().output.is_empty());
-        server.clients.get_mut(second).unwrap().session = None;
-        recompute(&mut server);
         let emitted = replies(&mut server, pane);
         assert!(emitted.contains(&json!({"ev":"ack","sf":"view","s":7})));
         assert!(state(&server, pane).debts[&surface].is_empty());
@@ -2210,7 +2215,39 @@ mod tests {
                 revision: 2,
                 sequence: 20,
             });
+        server.clients.get_mut(second).unwrap().activity_time = (3, 0);
+        recompute(&mut server);
+        assert_eq!(display_contract(&server, pane).1, Some(second));
+        super::super::client_runtime::release_drawn(&mut server, pane);
+        assert!(
+            !replies(&mut server, pane)
+                .iter()
+                .any(|message| message["ev"] == "ack")
+        );
+        assert_eq!(state(&server, pane).debts[&surface].len(), 1);
+        server
+            .clients
+            .get_mut(second)
+            .unwrap()
+            .tsp
+            .projection
+            .as_mut()
+            .unwrap()
+            .drawn_revision = 2;
+        super::super::client_runtime::release_drawn(&mut server, pane);
+        let emitted = replies(&mut server, pane);
+        assert!(emitted.contains(&json!({"ev":"ack","sf":"view","s":20})));
+        assert!(state(&server, pane).debts[&surface].is_empty());
+        state_mut(&mut server, pane)
+            .debts
+            .entry(surface)
+            .or_default()
+            .push_back(super::super::broker::DrawDebt {
+                revision: 3,
+                sequence: 30,
+            });
         server.clients.get_mut(first).unwrap().session = None;
+        server.clients.get_mut(second).unwrap().session = None;
         recompute(&mut server);
         assert_eq!(state(&server, pane).renderer, Renderer::Detached);
         assert_eq!(state(&server, pane).debts[&surface].len(), 1);
