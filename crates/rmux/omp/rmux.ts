@@ -91,13 +91,6 @@ export default function (pi: ExtensionAPI) {
 		const environment = { ...process.env };
 		delete environment.RMUX;
 		delete environment.RMUX_PANE;
-		const child = Bun.spawn([
-			"rmux", "-N", "-S", socket, "-C", "attach-session", "-r", "-E",
-			"-f", "no-output,ignore-size", "-t", session,
-		], { env: environment, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
-		observer = child;
-		child.stdin.write(`refresh-client -B 'rmux-omp:${pane}:#{pane_tsp_view}'\n`);
-		child.stdin.flush();
 		const tui = ui!;
 		let latestView: string | undefined;
 		let desiredView: "native" | "ansi" | undefined;
@@ -109,6 +102,10 @@ export default function (pi: ExtensionAPI) {
 		let settleUntil = 0;
 		let retryAfter = 0;
 		const backoff = [100, 250, 1000];
+		// Another client's `attach-session -d` detaches the observer too, so it reattaches.
+		const reconnectBackoff = [100, 1000, 5000];
+		let reconnects = 0;
+		let reconnect: Timer | undefined;
 		function cancelReconciliation() {
 			if (retry !== undefined) ctx.clearTimer(retry);
 			retry = undefined;
@@ -182,62 +179,104 @@ export default function (pi: ExtensionAPI) {
 			stopped = true;
 			latestView = undefined;
 			cancelReconciliation();
+			if (reconnect !== undefined) ctx.clearTimer(reconnect);
+			reconnect = undefined;
 			removeStartListener();
 			if (manualReprobe === runManualReprobe) manualReprobe = undefined;
 		};
 		disposeReconciliation = dispose;
 
-		const errors = new Response(child.stderr).text();
-		void (async () => {
-			const reader = child.stdout.getReader();
-			const decoder = new TextDecoder();
-			let pending = "";
-			try {
-				while (current === generation) {
-					const { value, done } = await reader.read();
-					if (done) break;
-					pending += decoder.decode(value, { stream: true });
-					let newline: number;
-					while ((newline = pending.indexOf("\n")) !== -1) {
-						const line = pending.slice(0, newline);
-						pending = pending.slice(newline + 1);
-						if (!line.startsWith("%subscription-changed rmux-omp ")) continue;
-						const view = line.slice(line.lastIndexOf(" : ") + 3).trim();
-						if (!["native", "ansi", "detached", "pending"].includes(view)) {
-							throw new Error("rmux server does not support pane_tsp_view; restart it with the updated binary");
-						}
-						if (view !== latestView) {
-							cancelReconciliation();
-							if ((view === "native" || view === "ansi") && view !== desiredView) {
-								desiredView = view;
-								resetAttempts();
+		function observe(target: string) {
+			const child = Bun.spawn([
+				"rmux", "-N", "-S", socket, "-C", "attach-session", "-r", "-E",
+				"-f", "no-output,ignore-size", "-t", target,
+			], { env: environment, stdin: "pipe", stdout: "pipe", stderr: "pipe" });
+			observer = child;
+			child.stdin.write(`refresh-client -B 'rmux-omp:${pane}:#{pane_tsp_view}'\n`);
+			child.stdin.flush();
+			const errors = new Response(child.stderr).text();
+			void (async () => {
+				const reader = child.stdout.getReader();
+				const decoder = new TextDecoder();
+				let pending = "";
+				try {
+					while (!stopped && current === generation) {
+						const { value, done } = await reader.read();
+						if (done) break;
+						pending += decoder.decode(value, { stream: true });
+						let newline: number;
+						while ((newline = pending.indexOf("\n")) !== -1) {
+							const line = pending.slice(0, newline);
+							pending = pending.slice(newline + 1);
+							if (!line.startsWith("%subscription-changed rmux-omp ")) continue;
+							const view = line.slice(line.lastIndexOf(" : ") + 3).trim();
+							if (!["native", "ansi", "detached", "pending"].includes(view)) {
+								throw new Error("rmux server does not support pane_tsp_view; restart it with the updated binary");
 							}
-							latestView = view;
-							settleUntil = view === "ansi" ? Date.now() + 150 : 0;
-							scheduleReconciliation();
+							reconnects = 0;
+							if (view !== latestView) {
+								cancelReconciliation();
+								if ((view === "native" || view === "ansi") && view !== desiredView) {
+									desiredView = view;
+									resetAttempts();
+								}
+								latestView = view;
+								settleUntil = view === "ansi" ? Date.now() + 150 : 0;
+								scheduleReconciliation();
+							}
 						}
 					}
+				} finally {
+					reader.releaseLock();
 				}
-			} finally {
+				const code = await child.exited;
+				const error = (await errors).trim();
+				if (stopped || current !== generation || observer !== child) return;
+				observerStopped(code, error);
+			})().catch(error => {
+				if (stopped || current !== generation || observer !== child) return;
+				child.kill();
 				dispose();
 				if (disposeReconciliation === dispose) disposeReconciliation = undefined;
-				reader.releaseLock();
-			}
-			const code = await child.exited;
-			const error = await errors;
-			if (current === generation) {
 				observer = undefined;
-				ctx.ui.notify(`rmux terminal observer stopped (${code})${error.trim() ? `: ${error.trim()}` : ""}; use /terminal-reprobe`, "warning");
-			}
-		})().catch(error => {
-			if (current !== generation) return;
-			child.kill();
-			dispose();
-			if (disposeReconciliation === dispose) disposeReconciliation = undefined;
+				pi.logger.error("rmux terminal observer failed", { error: String(error) });
+				ctx.ui.notify("rmux terminal observer failed; use /terminal-reprobe", "error");
+			});
+		}
+
+		function observerStopped(code: number | null, error: string) {
 			observer = undefined;
-			pi.logger.error("rmux terminal observer failed", { error: String(error) });
-			ctx.ui.notify("rmux terminal observer failed; use /terminal-reprobe", "error");
-		});
+			// The view may change while no observer watches it, so the next report always reconciles.
+			latestView = undefined;
+			cancelReconciliation();
+			if (reconnects === reconnectBackoff.length) {
+				dispose();
+				if (disposeReconciliation === dispose) disposeReconciliation = undefined;
+				ctx.ui.notify(`rmux terminal observer stopped (${code})${error ? `: ${error}` : ""}; use /terminal-reprobe`, "warning");
+				return;
+			}
+			pi.logger.debug("rmux terminal observer stopped; reattaching", { code, error, attempt: reconnects + 1 });
+			reconnect = ctx.setTimeout(() => {
+				reconnect = undefined;
+				void reattach();
+			}, reconnectBackoff[reconnects++]);
+		}
+
+		async function reattach() {
+			let target: string | undefined;
+			let error = "omp's pane is gone from the rmux server";
+			try {
+				// The pane may have moved to another session.
+				target = await ownPaneSession(socket, pane);
+			} catch (cause) {
+				error = String(cause);
+			}
+			if (stopped || current !== generation) return;
+			if (target) observe(target);
+			else observerStopped(null, error);
+		}
+
+		observe(session);
 	});
 
 	pi.registerCommand("terminal-reprobe", {
