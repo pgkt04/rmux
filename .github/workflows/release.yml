@@ -108,7 +108,8 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           bin=target/${{ matrix.target }}/release/rmux
-          allowed=" libc.so.6 libm.so.6 libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 "
+          # glibc before 2.34 ships these as separate sonames; they are still glibc.
+          allowed=" libc.so.6 libm.so.6 libpthread.so.0 libdl.so.2 libutil.so.1 librt.so.1 libgcc_s.so.1 ld-linux-x86-64.so.2 ld-linux-aarch64.so.1 "
           bad=
           for lib in $(readelf -d "$bin" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
             echo "NEEDED $lib"

@@ -712,7 +712,8 @@ Builds set `RMUX_DEFAULT_TERM=tmux-256color` (no host probe) and
 Each binary must print `rmux next-3.9` for `-V` and `rmux <version> (` for
 `rmux version`, start and kill a detached server, and link only system
 libraries: `otool -L` without utf8proc, `/opt/homebrew` or `/usr/local`;
-`readelf -d` NEEDED within libc, libm, libgcc_s and the ld-linux loader, and
+`readelf -d` NEEDED within libc, libm, libgcc_s, the ld-linux loader and the
+sonames glibc 2.17 still ships apart (libpthread, libdl, libutil, librt), and
 no `GLIBC_` symbol version above `RMUX_GLIBC`.
 
 Assets: `rmux-<tag>-<target>.tar.gz`, holding only `rmux` at the root, plus
