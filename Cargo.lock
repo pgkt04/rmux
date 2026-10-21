@@ -191,7 +191,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rmux"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rmux-emu",
  "rmux-server",
@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-emu"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rmux-sys",
  "rmux-util",
@@ -212,7 +212,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-harness"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rmux-sys",
  "serde",
@@ -223,7 +223,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-server"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64",
  "libc",
@@ -239,7 +239,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-sys"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "libc",
  "mio",
@@ -248,7 +248,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-tty"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rmux-emu",
  "rmux-sys",
@@ -257,7 +257,7 @@ dependencies = [
 
 [[package]]
 name = "rmux-util"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "rmux-sys",
  "tempfile",
