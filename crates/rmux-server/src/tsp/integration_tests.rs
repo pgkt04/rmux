@@ -241,6 +241,13 @@ struct FakeTerminal {
     /// An inline surface under the screen `tree`, with its focus, as Tern
     /// keeps it.
     covered: Option<(Value, Option<String>)>,
+    /// Inline surfaces rsttyd parked under a later `o`, oldest first, each
+    /// with its focus. Only a `["resume"]` frame or an `x` reaches one.
+    parked: Vec<(Value, Option<String>)>,
+    /// How many parked surfaces the host keeps: its hello's `suspend`. None
+    /// for rsttyd up to 1.10, whose `#replaceInline` ends the suspended
+    /// surface without a word, and for every other host.
+    parks: usize,
     frames: VecDeque<Value>,
     grid: Server,
     grid_pane: PaneId,
@@ -333,6 +340,7 @@ impl FakeTerminal {
         let id = server.clients.insert(client).unwrap();
         server.client_order.push_back(id);
         let (grid, grid_pane, _) = model();
+        let parks = hello["suspend"].as_u64().map_or(0, |n| n as usize);
         let mut terminal = Self {
             client: id,
             master,
@@ -345,6 +353,8 @@ impl FakeTerminal {
             tree_inline: false,
             focus: None,
             covered: None,
+            parked: Vec::new(),
+            parks,
             frames: VecDeque::new(),
             grid,
             grid_pane,
@@ -471,8 +481,12 @@ impl FakeTerminal {
                             && self.tree.is_some()
                             && self.tree_inline
                             && self.covered.is_none();
+                        let over_parked = body["mode"] == "inline"
+                            && self.tree_inline
+                            && self.tree.is_some()
+                            && self.suspending();
                         assert!(
-                            self.tree.is_none() || over_inline,
+                            self.tree.is_none() || over_inline || over_parked,
                             "two simultaneous outer screen surfaces"
                         );
                         match body["mode"].as_str() {
@@ -485,6 +499,17 @@ impl FakeTerminal {
                         }
                         if over_inline {
                             self.covered = self.tree.take().map(|tree| (tree, self.focus.take()));
+                        } else if over_parked {
+                            let left = (self.tree.take().unwrap(), self.focus.take());
+                            if self.parks > 0 {
+                                self.parked.push(left);
+                            } else {
+                                self.frames.retain(|frame| frame["sf"] != left.0["id"]);
+                            }
+                            assert!(
+                                self.parked.len() <= self.parks,
+                                "rmux parked more surfaces than the host keeps"
+                            );
                         }
                         self.tree_inline = body["mode"] == "inline";
                         self.tree = Some(json!({"id":body["id"],"k":"surface","c":[]}));
@@ -497,17 +522,38 @@ impl FakeTerminal {
                             .is_some_and(|(tree, _)| tree["id"] == body["id"])
                         {
                             self.covered = None;
-                        } else if let Some((tree, focus)) = self.covered.take() {
-                            self.tree = Some(tree);
-                            self.tree_inline = true;
-                            self.focus = focus;
-                        } else {
-                            self.tree = None;
-                            self.focus = None;
+                        } else if let Some(index) = self
+                            .parked
+                            .iter()
+                            .position(|(tree, _)| tree["id"] == body["id"])
+                        {
+                            self.parked.remove(index);
+                        } else if self
+                            .tree
+                            .as_ref()
+                            .is_some_and(|tree| tree["id"] == body["id"])
+                        {
+                            if let Some((tree, focus)) = self.covered.take() {
+                                self.tree = Some(tree);
+                                self.tree_inline = true;
+                                self.focus = focus;
+                            } else {
+                                self.tree = None;
+                                self.focus = None;
+                            }
                         }
+                        // Else a surface the host ended already: nothing to close.
                         self.frames.retain(|frame| frame["sf"] != body["id"]);
                     }
                     b'f' => {
+                        if !self.knows(&body["sf"]) {
+                            // rsttyd answers a frame for a surface it ended.
+                            response.extend(apc(
+                                b'e',
+                                &json!({"ev":"error","sf":body["sf"],"s":body["s"],"msg":"unknown surface"}),
+                            ));
+                            return;
+                        }
                         let resumes = body["ops"]
                             .as_array()
                             .is_some_and(|ops| ops.iter().any(|op| op == &json!(["resume"])));
@@ -533,12 +579,42 @@ impl FakeTerminal {
         let mut drawn: Vec<(Value, u64)> = Vec::new();
         let mut last = None;
         while let Some(frame) = self.frames.pop_front() {
+            let resumes = frame["ops"]
+                .as_array()
+                .is_some_and(|ops| ops.iter().any(|op| op == &json!(["resume"])));
+            if resumes
+                && let Some(index) = self
+                    .parked
+                    .iter()
+                    .position(|(tree, _)| tree["id"] == frame["sf"])
+            {
+                // rsttyd `#replaceInline`: the parked surface comes back over
+                // the live one, which it parks in turn; or over nothing, after
+                // an `x` for what was shown.
+                let (tree, focus) = self.parked.remove(index);
+                if let Some(live) = self.tree.replace(tree) {
+                    assert!(
+                        live["suspended"] == true,
+                        "a parked surface resumed over a live one"
+                    );
+                    self.parked.push((live, self.focus.take()));
+                }
+                self.focus = focus;
+                self.tree_inline = true;
+            }
             let (tree, focus) = match self.covered.as_mut() {
                 Some((tree, focus)) if tree["id"] == frame["sf"] => (tree, focus),
-                _ => (
-                    self.tree.as_mut().expect("frame before open"),
-                    &mut self.focus,
-                ),
+                _ => match self
+                    .parked
+                    .iter_mut()
+                    .find(|(tree, _)| tree["id"] == frame["sf"])
+                {
+                    Some((tree, focus)) => (tree, focus),
+                    None => (
+                        self.tree.as_mut().expect("frame before open"),
+                        &mut self.focus,
+                    ),
+                },
             };
             assert_eq!(frame["sf"], tree["id"]);
             for op in frame["ops"].as_array().unwrap() {
@@ -598,13 +674,27 @@ impl FakeTerminal {
             .is_some_and(|tree| tree["suspended"] == true)
     }
 
-    /// `suspended`, or a suspend frame received and not yet drawn.
+    /// The host has the surface `sf`: shown, under a page, or parked.
+    fn knows(&self, sf: &Value) -> bool {
+        self.tree.as_ref().is_some_and(|tree| &tree["id"] == sf)
+            || self
+                .covered
+                .as_ref()
+                .is_some_and(|(tree, _)| &tree["id"] == sf)
+            || self.parked.iter().any(|(tree, _)| &tree["id"] == sf)
+    }
+
+    /// `suspended`, or a suspend frame for the shown surface received and not
+    /// yet drawn.
     fn suspending(&self) -> bool {
         self.suspended()
             || self.frames.iter().any(|frame| {
-                frame["ops"]
-                    .as_array()
-                    .is_some_and(|ops| ops.iter().any(|op| op == &json!(["suspend"])))
+                self.tree
+                    .as_ref()
+                    .is_some_and(|tree| tree["id"] == frame["sf"])
+                    && frame["ops"]
+                        .as_array()
+                        .is_some_and(|ops| ops.iter().any(|op| op == &json!(["suspend"])))
             })
     }
 
@@ -1396,7 +1486,7 @@ fn switching_to_a_grid_window_suspends_the_native_projection_on_rsttyd() {
     );
     assert_eq!(terminal.row(0), "logs pane");
     let c = server.clients.get(terminal.client).unwrap();
-    assert!(c.tsp.projection.is_none() && c.tsp.hidden.is_some());
+    assert!(c.tsp.projection.is_none() && c.tsp.hidden.len() == 1);
 }
 
 #[test]
@@ -1439,7 +1529,7 @@ fn switching_back_resumes_the_native_projection_without_a_replay_on_rsttyd() {
     );
     assert_eq!(terminal.text("transcript"), "retained transcript");
     let c = server.clients.get(terminal.client).unwrap();
-    assert!(c.tsp.hidden.is_none());
+    assert!(c.tsp.hidden.is_empty());
 }
 
 /// One `b` APC as a program writes it: `id=…;mime=…;<base64>`.
@@ -1546,7 +1636,7 @@ fn switching_closes_and_reopens_the_native_projection_on_other_hosts() {
         assert_eq!(terminal.row(0), "logs pane", "{term:?}");
         let c = server.clients.get(terminal.client).unwrap();
         assert!(
-            c.tsp.projection.is_none() && c.tsp.hidden.is_none(),
+            c.tsp.projection.is_none() && c.tsp.hidden.is_empty(),
             "{term:?}"
         );
 
@@ -1692,16 +1782,10 @@ fn tern_hello() -> Value {
         "apc":65536,"credits":2,"cell":{"w":8,"h":16},"dark":true,"reduceMotion":false})
 }
 
-/// Two omp windows on one terminal: window 0's program shows two images,
-/// window 1's a transcript with program `other_features`. Window 1 is current,
-/// so `C-b 0` opens a new projection of window 0 (rsttyd keeps one suspended
-/// surface, which the other window's open closed; every other host closes on
-/// the switch). The server, the terminal, the two panes and window 0's blob
-/// ids, sorted as the query lists them.
-fn two_omp_windows(
-    hello: Value,
-    other_features: Value,
-) -> (Server, FakeTerminal, PaneId, PaneId, Vec<String>) {
+/// The stock omp window of `stock_native_with_hello`, its program showing two
+/// images: the server, the terminal, the pane and the blob ids, sorted as the
+/// query lists them.
+fn shots_window(hello: Value) -> (Server, FakeTerminal, PaneId, Vec<String>) {
     let (mut server, pane, mut terminal) = stock_native_with_hello(hello);
     let shots = SHOTS;
     let mut ids: Vec<String> = shots.iter().map(|bytes| sha256_hex(bytes)).collect();
@@ -1722,23 +1806,39 @@ fn two_omp_windows(
     first.sort();
     assert_eq!(first, ids, "the first frame carries both blobs");
     assert_eq!(terminal.blobs.iter().cloned().collect::<Vec<_>>(), ids);
+    (server, terminal, pane, ids)
+}
 
+/// A new window with one empty pane at `index` of the terminal's session,
+/// made current by `C-b index`; the pane.
+fn new_window(server: &mut Server, terminal: &mut FakeTerminal, index: i32) -> PaneId {
     let session = server
         .clients
         .get(terminal.client)
         .unwrap()
         .session
         .unwrap();
-    let window = window::window_create(&mut server, 80, 24, 0, 0).unwrap();
-    let other =
-        window::window_add_pane(&mut server, window, None, 0, SpawnFlags::default()).unwrap();
-    server.windows.get_mut(window).unwrap().active = Some(other);
-    crate::layout::init(&mut server, window, other);
-    session::session_attach(&mut server, session, window, 1).unwrap();
-    switch_window(&mut server, &mut terminal, b"\x021");
+    let window = window::window_create(server, 80, 24, 0, 0).unwrap();
+    let pane = window::window_add_pane(server, window, None, 0, SpawnFlags::default()).unwrap();
+    server.windows.get_mut(window).unwrap().active = Some(pane);
+    crate::layout::init(server, window, pane);
+    session::session_attach(server, session, window, index).unwrap();
+    switch_window(server, terminal, format!("\x02{index}").as_bytes());
+    pane
+}
+
+/// An omp with program `features` starts in `pane`, the current window, and
+/// shows `transcript`.
+fn start_omp(
+    server: &mut Server,
+    terminal: &mut FakeTerminal,
+    pane: PaneId,
+    transcript: &str,
+    features: Value,
+) {
     let mut program = apc(
         b'q',
-        &json!({"q":"hello","v":[1],"app":"omp","features":other_features}),
+        &json!({"q":"hello","v":[1],"app":"omp","features":features}),
     );
     program.extend(apc(
         b'o',
@@ -1746,19 +1846,60 @@ fn two_omp_windows(
     ));
     program.extend(apc(
         b'f',
-        &json!({"sf":"program","s":1,"ops":[["add","transcript","program",null,{"id":"transcript","k":"text","p":{"text":"other transcript"}}]]}),
+        &json!({"sf":"program","s":1,"ops":[["add","transcript","program",null,{"id":"transcript","k":"text","p":{"text":transcript}}]]}),
     ));
-    pane_runtime::pane_parse_buffer(&mut server, other, &program).unwrap();
-    terminal.pump(&mut server);
-    terminal.draw(&mut server);
-    assert_eq!(terminal.text("transcript"), "other transcript");
+    pane_runtime::pane_parse_buffer(server, pane, &program).unwrap();
+    terminal.pump(server);
+    terminal.draw(server);
+    assert_eq!(terminal.text("transcript"), transcript);
+}
+
+/// Two omp windows on one terminal: window 0's program shows two images,
+/// window 1's a transcript with program `other_features`. Window 1 is current,
+/// so `C-b 0` opens a new projection of window 0 (rsttyd keeps one suspended
+/// surface, which the other window's open closed; every other host closes on
+/// the switch). The server, the terminal, the two panes and window 0's blob
+/// ids, sorted as the query lists them.
+fn two_omp_windows(
+    hello: Value,
+    other_features: Value,
+) -> (Server, FakeTerminal, PaneId, PaneId, Vec<String>) {
+    let (mut server, mut terminal, pane, ids) = shots_window(hello);
+    let other = new_window(&mut server, &mut terminal, 1);
+    start_omp(
+        &mut server,
+        &mut terminal,
+        other,
+        "other transcript",
+        other_features,
+    );
     assert_eq!(terminal.opens, 2);
     let c = server.clients.get(terminal.client).unwrap();
     assert!(
-        c.tsp.hidden.is_none(),
+        c.tsp.hidden.is_empty(),
         "the other window's open closed the suspended surface"
     );
     (server, terminal, pane, other, ids)
+}
+
+/// Omp windows `1..count` beside the shots window 0, each showing
+/// `transcript <index>`; the last one is current. The server, the terminal,
+/// the panes by window and window 0's blob ids.
+fn omp_windows(hello: Value, count: i32) -> (Server, FakeTerminal, Vec<PaneId>, Vec<String>) {
+    let (mut server, mut terminal, pane, ids) = shots_window(hello);
+    let mut panes = vec![pane];
+    for index in 1..count {
+        let pane = new_window(&mut server, &mut terminal, index);
+        start_omp(
+            &mut server,
+            &mut terminal,
+            pane,
+            &format!("transcript {index}"),
+            json!([]),
+        );
+        panes.push(pane);
+    }
+    (server, terminal, panes, ids)
 }
 
 /// The replay the client is holding, after the terminal answered the pump.
@@ -2216,6 +2357,1013 @@ fn leaving_a_waiting_projection_closes_it_without_a_word_to_the_host() {
         c.tsp.projections().all(|p| p.awaiting_blobs().is_none()),
         "no projection waits any more"
     );
+}
+
+/// rsttyd that parks `suspend` inline surfaces for each pane, beside its
+/// terminal-wide blob store.
+fn parked_hello(suspend: u32) -> Value {
+    let mut hello = blobstore_hello();
+    hello["suspend"] = suspend.into();
+    hello
+}
+
+/// A host rmux knows nothing about that takes blobs, as Tern does.
+fn fixture_blobs_hello() -> Value {
+    json!({"r":"hello","v":1,"term":"fixture","version":"1","kinds":["col","text","editor","image"],
+        "features":["edit","undo","send","settle","blobs"],"apc":65536,"credits":2,
+        "cell":{"w":8,"h":16},"dark":true,"reduceMotion":false})
+}
+
+/// The surface ids of the `x` APCs since `sent`, each `keep:false`.
+fn closes_since(terminal: &FakeTerminal, sent: usize) -> Vec<String> {
+    terminal.packets[sent..]
+        .iter()
+        .filter(|(verb, _)| *verb == b'x')
+        .map(|(_, body)| {
+            assert_eq!(body["keep"], false);
+            body["id"].as_str().unwrap().to_owned()
+        })
+        .collect()
+}
+
+/// The `sf` of each `f` since `sent`.
+fn frame_surfaces(terminal: &FakeTerminal, sent: usize) -> Vec<String> {
+    terminal.packets[sent..]
+        .iter()
+        .filter(|(verb, _)| *verb == b'f')
+        .map(|(_, body)| body["sf"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+fn shown_outer(server: &Server, terminal: &FakeTerminal) -> String {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .projection
+        .as_ref()
+        .expect("a shown projection")
+        .outer
+        .clone()
+}
+
+/// The hidden projections' outer ids, least recently hidden first.
+fn hidden_outers(server: &Server, terminal: &FakeTerminal) -> Vec<String> {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .hidden
+        .iter()
+        .map(|p| p.outer.clone())
+        .collect()
+}
+
+/// The outer ids of exactly two hidden projections, least recently hidden
+/// first.
+fn hidden_pair(server: &Server, terminal: &FakeTerminal) -> (String, String) {
+    let hidden = hidden_outers(server, terminal);
+    assert_eq!(hidden.len(), 2, "{hidden:?}");
+    (hidden[0].clone(), hidden[1].clone())
+}
+
+fn hidden_panes(server: &Server, terminal: &FakeTerminal) -> Vec<PaneId> {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .hidden
+        .iter()
+        .map(|p| p.pane)
+        .collect()
+}
+
+fn hidden_cap(server: &Server, terminal: &FakeTerminal) -> usize {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .hidden_cap()
+}
+
+/// The ids of the surfaces the host keeps parked, oldest first.
+fn parked_ids(terminal: &FakeTerminal) -> Vec<String> {
+    terminal
+        .parked
+        .iter()
+        .map(|(tree, _)| tree["id"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+/// The `ack` sequences the program in `pane` received since its output was
+/// last taken.
+fn take_pane_acks(server: &mut Server, pane: PaneId) -> Vec<u64> {
+    let output = std::mem::take(&mut server.panes.get_mut(pane).unwrap().output);
+    Framing::default()
+        .feed(&output)
+        .into_iter()
+        .filter_map(|packet| match packet {
+            Packet::Message(b'e', body) if body["ev"] == "ack" => body["s"].as_u64(),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A program frame `s` that sets the transcript of `pane` to `text`.
+fn transcript_frame(server: &mut Server, pane: PaneId, s: u64, text: &str) {
+    pane_runtime::pane_parse_buffer(
+        server,
+        pane,
+        &apc(
+            b'f',
+            &json!({"sf":"program","s":s,"ops":[["set","transcript",{"text":text}]]}),
+        ),
+    )
+    .unwrap();
+}
+
+fn renderer(server: &Server, pane: PaneId) -> broker::Renderer {
+    server
+        .panes
+        .get(pane)
+        .unwrap()
+        .tsp
+        .as_ref()
+        .unwrap()
+        .renderer
+}
+
+#[test]
+fn hidden_cap_follows_the_host_hello() {
+    for (hello, cap) in [
+        (parked_hello(4), 4),
+        (parked_hello(20), 8),
+        (parked_hello(1), 1),
+        (blobstore_hello(), 1),
+        (rsttyd_1_4_hello(), 1),
+        (tern_hello(), 0),
+        (fixture_blobs_hello(), 0),
+    ] {
+        let name = format!("{} suspend {}", hello["term"], hello["suspend"]);
+        let (server, _, terminal) = stock_native_with_hello(hello);
+        assert_eq!(hidden_cap(&server, &terminal), cap, "{name}");
+    }
+}
+
+#[test]
+fn returning_to_a_parked_omp_window_resumes_it_with_one_frame_and_no_replay() {
+    let (mut server, mut terminal, panes, ids) = omp_windows(parked_hello(4), 2);
+    assert_eq!(terminal.opens, 2);
+    assert_eq!(hidden_panes(&server, &terminal), vec![panes[0]]);
+    let a_outer = hidden_outers(&server, &terminal)[0].clone();
+    let b_outer = shown_outer(&server, &terminal);
+    assert_eq!(parked_ids(&terminal), vec![a_outer.clone()]);
+    let c = server.clients.get(terminal.client).unwrap();
+    let a_generation = c.tsp.hidden[0].generation;
+
+    let sent = terminal.packets.len();
+    let bytes = terminal.bytes.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(
+        verbs,
+        vec!['f', 'f'],
+        "suspend and resume, nothing else: {verbs:?}"
+    );
+    assert_eq!(
+        frame_heads(&terminal, sent),
+        vec![json!(["suspend"]), json!(["resume"])]
+    );
+    assert_eq!(
+        frame_surfaces(&terminal, sent),
+        vec![b_outer.clone(), a_outer.clone()]
+    );
+    let written = &terminal.bytes[bytes..];
+    assert!(queries(written).is_empty(), "a query on the wire");
+    assert!(fences(written).is_empty(), "a DA1 on the wire");
+    assert_eq!(terminal.opens, 2);
+    assert_eq!(
+        projection_generation(&server, &terminal),
+        Some(a_generation)
+    );
+    assert_eq!(hidden_outers(&server, &terminal), vec![b_outer.clone()]);
+    assert_eq!(parked_ids(&terminal), vec![b_outer.clone()]);
+    assert!(
+        !terminal.alternate(),
+        "the inline surface is on the main screen"
+    );
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_both_shots(&mut terminal, &ids);
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    assert_eq!(
+        frame_heads(&terminal, sent),
+        vec![json!(["suspend"]), json!(["resume"])]
+    );
+    assert_eq!(
+        frame_surfaces(&terminal, sent),
+        vec![a_outer.clone(), b_outer]
+    );
+    assert_eq!(terminal.text("transcript"), "transcript 1");
+    assert_eq!(hidden_outers(&server, &terminal), vec![a_outer]);
+    assert_eq!(terminal.opens, 2);
+}
+
+#[test]
+fn over_the_cap_the_least_recently_parked_window_is_closed_and_returns_with_a_replay() {
+    let (mut server, mut terminal, a, ids) = shots_window(parked_hello(2));
+    assert_eq!(hidden_cap(&server, &terminal), 2);
+    let a_outer = shown_outer(&server, &terminal);
+    let b = new_window(&mut server, &mut terminal, 1);
+    start_omp(&mut server, &mut terminal, b, "transcript 1", json!([]));
+    let b_outer = shown_outer(&server, &terminal);
+    let c = new_window(&mut server, &mut terminal, 2);
+    start_omp(&mut server, &mut terminal, c, "transcript 2", json!([]));
+    let c_outer = shown_outer(&server, &terminal);
+    assert_eq!(
+        hidden_outers(&server, &terminal),
+        vec![a_outer.clone(), b_outer.clone()]
+    );
+    assert_eq!(
+        parked_ids(&terminal),
+        vec![a_outer.clone(), b_outer.clone()]
+    );
+
+    // Hiding C fills the cap: A, the least recently hidden, goes.
+    let sent = terminal.packets.len();
+    let d = new_window(&mut server, &mut terminal, 3);
+    assert_eq!(closes_since(&terminal, sent), vec![a_outer.clone()]);
+    assert_eq!(frame_heads(&terminal, sent), vec![json!(["suspend"])]);
+    assert_eq!(
+        hidden_outers(&server, &terminal),
+        vec![b_outer.clone(), c_outer.clone()]
+    );
+    assert_eq!(parked_ids(&terminal), vec![b_outer.clone()]);
+    assert!(
+        terminal.suspended(),
+        "C waits on the host for the next open"
+    );
+    assert!(terminal.alternate());
+    let sent = terminal.packets.len();
+    start_omp(&mut server, &mut terminal, d, "transcript 3", json!([]));
+    assert!(closes_since(&terminal, sent).is_empty());
+    assert_eq!(
+        parked_ids(&terminal),
+        vec![b_outer.clone(), c_outer.clone()]
+    );
+    let d_outer = shown_outer(&server, &terminal);
+    assert_eq!(terminal.opens, 4);
+
+    // Back to A: D hides and evicts B; A is gone on both sides, so it opens
+    // again, asking the blob store first.
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(closes_since(&terminal, sent), vec![b_outer]);
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert!(
+        frame_heads(&terminal, sent)
+            .iter()
+            .all(|head| head != &json!(["resume"])),
+        "nothing to resume"
+    );
+    assert_eq!(terminal.opens, 5);
+    assert_ne!(shown_outer(&server, &terminal), a_outer);
+    assert_eq!(hidden_outers(&server, &terminal), vec![c_outer, d_outer]);
+    assert_eq!(parked_ids(&terminal), hidden_outers(&server, &terminal));
+    assert_eq!(hidden_panes(&server, &terminal), vec![c, d]);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_both_shots(&mut terminal, &ids);
+    let client = server.clients.get(terminal.client).unwrap();
+    assert_eq!(client.tsp.projection.as_ref().unwrap().pane, a);
+}
+
+/// rsttyd without `suspend` keeps one slot, and `#replaceInline` ends it
+/// without a word, so another window's open closes it first, as in 95ae4e9.
+#[test]
+fn legacy_rsttyd_keeps_one_parked_window_and_closes_it_before_another_opens() {
+    for hello in [blobstore_hello(), rsttyd_1_4_hello()] {
+        let version = hello["version"].clone();
+        let asks = hello["features"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("blobstore"));
+        let (mut server, mut terminal, _, ids) = shots_window(hello);
+        assert_eq!(hidden_cap(&server, &terminal), 1, "{version}");
+        let a_outer = shown_outer(&server, &terminal);
+
+        let sent = terminal.packets.len();
+        let b = new_window(&mut server, &mut terminal, 1);
+        assert_eq!(verbs_since(&terminal, sent), vec!['f'], "{version}");
+        assert_eq!(frame_heads(&terminal, sent), vec![json!(["suspend"])]);
+        assert_eq!(hidden_outers(&server, &terminal), vec![a_outer.clone()]);
+        assert!(terminal.suspended(), "{version}");
+
+        let sent = terminal.packets.len();
+        start_omp(&mut server, &mut terminal, b, "transcript 1", json!([]));
+        let verbs = verbs_since(&terminal, sent);
+        assert!(
+            verbs.iter().position(|v| *v == 'x') < verbs.iter().position(|v| *v == 'o'),
+            "{version}: the parked window closes before the other opens: {verbs:?}"
+        );
+        assert_eq!(closes_since(&terminal, sent), vec![a_outer], "{version}");
+        assert!(hidden_outers(&server, &terminal).is_empty(), "{version}");
+        assert!(parked_ids(&terminal).is_empty(), "{version}");
+        let b_outer = shown_outer(&server, &terminal);
+
+        let sent = terminal.packets.len();
+        switch_window(&mut server, &mut terminal, b"\x020");
+        let verbs = verbs_since(&terminal, sent);
+        // As at a419ed2: pane A's lower id puts its recompute first, so
+        // `project_pending` closes B before anything would hide it, and A's
+        // replay is the only frame.
+        assert!(
+            frame_heads(&terminal, sent)
+                .iter()
+                .all(|head| head != &json!(["resume"])),
+            "{version}: nothing to resume"
+        );
+        assert!(
+            verbs.iter().position(|v| *v == 'x') < verbs.iter().position(|v| *v == 'o'),
+            "{version}: {verbs:?}"
+        );
+        assert_eq!(closes_since(&terminal, sent), vec![b_outer], "{version}");
+        if asks {
+            assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+            assert_eq!(
+                verbs_from_open(&terminal, sent),
+                vec!['o', 'f'],
+                "{version}"
+            );
+        } else {
+            assert!(blobs_queries_since(&terminal, sent).is_empty());
+            assert_eq!(
+                verbs_from_open(&terminal, sent),
+                vec!['o', 'b', 'b', 'f'],
+                "{version}"
+            );
+        }
+        assert!(hidden_outers(&server, &terminal).is_empty(), "{version}");
+        assert_eq!(terminal.opens, 3, "{version}");
+        assert_eq!(terminal.text("transcript"), "retained transcript");
+        assert_both_shots(&mut terminal, &ids);
+    }
+}
+
+/// A host rmux does not know closes on every switch and gets every blob
+/// again with no query and no DA1, as with bb69734.
+#[test]
+fn unknown_host_keeps_the_close_and_replay_switch_with_no_query() {
+    let (mut server, mut terminal, _, ids) = shots_window(fixture_blobs_hello());
+    assert_eq!(hidden_cap(&server, &terminal), 0);
+    let a_outer = shown_outer(&server, &terminal);
+    let bytes = terminal.bytes.len();
+
+    let sent = terminal.packets.len();
+    let b = new_window(&mut server, &mut terminal, 1);
+    assert_eq!(verbs_since(&terminal, sent), vec!['x']);
+    assert_eq!(closes_since(&terminal, sent), vec![a_outer]);
+    assert!(terminal.tree.is_none(), "the host dropped the surface");
+    assert!(terminal.alternate());
+    assert!(hidden_outers(&server, &terminal).is_empty());
+
+    let sent = terminal.packets.len();
+    start_omp(&mut server, &mut terminal, b, "transcript 1", json!([]));
+    // The replay of the just-opened empty surface, then the program's frame.
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(verbs.first(), Some(&'o'), "{verbs:?}");
+    assert!(verbs[1..].iter().all(|verb| *verb == 'f'), "{verbs:?}");
+    let b_outer = shown_outer(&server, &terminal);
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(verbs_since(&terminal, sent), vec!['x', 'o', 'b', 'b', 'f']);
+    assert_eq!(closes_since(&terminal, sent), vec![b_outer]);
+    let mut sent_blobs = blobs_since(&terminal, sent);
+    sent_blobs.sort();
+    assert_eq!(sent_blobs, ids);
+    let written = &terminal.bytes[bytes..];
+    assert!(queries(written).is_empty(), "a query on the wire");
+    assert!(fences(written).is_empty(), "a DA1 on the wire");
+    assert!(hidden_outers(&server, &terminal).is_empty());
+    assert!(parked_ids(&terminal).is_empty());
+    assert_eq!(terminal.opens, 3);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_both_shots(&mut terminal, &ids);
+}
+
+#[test]
+fn host_gone_for_one_parked_window_drops_only_that_entry_with_no_close() {
+    let (mut server, mut terminal, panes, ids) = omp_windows(parked_hello(4), 3);
+    let (a_outer, b_outer) = hidden_pair(&server, &terminal);
+    let c_outer = shown_outer(&server, &terminal);
+
+    // The page evicted A: it is gone there already.
+    terminal.parked.retain(|(tree, _)| tree["id"] != a_outer);
+    let sent = terminal.packets.len();
+    terminal.send(
+        &mut server,
+        &apc(b'e', &json!({"ev":"gone","sf":a_outer,"ids":[a_outer]})),
+    );
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert!(
+        verbs_since(&terminal, sent).is_empty(),
+        "nothing to the host: {:?}",
+        verbs_since(&terminal, sent)
+    );
+    assert_eq!(hidden_outers(&server, &terminal), vec![b_outer.clone()]);
+    assert_eq!(shown_outer(&server, &terminal), c_outer);
+    assert_eq!(parked_ids(&terminal), vec![b_outer.clone()]);
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+
+    // B still resumes; A opens again, asking the blob store first.
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    assert_eq!(frame_surfaces(&terminal, sent)[1], b_outer);
+    assert_eq!(terminal.text("transcript"), "transcript 1");
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert!(closes_since(&terminal, sent).is_empty());
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_eq!(terminal.opens, 4);
+    assert_eq!(hidden_panes(&server, &terminal), vec![panes[2], panes[1]]);
+    assert_both_shots(&mut terminal, &ids);
+}
+
+#[test]
+fn host_error_for_one_parked_window_closes_only_that_entry() {
+    let (mut server, mut terminal, panes, _) = omp_windows(parked_hello(4), 3);
+    let (a_outer, b_outer) = hidden_pair(&server, &terminal);
+    let c_outer = shown_outer(&server, &terminal);
+    let c_generation = projection_generation(&server, &terminal);
+
+    let sent = terminal.packets.len();
+    terminal.send(
+        &mut server,
+        &apc(
+            b'e',
+            &json!({"ev":"error","sf":b_outer,"msg":"surface rejected"}),
+        ),
+    );
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(verbs_since(&terminal, sent), vec!['x']);
+    assert_eq!(closes_since(&terminal, sent), vec![b_outer]);
+    assert_eq!(hidden_outers(&server, &terminal), vec![a_outer.clone()]);
+    assert_eq!(parked_ids(&terminal), vec![a_outer.clone()]);
+    assert_eq!(shown_outer(&server, &terminal), c_outer);
+    assert_eq!(projection_generation(&server, &terminal), c_generation);
+    assert!(
+        !terminal.alternate(),
+        "the shown surface stays on the main screen"
+    );
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+
+    // A still resumes.
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    assert_eq!(frame_surfaces(&terminal, sent)[1], a_outer);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_eq!(hidden_panes(&server, &terminal), vec![panes[2]]);
+}
+
+/// A parked window's program keeps drawing. Nobody draws its frames, so they
+/// are acked at once and the program never stalls; the return carries them.
+#[test]
+fn programs_of_parked_windows_keep_their_acks_and_their_frames_come_with_the_resume() {
+    let (mut server, mut terminal, panes, _) = omp_windows(parked_hello(4), 3);
+    let (a, b) = (panes[0], panes[1]);
+    take_pane_acks(&mut server, a);
+    take_pane_acks(&mut server, b);
+    assert_eq!(renderer(&server, a), broker::Renderer::Detached);
+    assert_eq!(renderer(&server, b), broker::Renderer::Detached);
+
+    let sent = terminal.packets.len();
+    for s in 3..=6 {
+        transcript_frame(&mut server, a, s, &format!("a:{s}"));
+        transcript_frame(&mut server, b, s - 1, &format!("b:{}", s - 1));
+        terminal.pump(&mut server);
+        terminal.draw(&mut server);
+        assert_eq!(take_pane_acks(&mut server, a), vec![s], "a:{s}");
+        assert_eq!(take_pane_acks(&mut server, b), vec![s - 1], "b:{}", s - 1);
+    }
+    assert!(
+        verbs_since(&terminal, sent).is_empty(),
+        "a parked surface gets nothing: {:?}",
+        verbs_since(&terminal, sent)
+    );
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    assert_eq!(frame_heads(&terminal, sent)[1], json!(["resume"]));
+    assert_eq!(terminal.text("transcript"), "a:6");
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    assert_eq!(terminal.text("transcript"), "b:5");
+    assert_eq!(terminal.opens, 3);
+}
+
+#[test]
+fn stopping_the_tty_closes_every_parked_window_and_the_resync_forgets_them() {
+    let (mut server, mut terminal, _, _) = omp_windows(parked_hello(4), 4);
+    let mut outers = hidden_outers(&server, &terminal);
+    assert_eq!(outers.len(), 3);
+    outers.push(shown_outer(&server, &terminal));
+    outers.sort();
+
+    let sent = terminal.packets.len();
+    server
+        .clients
+        .get_mut(terminal.client)
+        .unwrap()
+        .tty
+        .as_mut()
+        .unwrap()
+        .stop(&mut server.tparm, &TtyOptions::default());
+    terminal.pump(&mut server);
+    let mut closed = closes_since(&terminal, sent);
+    closed.sort();
+    assert_eq!(closed, outers, "an `x` for each surface the host has");
+    assert!(terminal.tree.is_none());
+    assert!(parked_ids(&terminal).is_empty());
+    assert!(
+        !terminal.alternate(),
+        "the restore leaves the alternate screen"
+    );
+
+    broker::client_sync(&mut server, terminal.client);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.hidden.is_empty() && c.tsp.projection.is_none());
+    assert_eq!(c.tsp.format(), "unknown");
+}
+
+#[test]
+fn a_parked_window_whose_program_exits_is_closed_alone() {
+    let (mut server, mut terminal, panes, _) = omp_windows(parked_hello(4), 3);
+    let (a_outer, b_outer) = hidden_pair(&server, &terminal);
+    let c_outer = shown_outer(&server, &terminal);
+
+    let sent = terminal.packets.len();
+    broker::pane_exited(&mut server, panes[1]);
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(closes_since(&terminal, sent), vec![b_outer]);
+    assert_eq!(hidden_outers(&server, &terminal), vec![a_outer.clone()]);
+    assert_eq!(parked_ids(&terminal), vec![a_outer]);
+    assert_eq!(shown_outer(&server, &terminal), c_outer);
+    assert!(!terminal.alternate());
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+    assert_eq!(terminal.opens, 3);
+}
+
+#[test]
+fn refreshing_the_client_closes_every_parked_window_and_detects_the_host_again() {
+    let (mut server, mut terminal, _, _) = omp_windows(parked_hello(4), 3);
+    let mut outers = hidden_outers(&server, &terminal);
+    outers.push(shown_outer(&server, &terminal));
+    outers.sort();
+
+    let sent = terminal.packets.len();
+    broker::refresh_client(&mut server, terminal.client);
+    settle_replay(&mut server, &mut terminal);
+    let mut closed = closes_since(&terminal, sent);
+    closed.sort();
+    assert_eq!(closed, outers);
+    assert!(
+        terminal.packets[sent..]
+            .iter()
+            .any(|(verb, body)| *verb == b'q' && body["q"] == "hello" && body["app"] == "rmux"),
+        "the host is detected again"
+    );
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.hidden.is_empty());
+    assert_eq!(c.tsp.format(), "v1");
+    assert_eq!(hidden_cap(&server, &terminal), 4);
+    assert!(parked_ids(&terminal).is_empty());
+    assert_eq!(terminal.opens, 4, "the shown window opens again");
+    assert!(
+        frame_heads(&terminal, sent)
+            .iter()
+            .all(|head| head != &json!(["resume"]))
+    );
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+}
+
+/// The page reloaded into an rsttyd that keeps one slot while rmux still
+/// holds the `suspend: 3` hello it detected (plan 2.4): the page ended A on
+/// B's open, so A's `["resume"]` gets `error unknown surface` and A replays.
+#[test]
+fn resume_rejected_by_a_rolled_back_host_closes_that_entry_and_replays_it() {
+    let (mut server, mut terminal, _, ids) = shots_window(parked_hello(3));
+    assert_eq!(hidden_cap(&server, &terminal), 3);
+    terminal.parks = 0;
+    let a_outer = shown_outer(&server, &terminal);
+    let b = new_window(&mut server, &mut terminal, 1);
+    start_omp(&mut server, &mut terminal, b, "transcript 1", json!([]));
+    assert_eq!(hidden_outers(&server, &terminal), vec![a_outer.clone()]);
+    assert!(parked_ids(&terminal).is_empty(), "the old page ended A");
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(
+        frame_heads(&terminal, sent)[..2],
+        [json!(["suspend"]), json!(["resume"])]
+    );
+    assert_eq!(frame_surfaces(&terminal, sent)[1], a_outer);
+    assert!(
+        closes_since(&terminal, sent).contains(&a_outer),
+        "the rejected surface closes: {verbs:?}"
+    );
+    assert_eq!(blobs_queries_since(&terminal, sent), vec![json!(ids)]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_eq!(terminal.opens, 3);
+    assert_ne!(shown_outer(&server, &terminal), a_outer);
+    assert!(
+        !hidden_outers(&server, &terminal).contains(&a_outer),
+        "no second resume of a surface the host has not"
+    );
+    assert!(!terminal.alternate());
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_both_shots(&mut terminal, &ids);
+}
+
+/// rsttyd leaves a window that another client, on a host that closes, still
+/// shows: the pane stays native, rsttyd's projection parks and resumes, and
+/// the other client hears nothing of it.
+#[test]
+fn a_window_another_client_keeps_showing_parks_and_resumes_for_rsttyd_alone() {
+    let (mut server, mut rsttyd, a, ids) = shots_window(parked_hello(4));
+    let window = server.panes.get(a).unwrap().window;
+    let options = server.options.create(Some(server.options.global_s));
+    let other = session::session_create(
+        &mut server,
+        session::SessionCreate {
+            prefix: None,
+            name: Some(b"tern".to_vec()),
+            cwd: b"/".to_vec(),
+            environment: crate::options::environment::Environment::default(),
+            options,
+            termios: None,
+        },
+    );
+    let link = session::session_attach(&mut server, other, window, 0).unwrap();
+    session::session_set_current(&mut server, other, Some(link));
+    let mut tern =
+        FakeTerminal::attach_with_hello(&mut server, Some(other), true, fixture_blobs_hello());
+    broker::recompute(&mut server);
+    settle_replay(&mut server, &mut tern);
+    assert_eq!(hidden_cap(&server, &tern), 0);
+    assert_eq!(tern.text("transcript"), "retained transcript");
+    assert_both_shots(&mut tern, &ids);
+    // The second viewer narrowed the stock contract, which reopened rsttyd's
+    // projection once; the contract stays the same while rsttyd comes and goes.
+    settle_replay(&mut server, &mut rsttyd);
+    assert_eq!(rsttyd.text("transcript"), "retained transcript");
+    let opens = rsttyd.opens;
+    let tern_sent = tern.packets.len();
+    let a_outer = shown_outer(&server, &rsttyd);
+
+    let sent = rsttyd.packets.len();
+    let b = new_window(&mut server, &mut rsttyd, 1);
+    assert_eq!(verbs_since(&rsttyd, sent), vec!['f']);
+    assert_eq!(frame_heads(&rsttyd, sent), vec![json!(["suspend"])]);
+    assert_eq!(hidden_outers(&server, &rsttyd), vec![a_outer.clone()]);
+    assert!(rsttyd.alternate());
+    assert_eq!(renderer(&server, a), broker::Renderer::Native);
+    tern.pump(&mut server);
+    assert_eq!(
+        tern.packets.len(),
+        tern_sent,
+        "the other client heard nothing"
+    );
+
+    // The program draws on for the other client; rsttyd's parked copy
+    // keeps the frame for its return.
+    let sent = rsttyd.packets.len();
+    transcript_frame(&mut server, a, 3, "while away");
+    tern.pump(&mut server);
+    tern.draw(&mut server);
+    rsttyd.pump(&mut server);
+    assert_eq!(tern.text("transcript"), "while away");
+    assert!(verbs_since(&rsttyd, sent).is_empty());
+    let tern_sent = tern.packets.len();
+
+    start_omp(&mut server, &mut rsttyd, b, "transcript 1", json!([]));
+    let b_outer = shown_outer(&server, &rsttyd);
+    let sent = rsttyd.packets.len();
+    switch_window(&mut server, &mut rsttyd, b"\x020");
+    assert_eq!(verbs_since(&rsttyd, sent), vec!['f', 'f']);
+    assert_eq!(
+        frame_heads(&rsttyd, sent),
+        vec![json!(["suspend"]), json!(["resume"])]
+    );
+    assert_eq!(
+        frame_surfaces(&rsttyd, sent),
+        vec![b_outer.clone(), a_outer]
+    );
+    assert_eq!(rsttyd.text("transcript"), "while away");
+    assert_both_shots(&mut rsttyd, &ids);
+    assert_eq!(hidden_outers(&server, &rsttyd), vec![b_outer]);
+    assert_eq!(rsttyd.opens, opens + 1, "only B's open");
+
+    tern.pump(&mut server);
+    assert_eq!(
+        tern.packets.len(),
+        tern_sent,
+        "the other client heard nothing: {:?}",
+        verbs_since(&tern, tern_sent)
+    );
+    assert_eq!(tern.text("transcript"), "while away");
+}
+
+/// The program in `pane` draws `count` frames from `s` on, which the host
+/// receives but does not draw: its credits are used up.
+fn queue_undrawn_frames(
+    server: &mut Server,
+    terminal: &mut FakeTerminal,
+    pane: PaneId,
+    s: u64,
+    count: u64,
+) {
+    let queued = terminal.frames.len();
+    for s in s..s + count {
+        transcript_frame(server, pane, s, &format!("b:{s}"));
+    }
+    terminal.pump(server);
+    assert_eq!(
+        terminal.frames.len(),
+        queued + count as usize,
+        "the frames reached the host and wait for its draw"
+    );
+}
+
+/// rsttyd `#replaceInline` parks the previous surface only when it is
+/// suspended; a `["suspend"]` that waits for credit must not be overtaken by
+/// the next window's `o` or `["resume"]`. Either B's suspend reaches the host
+/// first or rmux closes B and replays it later; B never ends silently and its
+/// program never stalls.
+#[test]
+fn a_window_left_without_credit_is_parked_in_order_or_closed_never_lost() {
+    let (mut server, mut terminal, panes, ids) = omp_windows(parked_hello(4), 2);
+    let (a, b) = (panes[0], panes[1]);
+    let a_outer = hidden_outers(&server, &terminal)[0].clone();
+    let b_outer = shown_outer(&server, &terminal);
+    queue_undrawn_frames(&mut server, &mut terminal, b, 2, 2);
+    take_pane_acks(&mut server, b);
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert!(!terminal.alternate());
+    assert_eq!(terminal.tree.as_ref().unwrap()["id"], a_outer);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_both_shots(&mut terminal, &ids);
+    assert!(!hidden_panes(&server, &terminal).contains(&a));
+    let parked = parked_ids(&terminal).contains(&b_outer);
+    let closed = closes_since(&terminal, sent).contains(&b_outer);
+    assert!(
+        parked != closed,
+        "B is parked or closed, not both and not neither: parked {parked}, closed {closed}"
+    );
+    assert_eq!(
+        hidden_outers(&server, &terminal).contains(&b_outer),
+        parked,
+        "rmux and the host agree about B"
+    );
+
+    // The return shows B's latest frame, resumed or replayed, and B goes on.
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert!(!terminal.alternate());
+    assert_eq!(terminal.text("transcript"), "b:3");
+    take_pane_acks(&mut server, b);
+    transcript_frame(&mut server, b, 4, "b:4");
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(terminal.text("transcript"), "b:4");
+    assert_eq!(
+        take_pane_acks(&mut server, b),
+        vec![4],
+        "B's program is not stalled"
+    );
+}
+
+/// A shown window that cannot park (its rewind page is open) closes when the
+/// client leaves for a shell window; the parked windows stay parked.
+#[test]
+fn leaving_a_window_with_a_page_for_the_grid_keeps_the_other_windows_parked() {
+    let (mut server, mut terminal, panes, _) = omp_windows(parked_hello(4), 2);
+    let a_outer = hidden_outers(&server, &terminal)[0].clone();
+    let b_outer = shown_outer(&server, &terminal);
+    open_page_over_transcript(&mut server, panes[1], &mut terminal);
+    let page_outer = shown_outer(&server, &terminal);
+    assert_ne!(page_outer, b_outer);
+    assert_eq!(terminal.text("turn"), "turn 1");
+
+    let sent = terminal.packets.len();
+    new_window(&mut server, &mut terminal, 2);
+    let mut closed = closes_since(&terminal, sent);
+    closed.sort();
+    let mut both = vec![page_outer, b_outer];
+    both.sort();
+    assert_eq!(closed, both, "B's page and transcript close, A stays");
+    assert!(terminal.tree.is_none());
+    assert!(terminal.covered.is_none());
+    assert!(terminal.alternate());
+    assert_eq!(hidden_outers(&server, &terminal), vec![a_outer.clone()]);
+    assert_eq!(parked_ids(&terminal), vec![a_outer.clone()]);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.projection.is_none() && c.tsp.covered.is_none());
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f']);
+    assert_eq!(frame_heads(&terminal, sent), vec![json!(["resume"])]);
+    assert_eq!(frame_surfaces(&terminal, sent), vec![a_outer]);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+}
+
+/// Returning to a parked window from one whose rewind page is open: the page
+/// and the transcript under it close first, then the parked one resumes. The
+/// later return to the page window opens it afresh with no rejected surface.
+#[test]
+fn resuming_a_parked_window_over_a_page_closes_the_page_and_its_transcript_first() {
+    let (mut server, mut terminal, panes, ids) = omp_windows(parked_hello(4), 2);
+    let p_outer = hidden_outers(&server, &terminal)[0].clone();
+    let x_inline = shown_outer(&server, &terminal);
+    open_page_over_transcript(&mut server, panes[1], &mut terminal);
+    let x_page = shown_outer(&server, &terminal);
+    assert_eq!(
+        server
+            .clients
+            .get(terminal.client)
+            .unwrap()
+            .tsp
+            .covered
+            .as_ref()
+            .map(|p| p.outer.clone()),
+        Some(x_inline.clone())
+    );
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    let verbs = verbs_since(&terminal, sent);
+    let mut closed = closes_since(&terminal, sent);
+    closed.sort();
+    let mut both = vec![x_page, x_inline];
+    both.sort();
+    assert_eq!(closed, both, "{verbs:?}");
+    assert!(!verbs.contains(&'o'), "{verbs:?}");
+    assert_eq!(frame_heads(&terminal, sent), vec![json!(["resume"])]);
+    assert_eq!(frame_surfaces(&terminal, sent), vec![p_outer.clone()]);
+    assert!(
+        verbs.iter().position(|v| *v == 'x') < verbs.iter().position(|v| *v == 'f'),
+        "the closes go before the resume: {verbs:?}"
+    );
+    assert_eq!(shown_outer(&server, &terminal), p_outer);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.covered.is_none(), "no dead covered entry");
+    assert!(terminal.covered.is_none());
+    assert!(!terminal.alternate());
+    assert_eq!(terminal.text("transcript"), "retained transcript");
+    assert_both_shots(&mut terminal, &ids);
+
+    let sent = terminal.packets.len();
+    let opens = terminal.opens;
+    switch_window(&mut server, &mut terminal, b"\x021");
+    assert!(verbs_since(&terminal, sent).contains(&'o'));
+    assert_eq!(terminal.opens, opens + 1, "the page opens once");
+    assert_eq!(terminal.text("turn"), "turn 1");
+    assert_eq!(hidden_outers(&server, &terminal), vec![p_outer]);
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(!c.tsp.rebuild_attempted, "no surface was rejected");
+}
+
+/// A parked window's program exits while the shown window has its rewind page
+/// open: only that window's `x` goes, with no grid restore under the live
+/// pair, and the page's queued frame is not lost.
+#[test]
+fn closing_a_parked_window_under_a_page_sends_a_bare_close_and_keeps_queued_frames() {
+    let (mut server, mut terminal, panes, _) = omp_windows(parked_hello(4), 2);
+    let p_outer = hidden_outers(&server, &terminal)[0].clone();
+    open_page_over_transcript(&mut server, panes[1], &mut terminal);
+    let x_page = shown_outer(&server, &terminal);
+    pane_runtime::pane_parse_buffer(
+        &mut server,
+        panes[1],
+        &apc(
+            b'f',
+            &json!({"sf":"page","s":2,"ops":[["set","turn",{"text":"turn 2"}]]}),
+        ),
+    )
+    .unwrap();
+
+    let sent = terminal.packets.len();
+    let bytes = terminal.bytes.len();
+    broker::pane_exited(&mut server, panes[0]);
+    terminal.pump(&mut server);
+    terminal.draw(&mut server);
+    assert_eq!(closes_since(&terminal, sent), vec![p_outer]);
+    assert!(
+        !bytes_contain(&terminal.bytes[bytes..], BACK_TO_GRID),
+        "no anchor row removed under the live pair"
+    );
+    assert!(!terminal.alternate(), "the pair stays on the main screen");
+    assert_eq!(
+        terminal.text("turn"),
+        "turn 2",
+        "the queued page frame arrived"
+    );
+    assert_eq!(shown_outer(&server, &terminal), x_page);
+    assert!(terminal.covered.is_some());
+    let c = server.clients.get(terminal.client).unwrap();
+    assert!(c.tsp.covered.is_some() && c.tsp.hidden.is_empty());
+}
+
+/// With the parked set full, a switch to one of the parked windows must not
+/// evict that very window: the shown one parks and the target resumes.
+#[test]
+fn switching_to_a_parked_window_with_a_full_set_never_evicts_the_target() {
+    let (mut server, mut terminal, _, _) = shots_window(parked_hello(2));
+    for index in 1..4 {
+        let pane = new_window(&mut server, &mut terminal, index);
+        start_omp(
+            &mut server,
+            &mut terminal,
+            pane,
+            &format!("transcript {index}"),
+            json!([]),
+        );
+    }
+    switch_window(&mut server, &mut terminal, b"\x020");
+    let a_outer = shown_outer(&server, &terminal);
+    let (c_outer, d_outer) = hidden_pair(&server, &terminal);
+    assert_eq!(
+        parked_ids(&terminal),
+        vec![c_outer.clone(), d_outer.clone()]
+    );
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x022");
+    let verbs = verbs_since(&terminal, sent);
+    assert_eq!(verbs, vec!['f', 'f'], "suspend and resume only: {verbs:?}");
+    assert_eq!(
+        frame_heads(&terminal, sent),
+        vec![json!(["suspend"]), json!(["resume"])]
+    );
+    assert_eq!(
+        frame_surfaces(&terminal, sent),
+        vec![a_outer.clone(), c_outer.clone()]
+    );
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+    assert_eq!(shown_outer(&server, &terminal), c_outer);
+    assert_eq!(hidden_outers(&server, &terminal), vec![d_outer, a_outer]);
+    assert_eq!(parked_ids(&terminal), hidden_outers(&server, &terminal));
+}
+
+/// A host error on the shown surface rebuilds that projection alone; the
+/// parked windows are not closed with it.
+#[test]
+fn host_error_on_the_shown_window_rebuilds_it_and_keeps_the_parked_windows() {
+    let (mut server, mut terminal, _, _) = omp_windows(parked_hello(4), 3);
+    let (a_outer, b_outer) = hidden_pair(&server, &terminal);
+    let c_outer = shown_outer(&server, &terminal);
+
+    let sent = terminal.packets.len();
+    terminal.send(
+        &mut server,
+        &apc(b'e', &json!({"ev":"error","sf":c_outer,"msg":"bad op"})),
+    );
+    settle_replay(&mut server, &mut terminal);
+    assert_eq!(closes_since(&terminal, sent), vec![c_outer.clone()]);
+    assert_eq!(verbs_from_open(&terminal, sent), vec!['o', 'f']);
+    assert_ne!(shown_outer(&server, &terminal), c_outer);
+    assert_eq!(
+        hidden_outers(&server, &terminal),
+        vec![a_outer.clone(), b_outer.clone()]
+    );
+    assert_eq!(parked_ids(&terminal), vec![a_outer.clone(), b_outer]);
+    assert_eq!(terminal.opens, 4);
+    assert!(!terminal.alternate());
+    assert_eq!(terminal.text("transcript"), "transcript 2");
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    assert_eq!(frame_surfaces(&terminal, sent)[1], a_outer);
+    assert_eq!(terminal.text("transcript"), "retained transcript");
 }
 
 /// `MSG_RESIZE` after the terminal changed to `sx`x`sy`, run through the

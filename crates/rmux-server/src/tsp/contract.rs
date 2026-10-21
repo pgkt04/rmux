@@ -345,12 +345,12 @@ fn same_stock_contract(a: Option<&DisplayContract>, b: &DisplayContract) -> bool
     })
 }
 
-/// Close every projection of `pane`, hidden ones too; returns the clients
-/// that had one.
+/// Close every projection of `pane`, hidden ones too, and nothing of other
+/// panes; returns the clients that had one.
 fn close_pane_projections(server: &mut Server, pane: PaneId) -> Vec<ClientId> {
     let ids = clients_where(server, |c| c.tsp.projections().any(|p| p.pane == pane));
     for id in &ids {
-        broker::close_projection(server, *id);
+        super::project::close_pane_projection(server, *id, pane);
     }
     ids
 }

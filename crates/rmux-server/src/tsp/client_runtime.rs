@@ -375,7 +375,7 @@ fn rebuild_projection(server: &mut Server, client: ClientId) {
     c.tsp.failed_logical = Some(identity);
     projection.failed = true;
     c.tsp.projection_hello = None;
-    broker::close_projection(server, client);
+    super::project::close_shown(server, client);
     broker::project_pending(server, client);
 }
 
@@ -628,9 +628,9 @@ fn client_gone(
         if let Some(c) = server.clients.get_mut(client) {
             c.tsp.confirmed_blobs.clear();
         }
-        if slot == Slot::Hidden {
+        if let Slot::Hidden(generation) = slot {
             // The surface is gone on the host already; nothing to close there.
-            broker::drop_hidden(server, client);
+            broker::drop_hidden(server, client, generation);
         } else {
             reopen_projection(server, client);
         }
@@ -749,8 +749,8 @@ fn aside_event(server: &mut Server, client: ClientId, sf: &str, name: &str, valu
                 broker::event(server, pane, &error);
             }
             // The host rejects the hidden surface: the next return replays.
-            if slot == Slot::Hidden {
-                broker::close_hidden(server, client);
+            if let Slot::Hidden(generation) = slot {
+                broker::close_hidden(server, client, generation);
             } else {
                 rebuild_projection(server, client);
             }

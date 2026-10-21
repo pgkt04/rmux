@@ -48,7 +48,7 @@ pub fn apply_change(server: &mut Server, pane: PaneId, change: SurfaceChange) {
             })
         });
         if affected {
-            super::project::close_projection(server, *client);
+            super::project::close_pane_projection(server, *client, pane);
         }
     }
     if answers {
@@ -134,7 +134,7 @@ fn end_reader(server: &mut Server, pane: PaneId, kind: u8) {
             .get(id)
             .is_some_and(|c| c.tsp.projections().any(|p| p.pane == pane))
         {
-            super::project::close_projection(server, id);
+            super::project::close_pane_projection(server, id, pane);
         }
         super::input::client_read_bound(server, id);
     }

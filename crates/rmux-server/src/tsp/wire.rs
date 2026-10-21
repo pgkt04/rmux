@@ -126,6 +126,10 @@ pub struct Hello {
     /// The host's name in its `hello` reply (`tern`, `rsttyd`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub term: Option<String>,
+    /// The inline surfaces the host keeps parked per terminal; absent or 1
+    /// is the single slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend: Option<u32>,
     #[serde(default)]
     pub kinds: BTreeSet<String>,
     #[serde(default)]

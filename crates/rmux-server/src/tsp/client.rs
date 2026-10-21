@@ -26,13 +26,16 @@ pub struct Request {
     /// The blob ids a `q blobs` in this request asked about.
     pub blobs: Vec<String>,
 }
-/// Where a client keeps one of its projections.
+/// Where a client keeps one of its projections; a hidden one by its
+/// projection generation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Slot {
     Shown,
     Covered,
-    Hidden,
+    Hidden(u64),
 }
+/// The most hidden projections a client keeps, whatever its host offers.
+pub const RMUX_HIDDEN_MAX: usize = 8;
 #[derive(Debug)]
 pub struct ClientTspState {
     pub capability: Capability,
@@ -44,10 +47,11 @@ pub struct ClientTspState {
     /// inline surface live under a screen surface, so closing the screen shows
     /// it again without a replay.
     pub covered: Option<super::projection::Projection>,
-    /// The inline projection of a window the client left: suspended on the
-    /// host, which shows the grid, so coming back resumes it without a replay.
-    /// Only set while `projection` is `None`.
-    pub hidden: Option<super::projection::Projection>,
+    /// The inline projections of windows the client left: suspended on the
+    /// host, which shows the grid, so coming back resumes one without a
+    /// replay. LRU order, front = least recently hidden; at most
+    /// `hidden_cap()` entries, one per pane.
+    pub hidden: Vec<super::projection::Projection>,
     pub projection_generation: u64,
     pub confirmed_blobs: BTreeSet<String>,
     pub(crate) projection_hello: Option<serde_json::Value>,
@@ -74,7 +78,7 @@ impl Default for ClientTspState {
             timer: None,
             projection: None,
             covered: None,
-            hidden: None,
+            hidden: Vec::new(),
             projection_generation: 0,
             confirmed_blobs: BTreeSet::new(),
             projection_hello: None,
@@ -114,6 +118,21 @@ impl ClientTspState {
         self.hello()
             .is_some_and(|h| h.term.as_deref() == Some("rsttyd"))
     }
+    /// How many projections the client keeps hidden: as many as the host says
+    /// it parks (`suspend`, at most `RMUX_HIDDEN_MAX`); one for a host that
+    /// yields the pane but keeps a single parked surface; none otherwise.
+    pub fn hidden_cap(&self) -> usize {
+        match self.hello().and_then(|h| h.suspend) {
+            Some(n) if n > 1 => (n as usize).min(RMUX_HIDDEN_MAX),
+            _ if self.host_yields_pane_on_suspend() => 1,
+            _ => 0,
+        }
+    }
+    /// More than one hidden slot: the host parks every suspended surface, so
+    /// only a stale one of the same pane needs closing before another opens.
+    pub fn hides_many(&self) -> bool {
+        self.hidden_cap() > 1
+    }
     pub fn invalidate(&mut self, generation: u64) {
         self.generation = generation;
         self.capability = Capability::Unknown;
@@ -122,7 +141,7 @@ impl ClientTspState {
         self.projection_hello = None;
         self.projection = None;
         self.covered = None;
-        self.hidden = None;
+        self.hidden.clear();
         self.visible = true;
         self.diagnostic = None;
         self.rebuild_attempted = false;
@@ -136,21 +155,28 @@ impl ClientTspState {
         match slot {
             Slot::Shown => self.projection.as_ref(),
             Slot::Covered => self.covered.as_ref(),
-            Slot::Hidden => self.hidden.as_ref(),
+            Slot::Hidden(generation) => self.hidden.iter().find(|p| p.generation == generation),
         }
     }
     pub fn slot_mut(&mut self, slot: Slot) -> Option<&mut super::projection::Projection> {
         match slot {
             Slot::Shown => self.projection.as_mut(),
             Slot::Covered => self.covered.as_mut(),
-            Slot::Hidden => self.hidden.as_mut(),
+            Slot::Hidden(generation) => self.hidden.iter_mut().find(|p| p.generation == generation),
         }
     }
     /// The slot whose projection the host knows as `outer`.
     pub fn slot_of(&self, outer: &str) -> Option<Slot> {
-        [Slot::Shown, Slot::Covered, Slot::Hidden]
-            .into_iter()
-            .find(|slot| self.slot(*slot).is_some_and(|p| p.outer == outer))
+        if self.projection.as_ref().is_some_and(|p| p.outer == outer) {
+            return Some(Slot::Shown);
+        }
+        if self.covered.as_ref().is_some_and(|p| p.outer == outer) {
+            return Some(Slot::Covered);
+        }
+        self.hidden
+            .iter()
+            .find(|p| p.outer == outer)
+            .map(|p| Slot::Hidden(p.generation))
     }
     /// Every projection the host has open: shown, covered, hidden.
     pub fn projections(&self) -> impl Iterator<Item = &super::projection::Projection> {

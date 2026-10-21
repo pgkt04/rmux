@@ -226,7 +226,7 @@ pub fn defer_cell_ui(
             })
             .collect();
         for client in clients {
-            super::project::close_projection(server, client);
+            super::project::close_pane_projection(server, client, pane);
         }
         callback(server);
         return true;

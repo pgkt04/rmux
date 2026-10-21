@@ -412,29 +412,51 @@ event in place; capability/limit changes still replace the projection.
 Exact outgoing app `hello` is cached per tty generation so retained-pane
 projection replacements skip redundant queries/DA1. Each replacement still
 closes/opens and replays the retained document. A window switch is not a
-replacement on rs-ttyd (`"term":"rsttyd"` in the viewer's hello reply,
-`ClientTspState::host_yields_pane_on_suspend`): when the client leaves a
-window whose pane projects an open inline surface, the projection moves to the
-client's one hidden slot instead of closing. The host gets a frame that starts
-with `["suspend"]` and keeps the surface (rs-ttyd hides its DOM and gives the
-whole pane to the grid), the cells go back to the alternate screen and the
-grid redraws in full. While hidden the projection is silent: the program's
-frames and metadata queue on it, the host's acks still pay the projection's
-own credits, a hidden projection is never "drawn" (stock programs keep
-getting their credits from `release_undrawn`), and the
-`PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile
-bounds the queue, so a long-hidden projection resumes with a replay into the
-open surface (no `o`, same id). Coming back to the window leaves the alternate
-screen and sends one frame starting with `["resume"]` followed by the queued
-diffs and the refreshed bar. The slot holds inline projections only (a screen
-page or a covered pair closes as before) and is closed with its own `x` when
-another surface or pane is selected, when the pane's contract changes or its
-program leaves, and on teardown; a `gone` for it just drops it. Every other
-host (Tern, an unknown `term`) closes on the switch (`x`, `keep:false`) and
-reopens with a replay on the return, as a replacement does: Tern 0.8.4 keeps a
-live suspended inline surface's `dock` strip over the last grid row (rmux's
-status line), over the alternate screen too, and program sheets cannot reach
-the region elements, so only `x` gives the full grid back.
+replacement on rs-ttyd: when the client leaves a window whose pane projects an
+open inline surface, the projection moves to the client's hidden set
+(`ClientTspState::hidden`, LRU order, front = least recently hidden) instead
+of closing. How many it holds comes from the viewer's hello reply at detection
+(`ClientTspState::hidden_cap`): `suspend: N` with N > 1 is many mode, cap
+`min(N, RMUX_HIDDEN_MAX)` (8); `"term":"rsttyd"` without it is legacy mode,
+cap 1, the single slot rs-ttyd 1.10 and older keep; every other host (Tern,
+an unknown `term`) has cap 0 and closes on the switch (`x`, `keep:false`),
+reopening with a replay on the return, as a replacement does: Tern 0.8.4
+keeps a live suspended inline surface's `dock` strip over the last grid row
+(rmux's status line), over the alternate screen too, and program sheets cannot
+reach the region elements, so only `x` gives the full grid back. The host gets
+a frame that starts with `["suspend"]` and keeps the surface (rs-ttyd parks
+it, DOM unmounted, and gives the whole pane to the grid), the cells go back to
+the alternate screen and the grid redraws in full. While hidden the projection
+is silent: the program's frames and metadata queue on it, the host's acks
+still pay the projection's own credits, a hidden projection is never "drawn"
+(stock programs keep getting their credits from `release_undrawn`), and the
+`PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile bounds the queue, so a
+long-hidden projection resumes with a replay into the open surface (no `o`,
+same id). Coming back to a window whose pane has a hidden projection leaves
+the alternate screen and sends one frame starting with `["resume"]` followed
+by the queued diffs and the refreshed bar; in many mode the projection the
+client was looking at hides first (`["suspend"]`), so an omp-to-omp switch
+between recently seen windows is two frames and no replay. A pane another
+client keeps viewing stays `Native` and the leaving client's projection still
+hides, as long as the stock contract does not change with the viewers: a
+host whose features differ (Tern has `reduce-motion`, rs-ttyd does not)
+changes it, and the pane's projections close as before. A suspend that waits
+for credit when the client leaves closes instead, because a host that parks
+several surfaces ends an unsuspended one on the next `o` without a word. The
+set holds inline projections only (a screen page, a covered pair or an open
+still waiting for its blobs closes as before, leaving the parked entries) and
+never two entries of one pane. Over the cap the least recently hidden entry
+closes with its own `x` (eviction, never the entry of the window the client
+is going to); the host over its own cap sends `gone` for a parked surface
+and rmux just drops that entry. An `x` for an entry while another projection
+of the client survives is a bare `x` queued behind the surviving frames; only
+a close that leaves nothing drops the unsent queue. An entry also closes with
+`x` when its pane selects another surface (legacy mode closes every hidden
+entry before another `o`, because a single-slot host ends the parked surface
+silently), when the
+pane's contract changes or its program leaves (only that pane's entries), on
+a host `error` for it, and on teardown (one `x` per entry); re-detection drops
+them all.
 A replay carries every blob its document references that the host is not known
 to hold, so an omp↔omp window switch used to resend megabytes of images the
 page already had. A host whose `hello` reply lists the `blobstore` feature
