@@ -149,6 +149,7 @@ fn resize(server: &mut Server, id: ClientId) {
         tty.resize(tparm);
         tty.repeat_requests(false, SystemTime::now());
     }
+    crate::tsp::broker::client_activity(server, id);
     crate::server::run::recalculate_sizes(server);
     server_redraw_client(server, id);
     if server.clients.get(id).is_some_and(|c| c.session.is_some()) {

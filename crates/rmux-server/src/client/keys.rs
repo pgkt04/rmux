@@ -764,6 +764,7 @@ pub fn key_callback(server: &mut Server, item: QueueItemId, mut ev: KeyEvent) {
         c.activity_time = now;
     }
     session_update_activity(server, s, Some(now));
+    crate::tsp::broker::client_activity(server, id);
 
     // Check for mouse keys (server-client.c:1344-1366).
     ev.target.valid = false;

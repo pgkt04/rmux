@@ -216,9 +216,13 @@ export default function (pi: ExtensionAPI) {
 							reconnects = 0;
 							if (view !== latestView) {
 								cancelReconciliation();
-								if ((view === "native" || view === "ansi") && view !== desiredView) {
+								if (view === "native" || view === "ansi") {
+									// A new desired view or a new attach, back from pending/detached,
+									// earns a fresh budget: the viewer is not the one that exhausted it.
+									if (view !== desiredView || (latestView !== "native" && latestView !== "ansi")) {
+										resetAttempts();
+									}
 									desiredView = view;
-									resetAttempts();
 								}
 								latestView = view;
 								settleUntil = view === "ansi" ? Date.now() + 150 : 0;

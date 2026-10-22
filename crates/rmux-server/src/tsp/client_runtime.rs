@@ -1,7 +1,10 @@
 // Ported from tmux tty.c, tty-keys.c, server-client.c @ 8f25579c
 use super::{
     broker::{self, Renderer},
-    client::{Capability, ClientTspState, RequestOwner, Slot},
+    client::{
+        Capability, ClientTspState, PROBE_DEADLINE, PROBE_RETRY_DELAYS, ProbeRetry, RequestOwner,
+        Slot,
+    },
     surface::SurfaceId,
     wire::{Hello, WireMessage},
 };
@@ -36,7 +39,31 @@ fn cancel_probe_timer(server: &mut Server, client: ClientId) {
     }
 }
 
+/// Detect the client's TSP support afresh, with the full retry budget.
 pub fn probe_client(server: &mut Server, client: ClientId) {
+    send_probe(server, client, false);
+}
+
+/// The client sent input or resized: one more probe if the newest one went
+/// unanswered and the client still shows the grid for want of an answer.
+pub fn client_activity(server: &mut Server, client: ClientId) {
+    let Some(c) = server.clients.get_mut(client) else {
+        return;
+    };
+    if !c.tsp.probe.unanswered
+        || c.tsp.probe.on_activity
+        || c.tsp.capability != Capability::Unsupported
+    {
+        return;
+    }
+    c.tsp.probe.on_activity = true;
+    send_probe(server, client, true);
+}
+
+/// Send a detection probe. A `retry` keeps the grid the client fell back to
+/// (no `Probing`, so no `pending` view) and its retry count; only the
+/// client's answer changes its capability.
+fn send_probe(server: &mut Server, client: ClientId, retry: bool) {
     if !server.tsp_broker_enabled {
         return;
     }
@@ -71,7 +98,15 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
     c.tsp.diagnostic = None;
     c.tsp.visible = true;
     c.tsp.projection_hello = None;
+    if retry {
+        c.tsp.probe.unanswered = false;
+    } else {
+        c.tsp.probe = ProbeRetry::default();
+    }
     let token = c.tsp.request(RequestOwner::Detection);
+    if retry {
+        c.tsp.capability = Capability::Unsupported;
+    }
     let query = WireMessage::json(b'q', &json!({"q":"hello","v":[1],"app":"rmux"}));
     if tty
         .queue_da1(
@@ -88,16 +123,12 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
     }
     let (timer, _) = crate::server::event_loop::schedule_deferred(
         server,
-        Duration::from_secs(1),
+        PROBE_DEADLINE,
         Box::new(move |server| {
             let Some(c) = server.clients.get_mut(client) else {
                 return;
             };
-            if c.tsp.generation != generation
-                || c.tty
-                    .as_ref()
-                    .is_none_or(|tty| tty.protocol_generation() != generation)
-            {
+            if !probe_generation_live(c, generation) {
                 return;
             }
             if !c
@@ -110,7 +141,46 @@ pub fn probe_client(server: &mut Server, client: ClientId) {
             }
             c.tsp.timer = None;
             c.tsp.expire(token);
+            let delay = PROBE_RETRY_DELAYS.get(c.tsp.probe.timed).copied();
             broker::recompute(server);
+            if let Some(delay) = delay {
+                schedule_probe_retry(server, client, generation, delay);
+            }
+        }),
+    );
+    if let Some(c) = server.clients.get_mut(client) {
+        c.tsp.timer = Some(timer);
+    }
+}
+
+/// The client's TSP state and tty are still those of protocol `generation`.
+fn probe_generation_live(c: &crate::client::Client, generation: u64) -> bool {
+    c.tsp.generation == generation
+        && c.tty
+            .as_ref()
+            .is_some_and(|tty| tty.protocol_generation() == generation)
+}
+
+/// After `delay`, probe again unless an answer settled the capability or the
+/// one-shot retry on input did so first. Each retry takes the next
+/// `PROBE_RETRY_DELAYS` entry when it too goes unanswered.
+fn schedule_probe_retry(server: &mut Server, client: ClientId, generation: u64, delay: Duration) {
+    let (timer, _) = crate::server::event_loop::schedule_deferred(
+        server,
+        delay,
+        Box::new(move |server| {
+            let Some(c) = server.clients.get_mut(client) else {
+                return;
+            };
+            if !probe_generation_live(c, generation)
+                || !c.tsp.probe.unanswered
+                || c.tsp.capability != Capability::Unsupported
+            {
+                return;
+            }
+            c.tsp.timer = None;
+            c.tsp.probe.timed += 1;
+            send_probe(server, client, true);
         }),
     );
     if let Some(c) = server.clients.get_mut(client) {
@@ -340,6 +410,7 @@ pub fn client_protocol_fault(server: &mut Server, client: ClientId) {
     broker::close_projection(server, client);
     if let Some(c) = server.clients.get_mut(client) {
         c.tsp.capability = Capability::Unsupported;
+        c.tsp.probe = ProbeRetry::default();
         c.tsp.projection_hello = None;
         c.tsp.confirmed_blobs.clear();
         for request in &mut c.tsp.requests {
@@ -1223,21 +1294,54 @@ mod tests {
         assert_eq!(server.panes.get(pane).unwrap().output, WireMessage::json(b'e', &json!({"ev":"action","sf":"logical","id":"logical","act":"pick","value":sf,"values":{"sf":sf}})).encode());
     }
 
-    #[test]
-    fn timed_out_probe_retains_sentinel_and_late_hello_cannot_revive() {
-        let (mut server, _, session, _) = fixture();
-        let client = add_client(&mut server, session);
-        probe_client(&mut server, client);
-        let c = server.clients.get_mut(client).unwrap();
-        let token = c.tsp.requests.front().unwrap().token;
-        let timer = c.tsp.timer.unwrap();
+    /// Fire the client's pending probe timer: a deadline or a retry.
+    fn fire_probe_timer(server: &mut Server, client: ClientId) {
+        let timer = server
+            .clients
+            .get(client)
+            .unwrap()
+            .tsp
+            .timer
+            .expect("a probe timer");
         let crate::server::event_loop::LoopAction::Deferred(id) =
             *server.event_loop.timer_action(timer).unwrap()
         else {
             panic!("typed timeout")
         };
-        server.deferred.remove(&id).unwrap()(&mut server);
-        assert_eq!(server.clients.get(client).unwrap().tsp.format(), "no");
+        server.deferred.remove(&id).unwrap()(server);
+    }
+
+    fn probes_sent(server: &Server, client: ClientId) -> usize {
+        server
+            .clients
+            .get(client)
+            .unwrap()
+            .tsp
+            .requests
+            .iter()
+            .filter(|r| r.owner == RequestOwner::Detection)
+            .count()
+    }
+
+    #[test]
+    fn timed_out_probe_falls_back_and_a_late_hello_revives_it() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        probe_client(&mut server, client);
+        let token = server
+            .clients
+            .get(client)
+            .unwrap()
+            .tsp
+            .requests
+            .front()
+            .unwrap()
+            .token;
+        fire_probe_timer(&mut server, client);
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "no");
+        assert!(c.tsp.probe.unanswered);
+        assert!(c.tsp.timer.is_some(), "a retry is scheduled");
         client_message(
             &mut server,
             client,
@@ -1257,8 +1361,134 @@ mod tests {
             token
         );
         client_sentinel(&mut server, client, b"\x1b[?1;2c");
-        assert!(server.clients.get(client).unwrap().tsp.requests.is_empty());
-        assert_eq!(server.clients.get(client).unwrap().tsp.format(), "no");
+        let c = server.clients.get(client).unwrap();
+        assert!(c.tsp.requests.is_empty());
+        assert_eq!(c.tsp.format(), "v1");
+        assert!(c.tsp.timer.is_none(), "the retry is cancelled");
+    }
+
+    #[test]
+    fn unanswered_probe_is_retried_on_the_backoff_then_gives_up() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        probe_client(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 1);
+        for retry in 1..=PROBE_RETRY_DELAYS.len() {
+            fire_probe_timer(&mut server, client); // the deadline
+            assert_eq!(server.clients.get(client).unwrap().tsp.format(), "no");
+            fire_probe_timer(&mut server, client); // the retry
+            let c = server.clients.get(client).unwrap();
+            assert_eq!(probes_sent(&server, client), 1 + retry);
+            assert_eq!(c.tsp.probe.timed, retry);
+            assert_eq!(c.tsp.format(), "no", "a retry never shows pending");
+            assert!(!c.tsp.probe.unanswered);
+            assert!(c.tsp.timer.is_some(), "the retry has a deadline");
+        }
+        fire_probe_timer(&mut server, client);
+        let c = server.clients.get(client).unwrap();
+        assert!(c.tsp.timer.is_none(), "the budget is spent");
+        assert!(c.tsp.probe.unanswered);
+        assert_eq!(c.tsp.format(), "no");
+    }
+
+    #[test]
+    fn input_after_an_unanswered_probe_retries_once() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 0, "nothing without a probe");
+        probe_client(&mut server, client);
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 1, "the probe is outstanding");
+        fire_probe_timer(&mut server, client);
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 2);
+        let c = server.clients.get(client).unwrap();
+        assert!(c.tsp.probe.on_activity);
+        assert_eq!(c.tsp.probe.timed, 0, "the timed budget is untouched");
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 2, "once only");
+        fire_probe_timer(&mut server, client);
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 2);
+        fire_probe_timer(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 3, "the timed retries go on");
+        assert_eq!(server.clients.get(client).unwrap().tsp.probe.timed, 1);
+    }
+
+    #[test]
+    fn da1_without_hello_is_final_with_no_retry() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        probe_client(&mut server, client);
+        client_sentinel(&mut server, client, b"\x1b[?1;2c");
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "no");
+        assert!(c.tsp.timer.is_none());
+        assert!(!c.tsp.probe.unanswered);
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 0);
+        // A DA1 that arrives after the deadline is just as final.
+        probe_client(&mut server, client);
+        fire_probe_timer(&mut server, client);
+        client_sentinel(&mut server, client, b"\x1b[?1;2c");
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "no");
+        assert!(c.tsp.timer.is_none(), "the retry is cancelled");
+        client_activity(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 0);
+    }
+
+    #[test]
+    fn protocol_fault_after_an_unanswered_probe_ends_the_retries() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        probe_client(&mut server, client);
+        fire_probe_timer(&mut server, client);
+        assert!(server.clients.get(client).unwrap().tsp.probe.unanswered);
+        client_protocol_fault(&mut server, client);
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "no");
+        assert_eq!(c.tsp.probe, ProbeRetry::default());
+        assert!(c.tsp.timer.is_none(), "the retry is cancelled");
+        let before = probes_sent(&server, client);
+        client_activity(&mut server, client);
+        assert_eq!(
+            probes_sent(&server, client),
+            before,
+            "input after a fault sends nothing"
+        );
+    }
+
+    #[test]
+    fn answer_to_a_superseded_probe_does_not_count() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        probe_client(&mut server, client);
+        fire_probe_timer(&mut server, client);
+        fire_probe_timer(&mut server, client);
+        assert_eq!(probes_sent(&server, client), 2);
+        client_message(
+            &mut server,
+            client,
+            b'r',
+            br#"{"r":"hello","v":1,"kinds":["editor"],"credits":2}"#,
+        );
+        client_sentinel(&mut server, client, b"\x1b[?1;2c");
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "no", "the first probe's answer is stale");
+        assert_eq!(probes_sent(&server, client), 1);
+        assert!(c.tsp.timer.is_some(), "the newest probe keeps its deadline");
+        client_message(
+            &mut server,
+            client,
+            b'r',
+            br#"{"r":"hello","v":1,"kinds":["editor"],"credits":2}"#,
+        );
+        client_sentinel(&mut server, client, b"\x1b[?1;2c");
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "v1");
+        assert!(c.tsp.timer.is_none());
     }
 
     #[test]

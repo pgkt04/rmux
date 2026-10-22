@@ -258,6 +258,12 @@ struct FakeTerminal {
     blobs: BTreeSet<String>,
     answers_blobs: bool,
     held_fence: bool,
+    /// The hello replies and DA1s of the probes the host has not answered
+    /// yet: a page that was slow to see them. They go out in order, before
+    /// any later answer, from `answer_probe` or the next probe it answers.
+    held_probe: Option<Vec<u8>>,
+    /// Whether the host answers `q hello` at once; else it holds the answer.
+    answers_probe: bool,
 }
 
 fn model() -> (Server, PaneId, SessionId) {
@@ -294,6 +300,22 @@ impl FakeTerminal {
         session: Option<SessionId>,
         native: bool,
         hello: Value,
+    ) -> Self {
+        Self::attach_answering(server, session, native, hello, true)
+    }
+
+    /// A TSP host that holds its answers to the probes until `answer_probe`
+    /// or `answers_probe`, as a page behind a slow server does.
+    fn attach_holding_probe(server: &mut Server, session: Option<SessionId>) -> Self {
+        Self::attach_answering(server, session, true, terminal_hello(), false)
+    }
+
+    fn attach_answering(
+        server: &mut Server,
+        session: Option<SessionId>,
+        native: bool,
+        hello: Value,
+        answers_probe: bool,
     ) -> Self {
         let (master, slave, _) = rmux_sys::pty::openpty().unwrap();
         rmux_sys::fd::set_blocking(master.as_fd(), false);
@@ -362,10 +384,19 @@ impl FakeTerminal {
             blobs: BTreeSet::new(),
             answers_blobs: true,
             held_fence: false,
+            held_probe: None,
+            answers_probe,
         };
         broker::probe_client(server, id);
         terminal.pump(server);
         terminal
+    }
+    /// The host catches up: it answers the probes it held, in order, and
+    /// every later one at once.
+    fn answer_probe(&mut self, server: &mut Server) {
+        self.answers_probe = true;
+        let held = self.held_probe.take().expect("a held probe answer");
+        self.send(server, &held);
     }
     fn send(&self, server: &mut Server, bytes: &[u8]) {
         write_all_fd(self.master.as_fd(), bytes);
@@ -433,6 +464,9 @@ impl FakeTerminal {
             Packet::Sentinel => {
                 if self.held_fence {
                     self.held_fence = false;
+                    if let Some(held) = self.held_probe.as_mut() {
+                        held.extend_from_slice(b"\x1b[?1;2c");
+                    }
                 } else {
                     response.extend_from_slice(b"\x1b[?1;2c")
                 }
@@ -458,7 +492,14 @@ impl FakeTerminal {
                 }
                 match verb {
                     b'q' if body["q"] == "hello" && self.native => {
-                        response.extend(apc(b'r', &self.hello))
+                        let reply = apc(b'r', &self.hello);
+                        if self.answers_probe {
+                            response.extend(self.held_probe.take().into_iter().flatten());
+                            response.extend(reply)
+                        } else {
+                            self.held_probe.get_or_insert_default().extend(reply);
+                            self.held_fence = true;
+                        }
                     }
                     b'q' if body["q"] == "blobs" && self.native => {
                         if self.answers_blobs {
@@ -2495,6 +2536,160 @@ fn renderer(server: &Server, pane: PaneId) -> broker::Renderer {
         .as_ref()
         .unwrap()
         .renderer
+}
+
+/// The `q hello` probes rmux sent the terminal so far.
+fn probes(terminal: &FakeTerminal) -> usize {
+    terminal
+        .packets
+        .iter()
+        .filter(|(verb, body)| *verb == b'q' && body["q"] == "hello" && body["app"] == "rmux")
+        .count()
+}
+
+/// Fire the client's pending probe timer: a deadline or a retry.
+fn fire_probe_timer(server: &mut Server, terminal: &FakeTerminal) {
+    let timer = server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .timer
+        .expect("a probe timer");
+    let crate::server::event_loop::LoopAction::Deferred(id) =
+        *server.event_loop.timer_action(timer).unwrap()
+    else {
+        panic!("typed timeout")
+    };
+    server.deferred.remove(&id).unwrap()(server);
+}
+
+fn probe_timer_pending(server: &Server, terminal: &FakeTerminal) -> bool {
+    server
+        .clients
+        .get(terminal.client)
+        .unwrap()
+        .tsp
+        .timer
+        .is_some()
+}
+
+fn client_tsp(server: &Server, terminal: &FakeTerminal) -> &'static str {
+    server.clients.get(terminal.client).unwrap().tsp.format()
+}
+
+/// The client answered its probe: the program's next checkpoint renders it
+/// native, with the transcript in the terminal's tree.
+fn assert_settles_native(fixture: &mut Fixture, terminal: &mut FakeTerminal) {
+    assert_eq!(client_tsp(&fixture.server, terminal), "v1");
+    assert!(
+        !probe_timer_pending(&fixture.server, terminal),
+        "no retry is left"
+    );
+    fixture.settle(terminal);
+    assert_eq!(
+        super::contract::desired_view(&fixture.server, fixture.pane),
+        "native"
+    );
+    assert_eq!(
+        renderer(&fixture.server, fixture.pane),
+        broker::Renderer::Native
+    );
+    assert_eq!(terminal.text("transcript"), "transcript:0");
+    assert!(!terminal.alternate());
+}
+
+#[test]
+fn probe_answered_after_its_deadline_still_makes_the_client_native() {
+    let mut fixture = Fixture::new();
+    let mut terminal =
+        FakeTerminal::attach_holding_probe(&mut fixture.server, Some(fixture.session));
+    assert_eq!(probes(&terminal), 1);
+    assert_eq!(client_tsp(&fixture.server, &terminal), "unknown");
+    assert_eq!(
+        super::contract::desired_view(&fixture.server, fixture.pane),
+        "pending"
+    );
+
+    fire_probe_timer(&mut fixture.server, &terminal);
+    assert_eq!(client_tsp(&fixture.server, &terminal), "no");
+    assert_eq!(
+        super::contract::desired_view(&fixture.server, fixture.pane),
+        "ansi"
+    );
+    assert!(
+        probe_timer_pending(&fixture.server, &terminal),
+        "a retry is scheduled"
+    );
+    fixture.settle(&mut terminal);
+    assert!(
+        terminal.tree.is_none(),
+        "the client shows the grid meanwhile"
+    );
+    assert_eq!(terminal.row(0), "transcript:0");
+    assert_eq!(probes(&terminal), 1, "the retry has not gone out yet");
+
+    terminal.answer_probe(&mut fixture.server);
+    assert_settles_native(&mut fixture, &mut terminal);
+    assert_eq!(probes(&terminal), 1);
+}
+
+#[test]
+fn retried_probe_is_answered_and_the_client_goes_native() {
+    let mut fixture = Fixture::new();
+    let mut terminal =
+        FakeTerminal::attach_holding_probe(&mut fixture.server, Some(fixture.session));
+    fire_probe_timer(&mut fixture.server, &terminal); // the deadline
+    fixture.settle(&mut terminal);
+    terminal.answers_probe = true;
+    fire_probe_timer(&mut fixture.server, &terminal); // the retry
+    assert_eq!(
+        client_tsp(&fixture.server, &terminal),
+        "no",
+        "a retry keeps the grid the client fell back to"
+    );
+    assert_eq!(
+        super::contract::desired_view(&fixture.server, fixture.pane),
+        "ansi"
+    );
+    // The page catches up: the first probe's answer, now stale, then the
+    // retry's, which counts.
+    terminal.pump(&mut fixture.server);
+    assert_eq!(probes(&terminal), 2);
+    assert!(terminal.held_probe.is_none());
+    assert_settles_native(&mut fixture, &mut terminal);
+}
+
+#[test]
+fn input_after_an_unanswered_probe_retries_it_at_once() {
+    let mut fixture = Fixture::new();
+    let mut terminal =
+        FakeTerminal::attach_holding_probe(&mut fixture.server, Some(fixture.session));
+    fire_probe_timer(&mut fixture.server, &terminal);
+    fixture.settle(&mut terminal);
+    terminal.answers_probe = true;
+    crate::cmd::key_bindings::init(&mut fixture.server).unwrap();
+    terminal.send(&mut fixture.server, b"x");
+    crate::cmd::queue::next(&mut fixture.server, Some(terminal.client));
+    terminal.pump(&mut fixture.server);
+    assert_eq!(probes(&terminal), 2);
+    assert_settles_native(&mut fixture, &mut terminal);
+}
+
+#[test]
+fn client_that_answers_da1_without_a_hello_is_not_probed_again() {
+    let (mut server, pane, session) = model();
+    let mut terminal = FakeTerminal::attach(&mut server, Some(session), false);
+    assert_eq!(probes(&terminal), 1);
+    assert_eq!(client_tsp(&server, &terminal), "no");
+    assert!(!probe_timer_pending(&server, &terminal), "no retry");
+    assert_eq!(super::contract::desired_view(&server, pane), "ansi");
+    crate::cmd::key_bindings::init(&mut server).unwrap();
+    terminal.send(&mut server, b"x");
+    crate::cmd::queue::next(&mut server, Some(terminal.client));
+    resize_terminal(&mut server, &mut terminal, 100, 30);
+    assert_eq!(probes(&terminal), 1, "input and a resize send nothing more");
+    assert_eq!(client_tsp(&server, &terminal), "no");
 }
 
 #[test]
