@@ -744,12 +744,19 @@ timers; mode commands retain their queue event, including raw mouse fields.
 
 ## Releases
 
-Bump `version` under `[workspace.package]` in the root `Cargo.toml`, commit,
-push, wait for CI on main, then tag:
+Run this on a clean `main`:
 
 ```sh
-git tag v0.2.0 && git push origin v0.2.0
+scripts/release.sh            # patch bump; also minor, major or X.Y.Z
 ```
+
+It bumps `version` under `[workspace.package]` in the root `Cargo.toml`,
+refreshes `Cargo.lock`, commits `chore: release v<version>`, pushes, waits for
+CI on that commit (re-running failed jobs once, since the timing tests flake on
+busy runners), then tags `v<version>`, pushes the tag and waits for the release
+workflow. When the `Cargo.toml` version has no tag yet, it releases HEAD as
+that version without a bump, so after a CI failure you fix it and run the
+script again.
 
 `.github/workflows/release.yml` (also runnable by hand with a `tag` input)
 fails unless the tag is `v` + that version, since `rmux update` compares the
