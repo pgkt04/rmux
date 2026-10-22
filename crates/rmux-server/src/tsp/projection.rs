@@ -82,10 +82,80 @@ struct ReplayCursor {
     sent_prefix: usize,
 }
 
+/// One op of the next live frame. Ops of one node coalesce while they wait
+/// (see `Projection::admit`): a coalesced op keeps its first and its newest
+/// source, so a host error on it is unmappable, as it was for adjacent merges.
 #[derive(Debug)]
 struct PendingOp {
     value: Value,
     sources: Vec<SourceOp>,
+    /// A later op on the node made this one final; nothing merges into it
+    /// or supersedes it any more: a `move` of the node or of an ancestor, a
+    /// text op after a `set` of `text`, a `set` of `text` or a `splice` after
+    /// a `text`.
+    sealed: bool,
+    /// What this op counts against `PENDING_BYTE_LIMIT`: its encoded size
+    /// and its sources'. Kept here so a streamed text is not re-encoded on
+    /// every appended chunk.
+    cost: usize,
+}
+impl PendingOp {
+    fn new(value: Value, sources: Vec<SourceOp>) -> Self {
+        let cost = encoded_size(&value) + Self::sources_cost(&sources);
+        Self {
+            value,
+            sources,
+            sealed: false,
+            cost,
+        }
+    }
+    fn sources_cost(sources: &[SourceOp]) -> usize {
+        sources
+            .iter()
+            .map(|source| source.sf.len() + std::mem::size_of::<SourceOp>())
+            .sum()
+    }
+    fn targets(&self, id: &str) -> bool {
+        self.value[1].as_str() == Some(id)
+    }
+    /// This op becomes the one op equal to itself then `next`, both accepted
+    /// ops of one node and one verb: a `set` is a shallow prop merge (null
+    /// removes, the newer value wins), a `text` keeps its mode and takes the
+    /// appended text. The first and the newest source stand for the result.
+    fn merge(&mut self, next: &Value, source: Option<SourceOp>) {
+        self.cost -= Self::sources_cost(&self.sources);
+        match op_name(next) {
+            Some("set") => {
+                if let (Some(target), Some(props)) =
+                    (self.value[2].as_object_mut(), next[2].as_object())
+                {
+                    target.extend(
+                        props
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone())),
+                    );
+                }
+                self.cost = encoded_size(&self.value);
+            }
+            Some("text") => {
+                if let (Some(Value::String(target)), Some(text)) =
+                    (self.value.get_mut(3), next[3].as_str())
+                {
+                    target.push_str(text);
+                    // The chunk's escaped bytes, without the quotes.
+                    self.cost += encoded_size(&next[3]) - 2;
+                }
+            }
+            _ => {}
+        }
+        if let Some(source) = source {
+            if self.sources.len() > 1 {
+                self.sources.pop();
+            }
+            self.sources.push(source);
+        }
+        self.cost += Self::sources_cost(&self.sources);
+    }
 }
 
 #[derive(Debug)]
@@ -108,9 +178,10 @@ pub struct Projection {
     next_sequence: u64,
     last_ack: Option<u64>,
     sent: VecDeque<FrameCoverage>,
+    /// Ops of the next live frame, coalesced per node (`admit`). The caps
+    /// count these ops and their encoded bytes with the sources they keep.
     pending: Vec<PendingOp>,
     pending_bytes: usize,
-    pending_sources: usize,
     pending_revision: Option<u64>,
     sent_revision: u64,
     snapshot_needed: bool,
@@ -173,7 +244,6 @@ impl Projection {
             sent: VecDeque::new(),
             pending: Vec::new(),
             pending_bytes: 0,
-            pending_sources: 0,
             pending_revision: None,
             sent_revision: 0,
             snapshot_needed: true,
@@ -351,16 +421,24 @@ impl Projection {
                 Some("move") => {
                     if let (Some(id), Some(parent)) = (value[1].as_str(), value[2].as_str()) {
                         self.view_parents.insert(id.into(), parent.into());
+                        self.seal_subtree(id);
                     }
                 }
                 Some("del") => {
                     if let Some(id) = value[1].as_str() {
                         let removed = remove_topology(&mut self.view_parents, id);
-                        self.pending.retain(|op| {
-                            !is_transient_view(&op.value)
-                                || !op.value[1].as_str().is_some_and(|id| removed.contains(id))
+                        self.drop_pending(|op| {
+                            matches!(
+                                op_name(&op.value),
+                                Some("set" | "text" | "splice" | "settle" | "reveal" | "scroll")
+                            ) && op.value[1].as_str().is_some_and(|id| removed.contains(id))
                         });
-                        self.recount_pending();
+                        if let Some(parent) = self.cancel_add(id, &removed) {
+                            // The host never sees the node, so the `del` goes
+                            // too; the unsettle of the parent chain stays.
+                            self.admit(&json!(["set", parent, {}]), Vec::new())?;
+                            continue;
+                        }
                     }
                 }
                 _ => {}
@@ -368,48 +446,184 @@ impl Projection {
             if self.snapshot_needed && !is_transient_view(value) {
                 continue;
             }
-            // The protocol specifies that only the latest reveal applies.
-            if op_name(value) == Some("reveal") {
-                self.pending
-                    .retain(|op| op_name(&op.value) != Some("reveal"));
-                self.recount_pending();
-            }
             let source = SourceOp {
                 sf: frame.sf.clone(),
                 s: frame.s,
                 op: index,
             };
-            let bytes = encoded_size(value) + source.sf.len() + std::mem::size_of::<SourceOp>();
-            if self.pending_sources >= PENDING_OP_LIMIT
-                || self.pending_bytes.saturating_add(bytes) > PENDING_BYTE_LIMIT
-                || self.pending.len() >= PENDING_OP_LIMIT
-            {
-                self.reconcile();
-                if !is_transient_view(value) {
-                    continue;
-                }
-                if self.pending_sources >= PENDING_OP_LIMIT
-                    || self.pending_bytes.saturating_add(bytes) > PENDING_BYTE_LIMIT
-                    || self.pending.len() >= PENDING_OP_LIMIT
-                {
-                    self.failed = true;
-                    return Err(ProjectionError::PendingViewLimit);
-                }
-            }
-            self.pending_bytes += bytes;
-            self.pending_sources += 1;
-            if let Some(last) = self.pending.last_mut()
-                && merge_adjacent(&mut last.value, value)
-            {
-                last.sources.push(source);
-            } else {
-                self.pending.push(PendingOp {
-                    value: value.clone(),
-                    sources: vec![source],
-                });
-            }
+            self.admit(value, vec![source])?;
         }
         Ok(())
+    }
+
+    /// Queue one accepted op, coalesced with what waits for the same target.
+    /// The host applies the whole frame before it draws, so an op may move to
+    /// where the newest op of its node stands, as long as every op in between
+    /// still reads and writes the same state:
+    /// - a `set` merges into the node's unsealed pending `set` (a shallow prop
+    ///   merge, null removing; the newer props win) and the merged op takes
+    ///   the newer position;
+    /// - a `text append` concatenates onto the node's unsealed pending `text`
+    ///   the same way; a `text replace` drops the node's unsealed pending
+    ///   `text` and `splice`;
+    /// - a `settle` of a node, a `reveal`, and a `focus` are last-write-wins:
+    ///   the earlier pending one goes;
+    /// - `del` drops every pending `set`/`text`/`splice`/`settle`/`reveal`/
+    ///   `scroll` of the removed subtree and cancels a pending `add` of the
+    ///   node (`cancel_add`); `move` seals the subtree (`seal_subtree`).
+    ///
+    /// A text op seals the node's pending `set` that carries `text`; a `set`
+    /// of `text` or a `splice` seals the node's pending text ops: those pairs
+    /// read what the other wrote, so neither may pass the other.
+    fn admit(&mut self, value: &Value, mut sources: Vec<SourceOp>) -> Result<(), ProjectionError> {
+        let target = value[1].as_str();
+        let mut absorbs = None;
+        match (op_name(value), target) {
+            (Some("set"), Some(id)) => {
+                if value[2].get("text").is_some() {
+                    self.seal_pending(|op| {
+                        matches!(op_name(&op.value), Some("text" | "splice")) && op.targets(id)
+                    });
+                }
+                absorbs = self.pending.iter().rposition(|op| {
+                    !op.sealed && op_name(&op.value) == Some("set") && op.targets(id)
+                });
+            }
+            (Some("text"), Some(id)) => {
+                self.seal_pending(|op| {
+                    op_name(&op.value) == Some("set")
+                        && op.targets(id)
+                        && op.value[2].get("text").is_some()
+                });
+                match value[2].as_str() {
+                    Some("append") => {
+                        absorbs = self.pending.iter().rposition(|op| {
+                            !op.sealed && op_name(&op.value) == Some("text") && op.targets(id)
+                        });
+                    }
+                    Some("replace") => self.drop_pending(|op| {
+                        !op.sealed
+                            && matches!(op_name(&op.value), Some("text" | "splice"))
+                            && op.targets(id)
+                    }),
+                    _ => {}
+                }
+            }
+            (Some("splice"), Some(id)) => self.seal_pending(|op| {
+                op.targets(id)
+                    && match op_name(&op.value) {
+                        Some("text" | "splice") => true,
+                        Some("set") => op.value[2].get("text").is_some(),
+                        _ => false,
+                    }
+            }),
+            (Some("settle"), Some(id)) => {
+                self.drop_pending(|op| op_name(&op.value) == Some("settle") && op.targets(id));
+            }
+            // The protocol specifies that only the latest reveal applies; a
+            // frame's focus is wherever its last `focus` put it.
+            (Some(name @ ("reveal" | "focus")), _) => {
+                self.drop_pending(|op| op_name(&op.value) == Some(name));
+            }
+            _ => {}
+        }
+        let op = match absorbs {
+            Some(index) => {
+                let mut previous = self.pending.remove(index);
+                self.pending_bytes -= previous.cost;
+                previous.merge(value, sources.pop());
+                previous
+            }
+            None => PendingOp::new(value.clone(), sources),
+        };
+        let bytes = op.cost;
+        if self.pending_bytes.saturating_add(bytes) > PENDING_BYTE_LIMIT
+            || self.pending.len() >= PENDING_OP_LIMIT
+        {
+            self.reconcile();
+            if !is_transient_view(value) {
+                return Ok(());
+            }
+            if self.pending_bytes.saturating_add(bytes) > PENDING_BYTE_LIMIT
+                || self.pending.len() >= PENDING_OP_LIMIT
+            {
+                self.failed = true;
+                return Err(ProjectionError::PendingViewLimit);
+            }
+        }
+        self.pending_bytes += bytes;
+        self.pending.push(op);
+        Ok(())
+    }
+
+    /// `del id` while its `add` still waits: the host never sees the node.
+    /// Both go, with every pending `add` inside the subtree; the ops the
+    /// subtree's nodes were the target of went with the `del`. Not when an op
+    /// between them could tell: an `add` beside or under a node of the
+    /// subtree that is not in it any more, a `focus` into the subtree, or any
+    /// `move` or `del` (which may have taken a node out of the subtree).
+    /// The pair still unsettled the parent and its ancestors, which a pending
+    /// `settle` between them may rely on: the cancelled add's parent, for an
+    /// empty `set` in the `del`'s place.
+    fn cancel_add(&mut self, id: &str, removed: &BTreeSet<String>) -> Option<String> {
+        let start = self
+            .pending
+            .iter()
+            .rposition(|op| op_name(&op.value) == Some("add") && op.targets(id))?;
+        let inside = |reference: &Value| reference.as_str().is_some_and(|id| removed.contains(id));
+        let mut doomed = vec![start];
+        for (index, op) in self.pending.iter().enumerate().skip(start + 1) {
+            match op_name(&op.value) {
+                Some("add") if inside(&op.value[1]) => doomed.push(index),
+                Some("add") if inside(&op.value[2]) || inside(&op.value[3]) => return None,
+                Some("add" | "set" | "text" | "splice" | "settle" | "reveal" | "scroll") => {}
+                Some("focus") if !inside(&op.value[1]) => {}
+                _ => return None,
+            }
+        }
+        let parent = self.pending[start].value[2].as_str()?.to_owned();
+        for index in doomed.into_iter().rev() {
+            let op = self.pending.remove(index);
+            self.pending_bytes -= op.cost;
+        }
+        Some(parent)
+    }
+
+    /// A `move` of `id`: the pending `set`s and text ops of its subtree stay
+    /// where they are. A later one of the same node would unsettle the new
+    /// ancestors only, and the merged op would too, leaving the old ancestors
+    /// settled where the program unsettled them.
+    fn seal_subtree(&mut self, id: &str) {
+        let parents = &self.view_parents;
+        for op in &mut self.pending {
+            if matches!(op_name(&op.value), Some("set" | "text" | "splice"))
+                && op.value[1]
+                    .as_str()
+                    .is_some_and(|node| parents.is_under(node, id))
+            {
+                op.sealed = true;
+            }
+        }
+    }
+
+    fn seal_pending(&mut self, mut which: impl FnMut(&PendingOp) -> bool) {
+        for op in &mut self.pending {
+            if !op.sealed && which(op) {
+                op.sealed = true;
+            }
+        }
+    }
+
+    fn drop_pending(&mut self, mut which: impl FnMut(&PendingOp) -> bool) {
+        let bytes = &mut self.pending_bytes;
+        self.pending.retain(|op| {
+            if which(op) {
+                *bytes -= op.cost;
+                false
+            } else {
+                true
+            }
+        });
     }
 
     /// Returned messages must enter the client's lossless transaction lane in order.
@@ -968,7 +1182,6 @@ impl Projection {
     fn detach_pending(&mut self) {
         self.pending.clear();
         self.pending_bytes = 0;
-        self.pending_sources = 0;
         self.pending_revision = None;
         self.snapshot_needed = false;
         self.bar_dirty = false;
@@ -1005,7 +1218,6 @@ impl Projection {
         self.root_props.clear();
         self.pending_revision = None;
         self.pending_bytes = 0;
-        self.pending_sources = 0;
         self.replay = None;
         self.awaiting_frame = None;
         self.pending_palette = None;
@@ -1091,18 +1303,7 @@ impl Projection {
     }
 
     fn recount_pending(&mut self) {
-        self.pending_sources = self.pending.iter().map(|op| op.sources.len()).sum();
-        self.pending_bytes = self
-            .pending
-            .iter()
-            .map(|op| {
-                encoded_size(&op.value)
-                    + op.sources
-                        .iter()
-                        .map(|source| source.sf.len() + std::mem::size_of::<SourceOp>())
-                        .sum::<usize>()
-            })
-            .sum();
+        self.pending_bytes = self.pending.iter().map(|op| op.cost).sum();
     }
 
     fn reset_ops(&self) -> Vec<Value> {
@@ -1314,38 +1515,6 @@ fn op_name(op: &Value) -> Option<&str> {
 fn is_transient_view(op: &Value) -> bool {
     matches!(op_name(op), Some("reveal" | "scroll"))
 }
-fn merge_adjacent(previous: &mut Value, next: &Value) -> bool {
-    if previous[1] != next[1] {
-        return false;
-    }
-    match (op_name(previous), op_name(next)) {
-        (Some("set"), Some("set")) => {
-            let Some(props) = next[2].as_object() else {
-                return false;
-            };
-            let Some(target) = previous[2].as_object_mut() else {
-                return false;
-            };
-            target.extend(
-                props
-                    .iter()
-                    .map(|(key, value)| (key.clone(), value.clone())),
-            );
-            true
-        }
-        (Some("text"), Some("text")) if previous[2] == "append" && next[2] == "append" => {
-            let Some(text) = next[3].as_str() else {
-                return false;
-            };
-            let Some(Value::String(target)) = previous.get_mut(3) else {
-                return false;
-            };
-            target.push_str(text);
-            true
-        }
-        _ => false,
-    }
-}
 fn rewrite_reference(value: &mut Value, from: &str, to: &str) {
     if value.as_str() == Some(from) {
         *value = to.into();
@@ -1410,6 +1579,18 @@ impl Topology {
     }
     fn contains(&self, id: &str) -> bool {
         self.parents.contains_key(id)
+    }
+    /// `node` is `ancestor` or below it.
+    fn is_under<'s>(&'s self, mut node: &'s str, ancestor: &str) -> bool {
+        loop {
+            if node == ancestor {
+                return true;
+            }
+            match self.parents.get(node) {
+                Some(parent) => node = parent,
+                None => return false,
+            }
+        }
     }
     fn iter(&self) -> hash_map::Iter<'_, String, String> {
         self.parents.iter()
@@ -1749,41 +1930,599 @@ mod tests {
         assert_eq!(p.ack(coverage.sequence).unwrap(), d.revision);
     }
 
-    #[test]
-    fn adjacent_coalescing_preserves_dependency_barriers() {
+    /// A projection past its first frame, with `initial` on the surface, then
+    /// one frame per step of `steps`, all queued before the next send. The
+    /// outer frame's ops, their coverage, and the two views: the host's after
+    /// that frame, and one that applied every step in order.
+    fn coalesce(
+        initial: Vec<Value>,
+        steps: Vec<Vec<Value>>,
+    ) -> (Vec<Value>, FrameCoverage, TspDocument, TspDocument) {
         let mut p = projection(2);
         let mut d = TspDocument::new("s");
-        apply(
-            &mut p,
-            &mut d,
-            1,
-            vec![json!(["add","n","s",null,{"id":"n","k":"text"}])],
-        );
-        let (_, initial) = send(&mut p, &d);
-        p.ack(initial.sequence).unwrap();
-        apply(
-            &mut p,
-            &mut d,
-            10,
+        apply(&mut p, &mut d, 1, initial);
+        let (first, coverage) = send(&mut p, &d);
+        p.ack(coverage.sequence).unwrap();
+        let mut host = TspDocument::new("outer");
+        host.apply_frame(&serde_json::from_value(frame(&first)).unwrap(), 0)
+            .unwrap();
+        let mut plain = TspDocument::new("outer");
+        plain
+            .apply_frame(&serde_json::from_value(frame(&first)).unwrap(), 0)
+            .unwrap();
+        for (i, ops) in steps.into_iter().enumerate() {
+            let s = 10 + i as u64;
+            let mut outer = ops.clone();
+            for op in &mut outer {
+                rewrite_operation(op, "s", "outer");
+            }
+            let plain_frame = Frame {
+                sf: "outer".into(),
+                s,
+                ops: outer,
+            };
+            assert!(
+                plain
+                    .apply_frame(&plain_frame, 0)
+                    .unwrap()
+                    .errors
+                    .is_empty()
+            );
+            apply(&mut p, &mut d, s, ops);
+        }
+        let bytes: usize = p
+            .pending
+            .iter()
+            .map(|op| encoded_size(&op.value) + PendingOp::sources_cost(&op.sources))
+            .sum();
+        assert_eq!(p.pending_bytes, bytes, "pending bytes follow the queue");
+        assert_eq!(p.pending.iter().map(|op| op.cost).sum::<usize>(), bytes);
+        let (messages, coverage) = send(&mut p, &d);
+        let outer = frame(&messages);
+        let applied = host
+            .apply_frame(&serde_json::from_value(outer.clone()).unwrap(), 0)
+            .unwrap();
+        assert!(applied.errors.is_empty(), "{:?}", applied.errors);
+        assert_eq!(host.snapshot(0), plain.snapshot(0));
+        assert_eq!(host.focus, plain.focus);
+        assert_eq!(host.settled, plain.settled);
+        (outer["ops"].as_array().unwrap().clone(), coverage, host, d)
+    }
+
+    fn node(id: &str) -> Value {
+        json!(["add", id, "s", null, {"id": id, "k": "text"}])
+    }
+
+    #[test]
+    fn sets_of_one_node_merge_at_the_newest_position_with_the_newest_props() {
+        let (ops, coverage, ..) = coalesce(
+            vec![node("a"), node("b")],
             vec![
-                json!(["set","n",{"x":1}]),
-                json!(["set","n",{"x":2}]),
-                json!(["text", "n", "append", "a"]),
-                json!(["text", "n", "append", "b"]),
-                json!(["reveal", "n", "end"]),
-                json!(["set","n",{"x":3}]),
+                vec![json!(["set","a",{"x":1,"y":1}])],
+                vec![json!(["set","b",{"x":1}]), json!(["set","a",{"x":2}])],
+                vec![json!(["set","b",{"x":2}])],
+                vec![json!(["set","a",{"y":null,"z":3}])],
             ],
         );
-        let (messages, coverage) = send(&mut p, &d);
         assert_eq!(
-            frame(&messages)["ops"],
-            json!([
-                ["set","n",{"x":2}],["text","n","append","ab"],["reveal","n","end"],["set","n",{"x":3}]
-            ])
+            ops,
+            json!([["set","b",{"x":2}],["set","a",{"x":2,"y":null,"z":3}]])
+                .as_array()
+                .unwrap()
+                .clone()
         );
+        // A coalesced op keeps its first and its newest source only.
         assert_eq!(coverage.operations[0].len(), 2);
-        assert_eq!(coverage.operations[1].len(), 2);
-        assert_eq!(coverage.operations[3][0].op, 5);
+        assert_eq!(
+            coverage.operations[1]
+                .iter()
+                .map(|s| s.s)
+                .collect::<Vec<_>>(),
+            vec![10, 13]
+        );
+    }
+
+    #[test]
+    fn text_appends_merge_but_never_pass_a_set_of_text_or_a_splice() {
+        let (ops, ..) = coalesce(
+            vec![node("n")],
+            vec![
+                vec![json!(["set","n",{"text":"a","x":1}])],
+                vec![json!(["text", "n", "append", "b"])],
+                vec![json!(["set","n",{"x":2}])],
+                vec![json!(["text", "n", "append", "c"])],
+                vec![json!(["splice", "n", 0, 1, "Z"])],
+                vec![json!(["text", "n", "append", "d"])],
+                vec![json!(["set","n",{"text":"q"}])],
+                vec![
+                    json!(["text", "n", "append", "e"]),
+                    json!(["text", "n", "append", "f"]),
+                ],
+            ],
+        );
+        assert_eq!(
+            ops,
+            json!([
+                ["set","n",{"text":"a","x":1}],
+                ["text","n","append","bc"],
+                ["splice","n",0,1,"Z"],
+                ["text","n","append","d"],
+                ["set","n",{"text":"q","x":2}],
+                ["text","n","append","ef"]
+            ])
+            .as_array()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[test]
+    fn text_replace_supersedes_the_pending_text_of_its_node() {
+        let (ops, ..) = coalesce(
+            vec![node("n"), node("m")],
+            vec![
+                vec![
+                    json!(["text", "n", "append", "a"]),
+                    json!(["text", "m", "append", "x"]),
+                ],
+                vec![json!(["text", "n", "append", "b"])],
+                vec![json!(["text", "n", "replace", "q"])],
+                vec![json!(["text", "n", "append", "r"])],
+            ],
+        );
+        assert_eq!(
+            ops,
+            json!([["text", "m", "append", "x"], ["text", "n", "replace", "qr"]])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn settle_focus_and_reveal_are_last_write_wins() {
+        let (ops, ..) = coalesce(
+            vec![node("n"), node("m")],
+            vec![
+                vec![
+                    json!(["settle", "n"]),
+                    json!(["focus", "n"]),
+                    json!(["reveal", "n", "end"]),
+                ],
+                vec![json!(["set","n",{"x":1}]), json!(["settle", "m"])],
+                vec![
+                    json!(["settle", "n"]),
+                    json!(["focus", null]),
+                    json!(["reveal", "m", "start"]),
+                ],
+            ],
+        );
+        assert_eq!(
+            ops,
+            json!([["set","n",{"x":1}],["settle","m"],["settle","n"],["focus",null],["reveal","m","start"]])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn a_set_never_crosses_the_removal_or_re_add_of_its_node_or_parent() {
+        let (ops, ..) = coalesce(
+            vec![
+                json!(["add","p","s",null,{"id":"p","k":"col","c":[{"id":"c","k":"text"}]}]),
+                node("n"),
+            ],
+            vec![
+                vec![json!(["set","n",{"x":1}]), json!(["set","c",{"x":1}])],
+                vec![json!(["del", "n"]), json!(["del", "p"])],
+                vec![
+                    node("n"),
+                    json!(["add","p","s",null,{"id":"p","k":"col","c":[{"id":"c","k":"text"}]}]),
+                ],
+                vec![json!(["set","n",{"x":2}]), json!(["set","c",{"x":2}])],
+            ],
+        );
+        assert_eq!(
+            ops,
+            json!([
+                ["del","n"],["del","p"],
+                ["add","n","outer",null,{"id":"n","k":"text"}],
+                ["add","p","outer",null,{"id":"p","k":"col","c":[{"id":"c","k":"text"}]}],
+                ["set","n",{"x":2}],["set","c",{"x":2}]
+            ])
+            .as_array()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[test]
+    fn a_move_seals_the_pending_ops_of_its_subtree() {
+        let (ops, ..) = coalesce(
+            vec![
+                json!(["add","p","s",null,{"id":"p","k":"col","c":[{"id":"c","k":"text"}]}]),
+                json!(["add","q","s",null,{"id":"q","k":"col"}]),
+            ],
+            vec![
+                vec![json!(["set","c",{"x":1}]), json!(["settle", "q"])],
+                vec![json!(["move", "p", "q", null])],
+                vec![json!(["set","c",{"x":2}])],
+            ],
+        );
+        assert_eq!(
+            ops,
+            json!([["set","c",{"x":1}],["settle","q"],["move","p","q",null],["set","c",{"x":2}]])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    #[test]
+    fn deleting_a_pending_add_cancels_it_with_the_ops_of_its_subtree() {
+        let row = |id: &str, n: u64| json!(["add", id, "tool", null, {"id": id, "k": "text", "p": {"n": n}}]);
+        let (ops, ..) = coalesce(
+            vec![
+                json!(["add","tool","s",null,{"id":"tool","k":"col","c":[
+                    {"id":"tool.a","k":"text"},{"id":"tool.b","k":"text"}]}]),
+                node("clock"),
+            ],
+            (1..=20u64)
+                .map(|tick| {
+                    vec![
+                        json!(["set","tool",{"title":format!("tick {tick}")}]),
+                        json!(["del", "tool.a"]),
+                        json!(["del", "tool.b"]),
+                        row("tool.a", tick),
+                        json!(["set","tool.a",{"m":tick}]),
+                        json!(["add","tool.a.c","tool.a",null,{"id":"tool.a.c","k":"text"}]),
+                        json!(["settle", "tool.a.c"]),
+                        row("tool.b", tick),
+                        json!(["set","clock",{"text":tick.to_string()}]),
+                        json!(["settle", "tool"]),
+                    ]
+                })
+                .collect(),
+        );
+        assert_eq!(
+            ops,
+            json!([
+                ["del","tool.a"],["del","tool.b"],
+                ["set","tool",{"title":"tick 20"}],
+                ["add","tool.a","tool",null,{"id":"tool.a","k":"text","p":{"n":20}}],
+                ["set","tool.a",{"m":20}],
+                ["add","tool.a.c","tool.a",null,{"id":"tool.a.c","k":"text"}],
+                ["settle","tool.a.c"],
+                ["add","tool.b","tool",null,{"id":"tool.b","k":"text","p":{"n":20}}],
+                ["set","clock",{"text":"20"}],
+                ["settle","tool"]
+            ])
+            .as_array()
+            .unwrap()
+            .clone()
+        );
+    }
+
+    #[test]
+    fn a_pending_add_stays_when_an_op_between_could_tell() {
+        let fresh = |id: &str| json!(["add", id, "s", null, {"id": id, "k": "text"}]);
+        // An anchor beside it, a focus into it, a move, a stray del: each keeps
+        // the add and the del.
+        for between in [
+            json!(["add","beside","s","r",{"id":"beside","k":"text"}]),
+            json!(["focus", "r"]),
+            json!(["move", "m", "s", null]),
+            json!(["del", "m"]),
+        ] {
+            let (ops, ..) = coalesce(
+                vec![node("m")],
+                vec![vec![fresh("r"), between.clone(), json!(["del", "r"])]],
+            );
+            assert_eq!(ops.len(), 3, "{between}: {ops:?}");
+            assert_eq!(ops[0][1], "r");
+            assert_eq!(ops[2], json!(["del", "r"]));
+        }
+        // Unrelated ops between do not.
+        let (ops, ..) = coalesce(
+            vec![node("m")],
+            vec![vec![
+                fresh("r"),
+                json!(["set","m",{"x":1}]),
+                json!(["add","r2","s",null,{"id":"r2","k":"text"}]),
+                json!(["settle", "m"]),
+                json!(["focus", "m"]),
+                json!(["del", "r"]),
+            ]],
+        );
+        assert_eq!(
+            ops,
+            json!([["set","m",{"x":1}],["add","r2","outer",null,{"id":"r2","k":"text"}],["settle","m"],["focus","m"],["set","outer",{}]])
+                .as_array()
+                .unwrap()
+                .clone()
+        );
+    }
+
+    /// `add r m` and `del r` each unsettle `m` and its ancestors: cancelling
+    /// the pair must still unsettle them, or the host keeps `m` settled and
+    /// its retention may evict a block the program just touched.
+    #[test]
+    fn a_cancelled_add_still_unsettles_the_parent_chain() {
+        let (ops, _, host, _) = coalesce(
+            vec![node("m"), json!(["settle", "m"])],
+            vec![
+                vec![json!(["add","r","m",null,{"id":"r","k":"text"}])],
+                vec![json!(["del", "r"])],
+            ],
+        );
+        assert_eq!(ops, vec![json!(["set", "m", {}])]);
+        assert!(host.settled.is_empty());
+        // A `settle` of an ancestor between them is undone by the `del`.
+        let (ops, _, host, _) = coalesce(
+            vec![
+                json!(["add","m","s",null,{"id":"m","k":"col"}]),
+                json!(["settle", "s"]),
+            ],
+            vec![vec![
+                json!(["add","r","m",null,{"id":"r","k":"text"}]),
+                json!(["settle", "s"]),
+                json!(["del", "r"]),
+            ]],
+        );
+        assert_eq!(
+            ops,
+            vec![json!(["settle", "outer"]), json!(["set", "m", {}])]
+        );
+        assert!(host.settled.is_empty());
+        // The unsettle merges into the parent's pending `set`.
+        let (ops, ..) = coalesce(
+            vec![node("m"), json!(["settle", "m"])],
+            vec![vec![
+                json!(["set","m",{"x":1}]),
+                json!(["add","r","m",null,{"id":"r","k":"text"}]),
+                json!(["del", "r"]),
+            ]],
+        );
+        assert_eq!(ops, vec![json!(["set", "m", {"x": 1}])]);
+    }
+
+    /// Random op streams against a six-node surface: the host after the
+    /// coalesced frame equals a host that applied every accepted op in
+    /// order (tree, focus, settled), and the byte count follows the queue.
+    #[test]
+    fn coalescing_is_equivalent_to_applying_every_op() {
+        const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let mut cancelled = 0;
+        for case in 0..3000 {
+            let mut p = projection(2);
+            let mut d = TspDocument::new("s");
+            let mut plain = TspDocument::new("outer");
+            apply(
+                &mut p,
+                &mut d,
+                1,
+                vec![
+                    json!(["add","a","s",null,{"id":"a","k":"col","c":[{"id":"b","k":"text"}]}]),
+                    json!(["settle", "a"]),
+                ],
+            );
+            let (first, coverage) = send(&mut p, &d);
+            p.ack(coverage.sequence).unwrap();
+            let first: Frame = serde_json::from_value(frame(&first)).unwrap();
+            let mut host = TspDocument::new("outer");
+            host.apply_frame(&first, 0).unwrap();
+            plain.apply_frame(&first, 0).unwrap();
+            let mut log = Vec::new();
+            for s in 0..2 + next(12) as u64 {
+                let mut ops = Vec::new();
+                for _ in 0..1 + next(3) {
+                    let id = IDS[next(IDS.len())];
+                    let other = IDS[next(IDS.len())];
+                    let parent = if next(3) == 0 { "s" } else { other };
+                    let before = if next(2) == 0 {
+                        Value::Null
+                    } else {
+                        IDS[next(IDS.len())].into()
+                    };
+                    let kind = if next(2) == 0 { "col" } else { "text" };
+                    let text = ["", "x", "yz", "é😀"][next(4)];
+                    ops.push(match next(11) {
+                        0 | 1 => {
+                            let mut node = json!({"id": id, "k": kind, "p": {"x": next(3)}});
+                            if next(2) == 0 {
+                                node["c"] = json!([{"id": other, "k": "text"}]);
+                            }
+                            json!(["add", id, parent, before, node])
+                        }
+                        2 | 3 => {
+                            let mut props = Map::new();
+                            if next(2) == 0 {
+                                props.insert("x".into(), next(3).into());
+                            }
+                            if next(3) == 0 {
+                                props.insert("y".into(), Value::Null);
+                            }
+                            if next(3) == 0 {
+                                props.insert("text".into(), text.into());
+                            }
+                            json!(["set", id, props])
+                        }
+                        4 => {
+                            let mode = ["append", "replace"][next(2)];
+                            json!(["text", id, mode, text])
+                        }
+                        5 => json!(["splice", id, next(3), next(2), text]),
+                        6 => json!(["move", id, parent, before]),
+                        7 => json!(["del", id]),
+                        8 => json!(["settle", id]),
+                        9 => json!(["focus", if next(4) == 0 { Value::Null } else { id.into() }]),
+                        _ => {
+                            if next(2) == 0 {
+                                json!(["reveal", id, "end"])
+                            } else {
+                                json!(["scroll", id, "line-down"])
+                            }
+                        }
+                    });
+                }
+                let f = Frame {
+                    sf: "s".into(),
+                    s: 10 + s,
+                    ops,
+                };
+                let accepted = d.apply_frame(&f, 0).unwrap();
+                let outer: Vec<Value> = accepted
+                    .original_indices
+                    .iter()
+                    .map(|&i| {
+                        let mut op = f.ops[i].clone();
+                        rewrite_operation(&mut op, "s", "outer");
+                        op
+                    })
+                    .collect();
+                log.extend(outer.iter().cloned());
+                let applied = plain
+                    .apply_frame(
+                        &Frame {
+                            sf: "outer".into(),
+                            s: 10 + s,
+                            ops: outer,
+                        },
+                        0,
+                    )
+                    .unwrap();
+                assert!(
+                    applied.errors.is_empty(),
+                    "case {case}: {:?}",
+                    applied.errors
+                );
+                let before = p.pending.len();
+                p.queue_frame(&f, &accepted).unwrap();
+                if p.pending.len() + 1 < before + accepted.original_indices.len() {
+                    cancelled += 1;
+                }
+            }
+            let recount: usize = p
+                .pending
+                .iter()
+                .map(|op| encoded_size(&op.value) + PendingOp::sources_cost(&op.sources))
+                .sum();
+            assert_eq!(p.pending_bytes, recount, "case {case}: bytes");
+            assert_eq!(
+                p.pending.iter().map(|op| op.cost).sum::<usize>(),
+                recount,
+                "case {case}: cached cost"
+            );
+            let (messages, coverage) = send(&mut p, &d);
+            assert!(!coverage.replay, "case {case}");
+            let outer = frame(&messages);
+            let applied = host
+                .apply_frame(&serde_json::from_value(outer.clone()).unwrap(), 0)
+                .unwrap();
+            assert!(
+                applied.errors.is_empty(),
+                "case {case}: {:?}\nlog {log:?}\nframe {outer}",
+                applied.errors
+            );
+            assert_eq!(
+                host.snapshot(0),
+                plain.snapshot(0),
+                "case {case}\nlog {log:?}\nframe {outer}"
+            );
+            assert_eq!(
+                host.focus, plain.focus,
+                "case {case}\nlog {log:?}\nframe {outer}"
+            );
+            assert_eq!(
+                host.settled, plain.settled,
+                "case {case}\nlog {log:?}\nframe {outer}"
+            );
+            assert!(
+                outer["ops"].as_array().unwrap().len() <= log.len() + 1,
+                "case {case}"
+            );
+        }
+        assert!(
+            cancelled > 100,
+            "{cancelled} cases exercised a cancelled add"
+        );
+    }
+
+    /// A text streamed into a hidden projection is one pending op whose cost
+    /// grows by the chunk, not re-encoded whole on every append.
+    #[test]
+    fn streamed_text_counts_each_chunk_once() {
+        let mut p = projection(2);
+        let mut d = TspDocument::new("s");
+        apply(&mut p, &mut d, 1, vec![node("n")]);
+        let (_, initial) = send(&mut p, &d);
+        p.ack(initial.sequence).unwrap();
+        let count: u64 = std::env::var("RMUX_TEST_APPENDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000);
+        let chunk = "é\"\\ 0123456789 0123456789 0123456789 0123456";
+        let mut queued = std::time::Duration::ZERO;
+        for s in 2..2 + count {
+            let frame = Frame {
+                sf: "s".into(),
+                s,
+                ops: vec![json!(["text", "n", "append", chunk])],
+            };
+            let accepted = d.apply_frame(&frame, 0).unwrap();
+            let started = std::time::Instant::now();
+            p.queue_frame(&frame, &accepted).unwrap();
+            queued += started.elapsed();
+        }
+        eprintln!("{count} appends: queue_frame {queued:?}");
+        assert_eq!(p.pending.len(), 1);
+        let op = &p.pending[0];
+        assert_eq!(
+            op.cost,
+            encoded_size(&op.value) + PendingOp::sources_cost(&op.sources)
+        );
+        assert_eq!(p.pending_bytes, op.cost);
+        assert_eq!(
+            op.value[3].as_str().unwrap().chars().count(),
+            count as usize * chunk.chars().count()
+        );
+    }
+
+    #[test]
+    fn a_busy_node_never_reaches_the_pending_caps() {
+        let mut p = projection(2);
+        let mut d = TspDocument::new("s");
+        apply(&mut p, &mut d, 1, vec![node("n")]);
+        let (_, initial) = send(&mut p, &d);
+        p.ack(initial.sequence).unwrap();
+        for s in 2..=PENDING_OP_LIMIT as u64 * 2 {
+            apply(
+                &mut p,
+                &mut d,
+                s,
+                vec![
+                    json!(["set","n",{"text":"x".repeat(600),"s":s}]),
+                    json!(["settle", "n"]),
+                ],
+            );
+        }
+        assert!(!p.snapshot_needed);
+        assert_eq!(p.pending.len(), 2);
+        assert!(p.pending_bytes < 2048, "{}", p.pending_bytes);
+        let (messages, coverage) = send(&mut p, &d);
+        assert!(!coverage.replay);
+        assert_eq!(
+            frame(&messages)["ops"][0][2]["s"],
+            PENDING_OP_LIMIT as u64 * 2
+        );
     }
     #[test]
     fn snapshot_metadata_blobs_styles_and_time_precede_frame() {
@@ -1938,12 +2677,13 @@ mod tests {
         let mut d = TspDocument::new("s");
         let (_, initial) = send(&mut p, &d);
         p.ack(initial.sequence).unwrap();
+        // Distinct nodes: ops of one node would coalesce into one.
         for s in 1..=PENDING_OP_LIMIT as u64 + 1 {
             apply(
                 &mut p,
                 &mut d,
                 s,
-                vec![json!(["set","s",{"text":s.to_string()}])],
+                vec![json!(["add",format!("n{s}"),"s",null,{"id":format!("n{s}"),"k":"text"}])],
             );
         }
         assert!(p.snapshot_needed);

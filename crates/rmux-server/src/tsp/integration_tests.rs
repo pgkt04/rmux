@@ -2876,6 +2876,86 @@ fn programs_of_parked_windows_keep_their_acks_and_their_frames_come_with_the_res
     assert_eq!(terminal.opens, 3);
 }
 
+/// A program frame `s` of `pane` with `ops`.
+fn program_frame(server: &mut Server, pane: PaneId, s: u64, ops: &[Value]) {
+    pane_runtime::pane_parse_buffer(
+        server,
+        pane,
+        &apc(b'f', &json!({"sf":"program","s":s,"ops":ops})),
+    )
+    .unwrap();
+}
+
+/// omp's busy ticks while parked: the same nodes `set` again, the agent rows
+/// `del`eted and `add`ed again, their parent `settle`d, every tick. The resume
+/// carries each node's newest state once, not one copy per tick; the program
+/// gets every ack meanwhile; and the host's tree is what the ticks in order
+/// would have given.
+#[test]
+fn a_parked_windows_busy_ticks_resume_as_their_newest_state() {
+    let (mut server, mut terminal, panes, _) = omp_windows(parked_hello(4), 2);
+    let a = panes[0];
+    assert_eq!(renderer(&server, a), broker::Renderer::Detached);
+    let row = |id: &str, tick: u64| json!(["add", id, "tool", null, {"id": id, "k": "text", "p": {"text": format!("{id} {tick}"), "age": tick}}]);
+    let mut ticks = vec![vec![
+        json!(["add","tool","program",null,{"id":"tool","k":"col","p":{"title":"tick 0"},"c":[
+            {"id":"tool.a","k":"text"},{"id":"tool.b","k":"text"}]}]),
+        json!(["add","clock","program",null,{"id":"clock","k":"text","p":{"text":"0"}}]),
+    ]];
+    for tick in 1..=20u64 {
+        ticks.push(vec![
+            json!(["set","tool",{"title":format!("tick {tick}"),"age":tick}]),
+            json!(["del", "tool.a"]),
+            json!(["del", "tool.b"]),
+            row("tool.a", tick),
+            row("tool.b", tick),
+            json!(["set","clock",{"text":tick.to_string()}]),
+            json!(["settle", "tool"]),
+        ]);
+    }
+    let distinct: BTreeSet<(String, String)> = ticks
+        .iter()
+        .flatten()
+        .map(|op| (op[0].to_string(), op[1].to_string()))
+        .collect();
+
+    take_pane_acks(&mut server, a);
+    let mut expected = terminal.parked[0].0.clone();
+    let outer = expected["id"].as_str().unwrap().to_owned();
+    let mut focus = None;
+    let sent = terminal.packets.len();
+    for (i, ops) in ticks.iter().enumerate() {
+        let s = 3 + i as u64;
+        for op in ops {
+            let mut op = op.clone();
+            super::projection::rewrite_operation(&mut op, "program", &outer);
+            apply_independent(&mut expected, &op, &mut focus);
+        }
+        program_frame(&mut server, a, s, ops);
+        terminal.pump(&mut server);
+        terminal.draw(&mut server);
+        assert_eq!(take_pane_acks(&mut server, a), vec![s], "tick {i}");
+    }
+    assert!(verbs_since(&terminal, sent).is_empty());
+
+    let sent = terminal.packets.len();
+    switch_window(&mut server, &mut terminal, b"\x020");
+    assert_eq!(verbs_since(&terminal, sent), vec!['f', 'f']);
+    let resume = &terminal.packets.last().unwrap().1;
+    let ops = resume["ops"].as_array().unwrap();
+    assert_eq!(ops[0], json!(["resume"]));
+    assert!(
+        ops.len() <= 1 + distinct.len(),
+        "{} ops for {} distinct changes: {ops:?}",
+        ops.len() - 1,
+        distinct.len()
+    );
+    let mut tree = terminal.tree.clone().unwrap();
+    tree.as_object_mut().unwrap().remove("suspended");
+    expected.as_object_mut().unwrap().remove("suspended");
+    assert_eq!(tree, expected);
+}
+
 #[test]
 fn stopping_the_tty_closes_every_parked_window_and_the_resync_forgets_them() {
     let (mut server, mut terminal, _, _) = omp_windows(parked_hello(4), 4);

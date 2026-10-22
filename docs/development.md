@@ -430,9 +430,24 @@ the alternate screen and the grid redraws in full. While hidden the projection
 is silent: the program's frames and metadata queue on it, the host's acks
 still pay the projection's own credits, a hidden projection is never "drawn"
 (stock programs keep getting their credits from `release_undrawn`), and the
-`PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile bounds the queue, so a
-long-hidden projection resumes with a replay into the open surface (no `o`,
-same id). Coming back to a window whose pane has a hidden projection leaves
+queue coalesces per node (`Projection::admit` in `tsp/projection.rs`): the host
+applies a whole frame before it draws, so a later `set` of a node merges into
+its pending `set` (shallow, null removes, newest wins) and the merged op takes
+the newest position; `text append`s concatenate the same way and a `text
+replace` drops the node's pending text ops; `settle`, `reveal` and `focus` are
+last-write-wins; a `del` drops the pending ops of the removed subtree and
+cancels a pending `add` of the node when nothing between them could tell
+(`cancel_add`: no anchor beside it, no `focus` into it, no `move`, no other
+`del`), leaving an empty `set` of the parent in the `del`'s place for the
+unsettle of the parent chain the pair did; a `move` seals its subtree's
+pending ops and a text op seals a `set`
+of `text` (and the reverse), because those read each other. So a busy omp
+(agent rows deleted and added again, `age` clocks re-set several times a
+second) resumes with one op per changed node, whatever the time away, and the
+`PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile that bounds the coalesced
+queue only sends a long-hidden projection a replay into the open surface (no
+`o`, same id) when many distinct nodes changed. Coming back to a window whose
+pane has a hidden projection leaves
 the alternate screen and sends one frame starting with `["resume"]` followed
 by the queued diffs and the refreshed bar; in many mode the projection the
 client was looking at hides first (`["suspend"]`), so an omp-to-omp switch
