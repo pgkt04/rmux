@@ -94,25 +94,67 @@ struct PendingOp {
     /// text op after a `set` of `text`, a `set` of `text` or a `splice` after
     /// a `text`.
     sealed: bool,
+    /// What this op counts against `PENDING_BYTE_LIMIT`: its encoded size
+    /// and its sources'. Kept here so a streamed text is not re-encoded on
+    /// every appended chunk.
+    cost: usize,
 }
 impl PendingOp {
-    fn cost(&self) -> usize {
-        encoded_size(&self.value)
-            + self
-                .sources
-                .iter()
-                .map(|source| source.sf.len() + std::mem::size_of::<SourceOp>())
-                .sum::<usize>()
+    fn new(value: Value, sources: Vec<SourceOp>) -> Self {
+        let cost = encoded_size(&value) + Self::sources_cost(&sources);
+        Self {
+            value,
+            sources,
+            sealed: false,
+            cost,
+        }
+    }
+    fn sources_cost(sources: &[SourceOp]) -> usize {
+        sources
+            .iter()
+            .map(|source| source.sf.len() + std::mem::size_of::<SourceOp>())
+            .sum()
     }
     fn targets(&self, id: &str) -> bool {
         self.value[1].as_str() == Some(id)
     }
-    /// The first and the newest source stand for a coalesced op.
-    fn absorb(&mut self, source: SourceOp) {
-        if self.sources.len() > 1 {
-            self.sources.pop();
+    /// This op becomes the one op equal to itself then `next`, both accepted
+    /// ops of one node and one verb: a `set` is a shallow prop merge (null
+    /// removes, the newer value wins), a `text` keeps its mode and takes the
+    /// appended text. The first and the newest source stand for the result.
+    fn merge(&mut self, next: &Value, source: Option<SourceOp>) {
+        self.cost -= Self::sources_cost(&self.sources);
+        match op_name(next) {
+            Some("set") => {
+                if let (Some(target), Some(props)) =
+                    (self.value[2].as_object_mut(), next[2].as_object())
+                {
+                    target.extend(
+                        props
+                            .iter()
+                            .map(|(key, value)| (key.clone(), value.clone())),
+                    );
+                }
+                self.cost = encoded_size(&self.value);
+            }
+            Some("text") => {
+                if let (Some(Value::String(target)), Some(text)) =
+                    (self.value.get_mut(3), next[3].as_str())
+                {
+                    target.push_str(text);
+                    // The chunk's escaped bytes, without the quotes.
+                    self.cost += encoded_size(&next[3]) - 2;
+                }
+            }
+            _ => {}
         }
-        self.sources.push(source);
+        if let Some(source) = source {
+            if self.sources.len() > 1 {
+                self.sources.pop();
+            }
+            self.sources.push(source);
+        }
+        self.cost += Self::sources_cost(&self.sources);
     }
 }
 
@@ -391,7 +433,10 @@ impl Projection {
                                 Some("set" | "text" | "splice" | "settle" | "reveal" | "scroll")
                             ) && op.value[1].as_str().is_some_and(|id| removed.contains(id))
                         });
-                        if self.cancel_add(id, &removed) {
+                        if let Some(parent) = self.cancel_add(id, &removed) {
+                            // The host never sees the node, so the `del` goes
+                            // too; the unsettle of the parent chain stays.
+                            self.admit(&json!(["set", parent, {}]), Vec::new())?;
                             continue;
                         }
                     }
@@ -406,7 +451,7 @@ impl Projection {
                 s: frame.s,
                 op: index,
             };
-            self.admit(value, source)?;
+            self.admit(value, vec![source])?;
         }
         Ok(())
     }
@@ -430,7 +475,7 @@ impl Projection {
     /// A text op seals the node's pending `set` that carries `text`; a `set`
     /// of `text` or a `splice` seals the node's pending text ops: those pairs
     /// read what the other wrote, so neither may pass the other.
-    fn admit(&mut self, value: &Value, source: SourceOp) -> Result<(), ProjectionError> {
+    fn admit(&mut self, value: &Value, mut sources: Vec<SourceOp>) -> Result<(), ProjectionError> {
         let target = value[1].as_str();
         let mut absorbs = None;
         match (op_name(value), target) {
@@ -482,19 +527,16 @@ impl Projection {
             }
             _ => {}
         }
-        let mut op = PendingOp {
-            value: value.clone(),
-            sources: vec![source],
-            sealed: false,
+        let op = match absorbs {
+            Some(index) => {
+                let mut previous = self.pending.remove(index);
+                self.pending_bytes -= previous.cost;
+                previous.merge(value, sources.pop());
+                previous
+            }
+            None => PendingOp::new(value.clone(), sources),
         };
-        if let Some(index) = absorbs {
-            let mut previous = self.pending.remove(index);
-            self.pending_bytes -= previous.cost();
-            merge_into(&mut previous.value, value);
-            previous.absorb(op.sources.pop().expect("one source"));
-            op = previous;
-        }
-        let bytes = op.cost();
+        let bytes = op.cost;
         if self.pending_bytes.saturating_add(bytes) > PENDING_BYTE_LIMIT
             || self.pending.len() >= PENDING_OP_LIMIT
         {
@@ -520,30 +562,31 @@ impl Projection {
     /// between them could tell: an `add` beside or under a node of the
     /// subtree that is not in it any more, a `focus` into the subtree, or any
     /// `move` or `del` (which may have taken a node out of the subtree).
-    fn cancel_add(&mut self, id: &str, removed: &BTreeSet<String>) -> bool {
-        let Some(start) = self
+    /// The pair still unsettled the parent and its ancestors, which a pending
+    /// `settle` between them may rely on: the cancelled add's parent, for an
+    /// empty `set` in the `del`'s place.
+    fn cancel_add(&mut self, id: &str, removed: &BTreeSet<String>) -> Option<String> {
+        let start = self
             .pending
             .iter()
-            .rposition(|op| op_name(&op.value) == Some("add") && op.targets(id))
-        else {
-            return false;
-        };
+            .rposition(|op| op_name(&op.value) == Some("add") && op.targets(id))?;
         let inside = |reference: &Value| reference.as_str().is_some_and(|id| removed.contains(id));
         let mut doomed = vec![start];
         for (index, op) in self.pending.iter().enumerate().skip(start + 1) {
             match op_name(&op.value) {
                 Some("add") if inside(&op.value[1]) => doomed.push(index),
-                Some("add") if inside(&op.value[2]) || inside(&op.value[3]) => return false,
+                Some("add") if inside(&op.value[2]) || inside(&op.value[3]) => return None,
                 Some("add" | "set" | "text" | "splice" | "settle" | "reveal" | "scroll") => {}
                 Some("focus") if !inside(&op.value[1]) => {}
-                _ => return false,
+                _ => return None,
             }
         }
+        let parent = self.pending[start].value[2].as_str()?.to_owned();
         for index in doomed.into_iter().rev() {
             let op = self.pending.remove(index);
-            self.pending_bytes -= op.cost();
+            self.pending_bytes -= op.cost;
         }
-        true
+        Some(parent)
     }
 
     /// A `move` of `id`: the pending `set`s and text ops of its subtree stay
@@ -575,7 +618,7 @@ impl Projection {
         let bytes = &mut self.pending_bytes;
         self.pending.retain(|op| {
             if which(op) {
-                *bytes -= op.cost();
+                *bytes -= op.cost;
                 false
             } else {
                 true
@@ -1260,7 +1303,7 @@ impl Projection {
     }
 
     fn recount_pending(&mut self) {
-        self.pending_bytes = self.pending.iter().map(PendingOp::cost).sum();
+        self.pending_bytes = self.pending.iter().map(|op| op.cost).sum();
     }
 
     fn reset_ops(&self) -> Vec<Value> {
@@ -1471,32 +1514,6 @@ fn op_name(op: &Value) -> Option<&str> {
 }
 fn is_transient_view(op: &Value) -> bool {
     matches!(op_name(op), Some("reveal" | "scroll"))
-}
-/// `previous` becomes the one op equal to `previous` then `next`, both
-/// accepted ops of one node and one verb: a `set` is a shallow prop merge
-/// (null removes, the newer value wins), a `text` keeps its mode and takes the
-/// appended text.
-fn merge_into(previous: &mut Value, next: &Value) {
-    match op_name(next) {
-        Some("set") => {
-            if let (Some(target), Some(props)) = (previous[2].as_object_mut(), next[2].as_object())
-            {
-                target.extend(
-                    props
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone())),
-                );
-            }
-        }
-        Some("text") => {
-            if let (Some(Value::String(target)), Some(text)) =
-                (previous.get_mut(3), next[3].as_str())
-            {
-                target.push_str(text);
-            }
-        }
-        _ => {}
-    }
 }
 fn rewrite_reference(value: &mut Value, from: &str, to: &str) {
     if value.as_str() == Some(from) {
@@ -1953,8 +1970,13 @@ mod tests {
             );
             apply(&mut p, &mut d, s, ops);
         }
-        let bytes: usize = p.pending.iter().map(PendingOp::cost).sum();
+        let bytes: usize = p
+            .pending
+            .iter()
+            .map(|op| encoded_size(&op.value) + PendingOp::sources_cost(&op.sources))
+            .sum();
         assert_eq!(p.pending_bytes, bytes, "pending bytes follow the queue");
+        assert_eq!(p.pending.iter().map(|op| op.cost).sum::<usize>(), bytes);
         let (messages, coverage) = send(&mut p, &d);
         let outer = frame(&messages);
         let applied = host
@@ -2215,10 +2237,262 @@ mod tests {
         );
         assert_eq!(
             ops,
-            json!([["set","m",{"x":1}],["add","r2","outer",null,{"id":"r2","k":"text"}],["settle","m"],["focus","m"]])
+            json!([["set","m",{"x":1}],["add","r2","outer",null,{"id":"r2","k":"text"}],["settle","m"],["focus","m"],["set","outer",{}]])
                 .as_array()
                 .unwrap()
                 .clone()
+        );
+    }
+
+    /// `add r m` and `del r` each unsettle `m` and its ancestors: cancelling
+    /// the pair must still unsettle them, or the host keeps `m` settled and
+    /// its retention may evict a block the program just touched.
+    #[test]
+    fn a_cancelled_add_still_unsettles_the_parent_chain() {
+        let (ops, _, host, _) = coalesce(
+            vec![node("m"), json!(["settle", "m"])],
+            vec![
+                vec![json!(["add","r","m",null,{"id":"r","k":"text"}])],
+                vec![json!(["del", "r"])],
+            ],
+        );
+        assert_eq!(ops, vec![json!(["set", "m", {}])]);
+        assert!(host.settled.is_empty());
+        // A `settle` of an ancestor between them is undone by the `del`.
+        let (ops, _, host, _) = coalesce(
+            vec![
+                json!(["add","m","s",null,{"id":"m","k":"col"}]),
+                json!(["settle", "s"]),
+            ],
+            vec![vec![
+                json!(["add","r","m",null,{"id":"r","k":"text"}]),
+                json!(["settle", "s"]),
+                json!(["del", "r"]),
+            ]],
+        );
+        assert_eq!(
+            ops,
+            vec![json!(["settle", "outer"]), json!(["set", "m", {}])]
+        );
+        assert!(host.settled.is_empty());
+        // The unsettle merges into the parent's pending `set`.
+        let (ops, ..) = coalesce(
+            vec![node("m"), json!(["settle", "m"])],
+            vec![vec![
+                json!(["set","m",{"x":1}]),
+                json!(["add","r","m",null,{"id":"r","k":"text"}]),
+                json!(["del", "r"]),
+            ]],
+        );
+        assert_eq!(ops, vec![json!(["set", "m", {"x": 1}])]);
+    }
+
+    /// Random op streams against a six-node surface: the host after the
+    /// coalesced frame equals a host that applied every accepted op in
+    /// order (tree, focus, settled), and the byte count follows the queue.
+    #[test]
+    fn coalescing_is_equivalent_to_applying_every_op() {
+        const IDS: [&str; 6] = ["a", "b", "c", "d", "e", "f"];
+        let mut seed = 0x9E37_79B9_7F4A_7C15u64;
+        let mut next = move |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound as u64) as usize
+        };
+        let mut cancelled = 0;
+        for case in 0..3000 {
+            let mut p = projection(2);
+            let mut d = TspDocument::new("s");
+            let mut plain = TspDocument::new("outer");
+            apply(
+                &mut p,
+                &mut d,
+                1,
+                vec![
+                    json!(["add","a","s",null,{"id":"a","k":"col","c":[{"id":"b","k":"text"}]}]),
+                    json!(["settle", "a"]),
+                ],
+            );
+            let (first, coverage) = send(&mut p, &d);
+            p.ack(coverage.sequence).unwrap();
+            let first: Frame = serde_json::from_value(frame(&first)).unwrap();
+            let mut host = TspDocument::new("outer");
+            host.apply_frame(&first, 0).unwrap();
+            plain.apply_frame(&first, 0).unwrap();
+            let mut log = Vec::new();
+            for s in 0..2 + next(12) as u64 {
+                let mut ops = Vec::new();
+                for _ in 0..1 + next(3) {
+                    let id = IDS[next(IDS.len())];
+                    let other = IDS[next(IDS.len())];
+                    let parent = if next(3) == 0 { "s" } else { other };
+                    let before = if next(2) == 0 {
+                        Value::Null
+                    } else {
+                        IDS[next(IDS.len())].into()
+                    };
+                    let kind = if next(2) == 0 { "col" } else { "text" };
+                    let text = ["", "x", "yz", "é😀"][next(4)];
+                    ops.push(match next(11) {
+                        0 | 1 => {
+                            let mut node = json!({"id": id, "k": kind, "p": {"x": next(3)}});
+                            if next(2) == 0 {
+                                node["c"] = json!([{"id": other, "k": "text"}]);
+                            }
+                            json!(["add", id, parent, before, node])
+                        }
+                        2 | 3 => {
+                            let mut props = Map::new();
+                            if next(2) == 0 {
+                                props.insert("x".into(), next(3).into());
+                            }
+                            if next(3) == 0 {
+                                props.insert("y".into(), Value::Null);
+                            }
+                            if next(3) == 0 {
+                                props.insert("text".into(), text.into());
+                            }
+                            json!(["set", id, props])
+                        }
+                        4 => {
+                            let mode = ["append", "replace"][next(2)];
+                            json!(["text", id, mode, text])
+                        }
+                        5 => json!(["splice", id, next(3), next(2), text]),
+                        6 => json!(["move", id, parent, before]),
+                        7 => json!(["del", id]),
+                        8 => json!(["settle", id]),
+                        9 => json!(["focus", if next(4) == 0 { Value::Null } else { id.into() }]),
+                        _ => {
+                            if next(2) == 0 {
+                                json!(["reveal", id, "end"])
+                            } else {
+                                json!(["scroll", id, "line-down"])
+                            }
+                        }
+                    });
+                }
+                let f = Frame {
+                    sf: "s".into(),
+                    s: 10 + s,
+                    ops,
+                };
+                let accepted = d.apply_frame(&f, 0).unwrap();
+                let outer: Vec<Value> = accepted
+                    .original_indices
+                    .iter()
+                    .map(|&i| {
+                        let mut op = f.ops[i].clone();
+                        rewrite_operation(&mut op, "s", "outer");
+                        op
+                    })
+                    .collect();
+                log.extend(outer.iter().cloned());
+                let applied = plain
+                    .apply_frame(
+                        &Frame {
+                            sf: "outer".into(),
+                            s: 10 + s,
+                            ops: outer,
+                        },
+                        0,
+                    )
+                    .unwrap();
+                assert!(
+                    applied.errors.is_empty(),
+                    "case {case}: {:?}",
+                    applied.errors
+                );
+                let before = p.pending.len();
+                p.queue_frame(&f, &accepted).unwrap();
+                if p.pending.len() + 1 < before + accepted.original_indices.len() {
+                    cancelled += 1;
+                }
+            }
+            let recount: usize = p
+                .pending
+                .iter()
+                .map(|op| encoded_size(&op.value) + PendingOp::sources_cost(&op.sources))
+                .sum();
+            assert_eq!(p.pending_bytes, recount, "case {case}: bytes");
+            assert_eq!(
+                p.pending.iter().map(|op| op.cost).sum::<usize>(),
+                recount,
+                "case {case}: cached cost"
+            );
+            let (messages, coverage) = send(&mut p, &d);
+            assert!(!coverage.replay, "case {case}");
+            let outer = frame(&messages);
+            let applied = host
+                .apply_frame(&serde_json::from_value(outer.clone()).unwrap(), 0)
+                .unwrap();
+            assert!(
+                applied.errors.is_empty(),
+                "case {case}: {:?}\nlog {log:?}\nframe {outer}",
+                applied.errors
+            );
+            assert_eq!(
+                host.snapshot(0),
+                plain.snapshot(0),
+                "case {case}\nlog {log:?}\nframe {outer}"
+            );
+            assert_eq!(
+                host.focus, plain.focus,
+                "case {case}\nlog {log:?}\nframe {outer}"
+            );
+            assert_eq!(
+                host.settled, plain.settled,
+                "case {case}\nlog {log:?}\nframe {outer}"
+            );
+            assert!(
+                outer["ops"].as_array().unwrap().len() <= log.len() + 1,
+                "case {case}"
+            );
+        }
+        assert!(
+            cancelled > 100,
+            "{cancelled} cases exercised a cancelled add"
+        );
+    }
+
+    /// A text streamed into a hidden projection is one pending op whose cost
+    /// grows by the chunk, not re-encoded whole on every append.
+    #[test]
+    fn streamed_text_counts_each_chunk_once() {
+        let mut p = projection(2);
+        let mut d = TspDocument::new("s");
+        apply(&mut p, &mut d, 1, vec![node("n")]);
+        let (_, initial) = send(&mut p, &d);
+        p.ack(initial.sequence).unwrap();
+        let count: u64 = std::env::var("RMUX_TEST_APPENDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2_000);
+        let chunk = "é\"\\ 0123456789 0123456789 0123456789 0123456";
+        let mut queued = std::time::Duration::ZERO;
+        for s in 2..2 + count {
+            let frame = Frame {
+                sf: "s".into(),
+                s,
+                ops: vec![json!(["text", "n", "append", chunk])],
+            };
+            let accepted = d.apply_frame(&frame, 0).unwrap();
+            let started = std::time::Instant::now();
+            p.queue_frame(&frame, &accepted).unwrap();
+            queued += started.elapsed();
+        }
+        eprintln!("{count} appends: queue_frame {queued:?}");
+        assert_eq!(p.pending.len(), 1);
+        let op = &p.pending[0];
+        assert_eq!(
+            op.cost,
+            encoded_size(&op.value) + PendingOp::sources_cost(&op.sources)
+        );
+        assert_eq!(p.pending_bytes, op.cost);
+        assert_eq!(
+            op.value[3].as_str().unwrap().chars().count(),
+            count as usize * chunk.chars().count()
         );
     }
 

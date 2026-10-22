@@ -438,7 +438,9 @@ replace` drops the node's pending text ops; `settle`, `reveal` and `focus` are
 last-write-wins; a `del` drops the pending ops of the removed subtree and
 cancels a pending `add` of the node when nothing between them could tell
 (`cancel_add`: no anchor beside it, no `focus` into it, no `move`, no other
-`del`); a `move` seals its subtree's pending ops and a text op seals a `set`
+`del`), leaving an empty `set` of the parent in the `del`'s place for the
+unsettle of the parent chain the pair did; a `move` seals its subtree's
+pending ops and a text op seals a `set`
 of `text` (and the reverse), because those read each other. So a busy omp
 (agent rows deleted and added again, `age` clocks re-set several times a
 second) resumes with one op per changed node, whatever the time away, and the
