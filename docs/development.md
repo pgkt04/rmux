@@ -320,7 +320,13 @@ TSP probe under a tmux `TERM` unless that override asks for it, and an explicit
 `detached`), and `pane_tsp_epoch` report broker state, not terminal-environment
 guesses. `pane_tsp_view` reports the desired renderer independently of the app's
 chosen renderer: `native`, `ansi`, `detached` (no physical viewers), or `pending`
-(a visible client's TSP probe is unresolved). Control observers do not count as
+(a visible client's TSP probe is unresolved). The probe waits 1 s for the
+client's DA1; a DA1 without a hello is final (`no`, no retries), while no DA1 at
+all marks the client `no` meanwhile and keeps the probe open: a late answer
+still counts, and the probe is sent again after 1/3/10 s and once on the
+client's next key or resize, with no `pending` view in between. Answers are
+matched to probes in order, so a client that catches up on a backlog settles on
+its answer to the newest probe. Control observers do not count as
 viewers. Changes expose an ordered `OptionsChange` plan for the G14 host;
 monitor removal releases values before monitor cleanup and option unlink.
 TSP replay holds one immutable revision across tty queue-full retries; subsequent
@@ -591,7 +597,8 @@ reconciliation. It ignores detached/pending desired views, settles native-to-ANS
 changes for 150 ms, and waits for negotiation/editor ownership with a 50 ms
 one-shot. Persistent mismatch gets at most three reprobes with 100/250/1000 ms
 backoff, then a warning; transient pending/detached states do not reset that
-budget. Matched renderers have no background reconciliation timer.
+budget, but a return to native/ANSI from them (a new attach) does.
+Matched renderers have no background reconciliation timer.
 It does not restart while `process.stdin.isPaused()` indicates an external UI
 owns the tty; lookup/reprobe completions are generation-bound. An observer that
 exits is replaced, because another client's `attach-session -d` detaches control

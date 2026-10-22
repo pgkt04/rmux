@@ -164,7 +164,8 @@ pub fn program_left(server: &Server, pane: PaneId) -> bool {
         .is_some_and(|now| now != pgrp)
 }
 pub use super::client_runtime::{
-    client_message, client_protocol_fault, client_sentinel, client_sync, probe_client,
+    client_activity, client_message, client_protocol_fault, client_sentinel, client_sync,
+    probe_client,
 };
 pub use super::contract::{recompute, viewers};
 pub use super::input::{
