@@ -596,8 +596,8 @@ The plugin coalesces subscription changes and TUI starts into a managed one-shot
 reconciliation. It ignores detached/pending desired views, settles native-to-ANSI
 changes for 150 ms, and waits for negotiation/editor ownership with a 50 ms
 one-shot. Persistent mismatch gets at most three reprobes with 100/250/1000 ms
-backoff, then a warning; transient pending/detached states do not reset that
-budget, but a return to native/ANSI from them (a new attach) does.
+backoff, then a warning; every return to native/ANSI from pending/detached (a
+new attach) resets that budget.
 Matched renderers have no background reconciliation timer.
 It does not restart while `process.stdin.isPaused()` indicates an external UI
 owns the tty; lookup/reprobe completions are generation-bound. An observer that

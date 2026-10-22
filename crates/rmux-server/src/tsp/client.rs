@@ -40,7 +40,8 @@ pub const RMUX_HIDDEN_MAX: usize = 8;
 /// How long a detection probe waits for the client's DA1 reply.
 pub const PROBE_DEADLINE: Duration = Duration::from_secs(1);
 /// The waits before a probe that passed its deadline unanswered goes out
-/// again: a busy client or server may have been late, or the probe lost.
+/// again. Answers match probes in order, so a retry recovers a client that is
+/// late, not a lost answer: a late host still answers every probe it saw.
 pub const PROBE_RETRY_DELAYS: [Duration; 3] = [
     Duration::from_secs(1),
     Duration::from_secs(3),

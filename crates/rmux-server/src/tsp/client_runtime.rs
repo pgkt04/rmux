@@ -410,6 +410,7 @@ pub fn client_protocol_fault(server: &mut Server, client: ClientId) {
     broker::close_projection(server, client);
     if let Some(c) = server.clients.get_mut(client) {
         c.tsp.capability = Capability::Unsupported;
+        c.tsp.probe = ProbeRetry::default();
         c.tsp.projection_hello = None;
         c.tsp.confirmed_blobs.clear();
         for request in &mut c.tsp.requests {
@@ -1436,6 +1437,27 @@ mod tests {
         assert!(c.tsp.timer.is_none(), "the retry is cancelled");
         client_activity(&mut server, client);
         assert_eq!(probes_sent(&server, client), 0);
+    }
+
+    #[test]
+    fn protocol_fault_after_an_unanswered_probe_ends_the_retries() {
+        let (mut server, _, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        probe_client(&mut server, client);
+        fire_probe_timer(&mut server, client);
+        assert!(server.clients.get(client).unwrap().tsp.probe.unanswered);
+        client_protocol_fault(&mut server, client);
+        let c = server.clients.get(client).unwrap();
+        assert_eq!(c.tsp.format(), "no");
+        assert_eq!(c.tsp.probe, ProbeRetry::default());
+        assert!(c.tsp.timer.is_none(), "the retry is cancelled");
+        let before = probes_sent(&server, client);
+        client_activity(&mut server, client);
+        assert_eq!(
+            probes_sent(&server, client),
+            before,
+            "input after a fault sends nothing"
+        );
     }
 
     #[test]
