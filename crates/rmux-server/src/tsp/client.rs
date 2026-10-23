@@ -37,8 +37,11 @@ pub enum Slot {
 }
 /// The most hidden projections a client keeps, whatever its host offers.
 pub const RMUX_HIDDEN_MAX: usize = 8;
-/// How long a detection probe waits for the client's DA1 reply.
-pub const PROBE_DEADLINE: Duration = Duration::from_secs(1);
+/// How long a detection probe waits for the client's DA1 reply. A browser on
+/// a slow link (in-flight wifi, measured 1.6 s round trip through rsttyd)
+/// answers late, not never: within this the client is `v1` at once, with no
+/// retry and no `no` in between.
+pub const PROBE_DEADLINE: Duration = Duration::from_secs(3);
 /// The waits before a probe that passed its deadline unanswered goes out
 /// again. Answers match probes in order, so a retry recovers a client that is
 /// late, not a lost answer: a late host still answers every probe it saw.

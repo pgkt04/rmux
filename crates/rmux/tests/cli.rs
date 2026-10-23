@@ -342,8 +342,15 @@ fn version_prints_release_commit_and_target() {
     let out = run(&rmux(), &["version"], &[], &[]);
     assert_eq!(out.status.code(), Some(0));
     let stdout = String::from_utf8(out.stdout).unwrap();
-    let line = stdout.strip_suffix('\n').expect("one line");
-    assert!(!line.contains('\n'), "{line:?}");
+    // The first line is the binary's; a line per live server of this user may follow (its build, from
+    // `#{rmux_version}`), so the test reads only the first.
+    let line = stdout.lines().next().expect("one line");
+    for server in stdout.lines().skip(1) {
+        assert!(
+            server.starts_with("server ") && server.contains(" runs "),
+            "{server:?}"
+        );
+    }
     let rest = line
         .strip_prefix(&format!("rmux {} (", env!("CARGO_PKG_VERSION")))
         .and_then(|rest| rest.strip_suffix(')'))

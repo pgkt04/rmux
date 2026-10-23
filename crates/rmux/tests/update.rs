@@ -225,9 +225,11 @@ impl World {
         std::fs::create_dir_all(&sock).unwrap();
         let output = Command::new(&bin).arg("version").output().unwrap();
         assert!(output.status.success(), "{}", stderr(&output));
-        let line = stdout(&output);
+        let text = stdout(&output);
+        // The first line names the binary; the lines after it, one per live server of this user, name their builds.
+        let line = text.lines().next().unwrap_or("");
         let (version, target) = parse_version(line.trim())
-            .unwrap_or_else(|| panic!("unexpected `rmux version` output: {line:?}"));
+            .unwrap_or_else(|| panic!("unexpected `rmux version` output: {text:?}"));
         Self {
             original: std::fs::read(&bin).unwrap(),
             mode: std::fs::metadata(&bin).unwrap().permissions().mode(),

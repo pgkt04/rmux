@@ -75,6 +75,15 @@ pub fn main(args: &[Vec<u8>]) -> i32 {
     }
 }
 
+/// For `rmux version`: one line per live server of this user with the build
+/// it runs (through `#{rmux_version}`), against this binary's release.
+pub fn running_builds(release: &str) -> Vec<String> {
+    let Ok(exe) = std::env::current_exe() else {
+        return Vec::new();
+    };
+    servers::builds(&servers::running(&exe), release)
+}
+
 /// Download directory beside the primary target, removed however we leave.
 struct TempDir(PathBuf);
 

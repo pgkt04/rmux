@@ -336,6 +336,10 @@ fn main() {
             std::process::exit(1);
         }
         println!("{}", version::release_line());
+        // A server keeps the build it started from, so the binary's release says nothing about the sessions.
+        for line in update::running_builds(version::RELEASE) {
+            println!("{line}");
+        }
         return;
     }
 

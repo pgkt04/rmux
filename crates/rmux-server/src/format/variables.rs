@@ -188,6 +188,7 @@ pub const REGISTRY: &[&[u8]] = &[
     b"pane_z",
     b"pane_zoomed_flag",
     b"pid",
+    b"rmux_version",
     b"scroll_region_lower",
     b"scroll_region_upper",
     b"server_sessions",
@@ -839,6 +840,10 @@ pub const BUILTINS: &[Builtin] = &[
         kind: ValueKind::String,
     },
     Builtin {
+        key: b"rmux_version",
+        kind: ValueKind::String,
+    },
+    Builtin {
         key: b"scroll_region_lower",
         kind: ValueKind::String,
     },
@@ -1157,6 +1162,8 @@ pub fn find_owned(
     REGISTRY.binary_search(&key).ok()?;
     match key {
         b"pid" => Some(FormatValue::Unsigned(u64::from(std::process::id()))),
+        // The build this server runs (`rmux version` reads it; a server keeps its build until it restarts).
+        b"rmux_version" => Some(bytes(env!("CARGO_PKG_VERSION").as_bytes())),
         b"uid" => Some(FormatValue::Unsigned(u64::from(rmux_sys::proc::getuid().0))),
         b"sixel_support" => Some(boolean(cfg!(feature = "sixel"))),
         b"pane_format" => Some(boolean(context.kind == FormatKind::Pane)),
@@ -2492,7 +2499,7 @@ mod tests {
 
     #[test]
     fn registry_matches_all_pinned_names_and_types() {
-        assert_eq!(REGISTRY.len(), 218);
+        assert_eq!(REGISTRY.len(), 219);
         assert!(REGISTRY.windows(2).all(|keys| keys[0] < keys[1]));
         assert!(
             REGISTRY
@@ -2539,7 +2546,11 @@ mod tests {
             .filter(|builtin| {
                 !matches!(
                     builtin.key,
-                    b"client_tsp" | b"pane_tsp" | b"pane_tsp_epoch" | b"pane_tsp_view"
+                    b"client_tsp"
+                        | b"pane_tsp"
+                        | b"pane_tsp_epoch"
+                        | b"pane_tsp_view"
+                        | b"rmux_version"
                 )
             })
             .collect();
@@ -2569,6 +2580,14 @@ mod tests {
             );
             assert!(crate::options::search(key).is_none());
         }
+    }
+
+    #[test]
+    fn rmux_version_is_this_build() {
+        let mut server = crate::model::Server::new();
+        let value = find(&mut server, &FormatContext::default(), b"rmux_version").unwrap();
+        assert_eq!(value.bytes(), env!("CARGO_PKG_VERSION").as_bytes());
+        assert!(crate::options::search(b"rmux_version").is_none());
     }
 
     #[test]

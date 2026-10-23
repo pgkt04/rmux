@@ -16,11 +16,37 @@ pub struct RunningServer {
     pub socket: PathBuf,
     pub pid: u32,
     pub start_time: u64,
+    /// The release the server runs (`#{rmux_version}`), or None for a build
+    /// from before that format existed (0.5.0 and older).
+    pub release: Option<String>,
 }
 
 /// This user's live rmux servers, asked through `exe` (the binary they run).
 pub fn running(exe: &Path) -> Vec<RunningServer> {
     socket_dir().map_or_else(Vec::new, |dir| running_in(&dir, exe))
+}
+
+/// Lines for `rmux version`: the build each of this user's live servers runs
+/// against `release`, this binary's. Empty when no server runs.
+pub fn builds(servers: &[RunningServer], release: &str) -> Vec<String> {
+    servers
+        .iter()
+        .map(|server| {
+            let runs = match &server.release {
+                Some(r) if r == release => format!("runs {r}"),
+                Some(r) => format!("runs {r}; kill-server (ends its sessions) moves it to {release}"),
+                None => format!(
+                    "runs a build older than 0.6.0; kill-server (ends its sessions) moves it to {release}"
+                ),
+            };
+            format!(
+                "server {} (pid {}, started {}) {runs}",
+                server.socket.display(),
+                server.pid,
+                local_time(server.start_time),
+            )
+        })
+        .collect()
 }
 
 /// Lines telling the user these servers keep the previous build until they
@@ -85,22 +111,27 @@ fn running_in(dir: &Path, exe: &Path) -> Vec<RunningServer> {
     sockets
         .into_iter()
         .filter_map(|socket| {
-            let (pid, start_time) = query(exe, &socket)?;
+            let (pid, start_time, release) = query(exe, &socket)?;
             Some(RunningServer {
                 socket,
                 pid,
                 start_time,
+                release,
             })
         })
         .collect()
 }
 
-fn query(exe: &Path, socket: &Path) -> Option<(u32, u64)> {
+fn query(exe: &Path, socket: &Path) -> Option<(u32, u64, Option<String>)> {
     let mut child = Command::new(exe)
         .arg("-N")
         .arg("-S")
         .arg(socket)
-        .args(["display-message", "-p", "#{pid} #{start_time}"])
+        .args([
+            "display-message",
+            "-p",
+            "#{pid} #{start_time} #{rmux_version}",
+        ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -128,10 +159,18 @@ fn query(exe: &Path, socket: &Path) -> Option<(u32, u64)> {
     parse_query(&out)
 }
 
-fn parse_query(out: &[u8]) -> Option<(u32, u64)> {
+/// `pid start_time [rmux_version]`: a server from before the `rmux_version`
+/// format expands it to nothing, so the third word is optional.
+fn parse_query(out: &[u8]) -> Option<(u32, u64, Option<String>)> {
     let text = std::str::from_utf8(out).ok()?.trim();
-    let (pid, start_time) = text.split_once(' ')?;
-    Some((pid.parse().ok()?, start_time.parse().ok()?))
+    let mut words = text.split(' ');
+    let pid = words.next()?.parse().ok()?;
+    let start_time = words.next()?.parse().ok()?;
+    let release = words.next().filter(|w| !w.is_empty()).map(str::to_owned);
+    if words.next().is_some() {
+        return None;
+    }
+    Some((pid, start_time, release))
 }
 
 fn local_time(seconds: u64) -> String {
@@ -162,6 +201,7 @@ mod tests {
             socket: PathBuf::from(socket),
             pid,
             start_time: 1_700_000_000,
+            release: None,
         }
     }
 
@@ -210,14 +250,41 @@ mod tests {
     fn parse_query_output() {
         assert_eq!(
             parse_query(b"1234 1700000000\n"),
-            Some((1234, 1_700_000_000))
+            Some((1234, 1_700_000_000, None))
         );
-        assert_eq!(parse_query(b"1 2"), Some((1, 2)));
+        assert_eq!(parse_query(b"1 2"), Some((1, 2, None)));
+        assert_eq!(
+            parse_query(b"1 2 0.6.0\n"),
+            Some((1, 2, Some("0.6.0".to_owned())))
+        );
         assert_eq!(parse_query(b""), None);
         assert_eq!(parse_query(b"1234\n"), None);
         assert_eq!(parse_query(b"abc 1\n"), None);
-        assert_eq!(parse_query(b"1 2 3\n"), None);
+        assert_eq!(parse_query(b"1 2 3 4\n"), None);
         assert_eq!(parse_query(b"-1 2\n"), None);
+    }
+
+    #[test]
+    fn builds_name_each_server_against_this_release() {
+        let same = RunningServer {
+            release: Some("0.6.0".to_owned()),
+            ..server("/tmp/rmux-501/a", 1)
+        };
+        let older = RunningServer {
+            release: Some("0.5.0".to_owned()),
+            ..server("/tmp/rmux-501/b", 2)
+        };
+        let lines = builds(&[same, older, server("/tmp/rmux-501/c", 3)], "0.6.0");
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].starts_with("server /tmp/rmux-501/a (pid 1, started "));
+        assert!(lines[0].ends_with(") runs 0.6.0"));
+        assert!(
+            lines[1].ends_with(") runs 0.5.0; kill-server (ends its sessions) moves it to 0.6.0")
+        );
+        assert!(lines[2].ends_with(
+            ") runs a build older than 0.6.0; kill-server (ends its sessions) moves it to 0.6.0"
+        ));
+        assert!(builds(&[], "0.6.0").is_empty());
     }
 
     #[test]
