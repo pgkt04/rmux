@@ -146,10 +146,10 @@ fn update(server: &mut Server, mode: ModeId, m: &MouseInput) {
         let sy = state::screen(server, mode).unwrap().grid.sy();
         if y == 0 {
             arm(server, mode);
-            motion::cursor_up(server, mode, true);
+            motion::scroll_down(server, mode, 1);
         } else if y == sy - 1 {
             arm(server, mode);
-            motion::cursor_down(server, mode, true);
+            motion::scroll_up(server, mode, 1);
         }
     }
 }
@@ -181,14 +181,17 @@ pub fn scroll_timer(server: &mut Server, mode: ModeId) {
     let Some(d) = state::data(server, mode) else {
         return;
     };
+    if d.selection.cursordrag == CursorDrag::None {
+        return;
+    }
     let cy = d.cy;
     let sy = state::screen(server, mode).unwrap().grid.sy();
     if cy == 0 {
         arm(server, mode);
-        motion::cursor_up(server, mode, true);
+        motion::scroll_down(server, mode, 1);
     } else if cy == sy - 1 {
         arm(server, mode);
-        motion::cursor_down(server, mode, true);
+        motion::scroll_up(server, mode, 1);
     }
 }
 pub fn jump_to_mark(server: &mut Server, mode: ModeId) {

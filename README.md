@@ -74,6 +74,16 @@ Press **Ctrl-b**, then a key:
 | `:` | Enter a command |
 | `d` | Detach |
 
+### Mouse selection
+
+With `set -g mouse on`, hold the left button and drag to select. Scrolling the
+wheel while held keeps the selection under the pointer; holding it at the top
+or bottom edge keeps scrolling through history. Release stops edge scrolling.
+Your copy-mode binding still decides whether release copies and exits.
+
+This corrects tmux's vi-mode mouse scrolling behavior without changing vi
+keyboard navigation or the text anchors of a stopped selection.
+
 ## Native omp in Tern
 
 Install the bundled plugin once, then start a fresh omp inside rmux:

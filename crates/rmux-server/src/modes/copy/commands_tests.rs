@@ -391,6 +391,128 @@ fn vi_scroll_moves_the_cursor_first() {
     assert_eq!(f.cursor(), (0, 0, 0));
 }
 
+#[test]
+fn vi_mouse_wheel_extends_selection_until_release() {
+    let mut f = fixture(&["a", "b", "c", "d", "e", "f"], 10, 3, 50, true);
+    f.run(&["cursor-up"]);
+    f.run(&["begin-selection"]);
+    f.run(&["cursor-up"]);
+    assert_eq!(
+        select::get_selection(&mut f.server, f.mode).unwrap(),
+        b"e\nf"
+    );
+
+    let mut client = crate::client::Client::new(None, (0, 0));
+    client.session = Some(f.session);
+    client.drag.flag = 1;
+    let client = f.server.clients.insert(client).unwrap();
+    let scroll = |f: &mut Fixture, count, command| {
+        set_prefix(&mut f.server, f.mode, count);
+        keys::command(
+            &mut f.server,
+            f.mode,
+            Some(client),
+            Some(f.session),
+            None,
+            &Fixture::args(&[command]),
+            None,
+        );
+    };
+
+    scroll(&mut f, 2, "scroll-up");
+    assert_eq!(
+        select::get_selection(&mut f.server, f.mode).unwrap(),
+        b"c\nd\ne\nf"
+    );
+    assert_eq!(f.cursor(), (0, 0, 2));
+    scroll(&mut f, 1, "scroll-down");
+    assert_eq!(
+        select::get_selection(&mut f.server, f.mode).unwrap(),
+        b"d\ne\nf"
+    );
+    scroll(&mut f, 200, "scroll-up");
+    assert_eq!(
+        select::get_selection(&mut f.server, f.mode).unwrap(),
+        b"a\nb\nc\nd\ne\nf"
+    );
+
+    f.server.clients.get_mut(client).unwrap().drag.flag = 0;
+    scroll(&mut f, 2, "scroll-down");
+    assert_eq!(
+        select::get_selection(&mut f.server, f.mode).unwrap(),
+        b"a\nb\nc\nd\ne\nf"
+    );
+
+    f.run(&["begin-selection"]);
+    f.server.clients.get_mut(client).unwrap().drag.flag = 1;
+    scroll(&mut f, 2, "scroll-down-and-cancel");
+    assert!(!f.in_mode());
+}
+
+#[test]
+fn vi_mouse_edge_scroll_continues_at_both_edges_and_stops_on_release() {
+    for (bottom, first) in [
+        (false, b"d\ne\nf".as_slice()),
+        (true, b"b\nc\nd".as_slice()),
+    ] {
+        let mut f = fixture(&["a", "b", "c", "d", "e", "f"], 10, 3, 50, true);
+        if bottom {
+            f.run(&["history-top"]);
+        }
+        let window = f.server.windows.get_mut(f.window).unwrap();
+        window.panes.push(f.mode.owner);
+        window.active = Some(f.mode.owner);
+        let mut client = crate::client::Client::new(None, (0, 0));
+        client.session = Some(f.session);
+        client.drag.flag = 1;
+        let client = f.server.clients.insert(client).unwrap();
+        let y = if bottom { 2 } else { 0 };
+        let input = MouseInput {
+            valid: true,
+            session: Some(f.session),
+            window: Some(f.window),
+            pane: Some(f.mode.owner),
+            x: 0,
+            y,
+            last_x: 0,
+            last_y: 1,
+            status_at: -1,
+            ..MouseInput::default()
+        };
+        mouse::start_drag(&mut f.server, Some(client), &input);
+        assert_eq!(select::get_selection(&mut f.server, f.mode).unwrap(), first);
+        mouse::scroll_timer(&mut f.server, f.mode);
+        mouse::scroll_timer(&mut f.server, f.mode);
+        assert_eq!(
+            select::get_selection(&mut f.server, f.mode).unwrap(),
+            b"b\nc\nd\ne\nf"
+        );
+
+        let cursor = f.cursor();
+        let event = crate::client::ResolvedMouseEvent {
+            event: rmux_util::key::MouseEvent {
+                y,
+                ..Default::default()
+            },
+            target: crate::client::MouseTarget {
+                valid: true,
+                session: Some(f.session),
+                window: Some(f.window),
+                pane: Some(f.mode.owner),
+                status_at: -1,
+                ..Default::default()
+            },
+        };
+        mouse::drag_release(&mut f.server, f.mode, client, &event);
+        mouse::scroll_timer(&mut f.server, f.mode);
+        assert_eq!(f.cursor(), cursor);
+        assert_eq!(
+            select::get_selection(&mut f.server, f.mode).unwrap(),
+            b"b\nc\nd\ne\nf"
+        );
+    }
+}
+
 /// regress/copy-mode-scroll-exit.sh: `send-keys -N200 -X scroll-down` with a
 /// selection scrolls the view by more rows than the screen has.
 #[test]

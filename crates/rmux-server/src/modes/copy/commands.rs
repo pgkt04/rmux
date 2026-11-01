@@ -1586,18 +1586,24 @@ fn dragging(server: &Server, cs: &CopyCommandContext<'_>) -> bool {
         .is_some_and(|c| c.drag.flag != 0)
 }
 
-/// With a selection but no active drag, only scroll the view: freeze the
-/// endpoints and move the viewport by `np` rows (`window-copy.c:2443-2451`).
-fn view_only_scroll(
+/// Mouse drags follow the viewport; released selections keep their text anchors.
+fn scroll_selection(
     server: &mut Server,
     cs: &CopyCommandContext<'_>,
     towards_bottom: bool,
 ) -> bool {
-    if !state::data(server, cs.mode).is_some_and(|d| d.selection.active) || dragging(server, cs) {
+    let Some(data) = state::data(server, cs.mode) else {
+        return false;
+    };
+    if !data.selection.active {
         return false;
     }
-    let np = prefix(server, cs.mode);
-    if let Some(data) = state::data_mut(server, cs.mode) {
+    let (old_y, old_offset) = (data.cy, data.oy);
+    let mouse_drag = dragging(server, cs);
+    let mut np = prefix(server, cs.mode);
+    if mouse_drag {
+        np = np.min(data.backing.screen().grid.hsize());
+    } else if let Some(data) = state::data_mut(server, cs.mode) {
         data.selection.cursordrag = CursorDrag::None;
         data.selection.lineflag = LineSelectionDirection::None;
     }
@@ -1605,6 +1611,18 @@ fn view_only_scroll(
         motion::scroll_up(server, cs.mode, np);
     } else {
         motion::scroll_down(server, cs.mode, np);
+    }
+    if mouse_drag
+        && let Some(data) = state::data(server, cs.mode)
+        && data.oy != old_offset
+    {
+        let shifted_y = if data.oy > old_offset {
+            old_y.saturating_add(data.oy - old_offset)
+        } else {
+            old_y.saturating_sub(old_offset - data.oy)
+        };
+        let height = state::screen(server, cs.mode).unwrap().grid.sy();
+        render::redraw_selection(server, cs.mode, shifted_y.min(height.saturating_sub(1)));
     }
     true
 }
@@ -1620,7 +1638,7 @@ fn cmd_scroll_down(server: &mut Server, cs: &mut CopyCommandContext<'_>) -> Copy
         }
         return Nothing;
     }
-    if view_only_scroll(server, cs, true) {
+    if scroll_selection(server, cs, true) {
         return Nothing;
     }
     for _ in 0..prefix(server, cs.mode) {
@@ -1638,7 +1656,10 @@ fn cmd_scroll_down_and_cancel(
     server: &mut Server,
     cs: &mut CopyCommandContext<'_>,
 ) -> CopyCommandAction {
-    if view_only_scroll(server, cs, true) {
+    if scroll_selection(server, cs, true) {
+        if dragging(server, cs) && state::data(server, cs.mode).is_some_and(|d| d.oy == 0) {
+            return Cancel;
+        }
         return Nothing;
     }
     for _ in 0..prefix(server, cs.mode) {
@@ -1658,7 +1679,7 @@ fn cmd_scroll_up(server: &mut Server, cs: &mut CopyCommandContext<'_>) -> CopyCo
     if data.oy == data.backing.screen().grid.hsize() {
         return Nothing;
     }
-    if view_only_scroll(server, cs, false) {
+    if scroll_selection(server, cs, false) {
         return Nothing;
     }
     for _ in 0..prefix(server, cs.mode) {
