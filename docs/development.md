@@ -508,12 +508,16 @@ A broker-aware program's frame is acked when the viewer in use has drawn it
 (`tsp/client_runtime.rs::release_surface`). The viewer in use is the writable
 native viewer with the newest input, ties going to the lowest client id: the
 same client that leads presentation (`cell`, `dark`), picked by
-`tsp/contract.rs::viewer_in_use`. Other viewers don't gate the ack. A slow or
-stalled viewer just falls behind; once it runs out of credit its projection
-reconciles into a snapshot, and it catches up with a replay when it acks again.
-With no native viewer there is no ack. Until 2026-10-21 the ack waited for
-every viewer, so one slow client (a background phone tab) paced omp for
-everyone and `attach-session -d` was the workaround.
+`tsp/contract.rs::viewer_in_use`. Other viewers don't gate the ack. A viewer
+out of credit (rsttyd offers 2, and the status bar spends one whenever it
+changes) holds the coalesced pending ops until its next ack; only the
+`PENDING_OP_LIMIT`/`PENDING_BYTE_LIMIT` reconcile turns a slow or stalled
+viewer's projection into a snapshot that it catches up on with a replay. Until
+v0.6.2 any frame without credit did that, so fast typing next to a ticking
+`%H:%M:%S` bar resent the whole document (over 1 MB on a long omp session) a
+few times a second. With no native viewer there is no ack. Until 2026-10-21
+the ack waited for every viewer, so one slow client (a background phone tab)
+paced omp for everyone and `attach-session -d` was the workaround.
 Replay serialization reads canonical nodes/properties directly rather than
 allocating a temporary JSON document. One topology pass prepares routing and
 error coverage; root properties, child/settled order, focus/suspension, and all

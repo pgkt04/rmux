@@ -407,9 +407,6 @@ impl Projection {
             self.reconcile();
         }
         self.pending_revision = Some(accepted.revision);
-        if !self.has_credit() {
-            self.reconcile();
-        }
         for &index in &accepted.original_indices {
             let value = &frame.ops[index];
             match op_name(value) {
@@ -692,9 +689,7 @@ impl Projection {
             self.reconcile();
         }
         if !self.has_credit() {
-            if self.pending_revision.is_some() {
-                self.reconcile();
-            }
+            // Pending ops wait for the next ack; only the `admit` limits snapshot.
             return Ok(None);
         }
         if !self.snapshot_needed
@@ -1760,9 +1755,9 @@ mod tests {
                 );
                 assert_eq!(p.drawn_revision, 0);
                 assert_eq!(p.ack(first.sequence).unwrap(), 0);
-                let (_, snapshot) = send(&mut p, &d);
-                assert!(snapshot.replay);
-                assert_eq!(p.ack(snapshot.sequence).unwrap(), 1);
+                let (_, held) = send(&mut p, &d);
+                assert!(!held.replay, "a frame held without credit goes live");
+                assert_eq!(p.ack(held.sequence).unwrap(), 1);
             }
         }
     }
@@ -1900,12 +1895,16 @@ mod tests {
                 json!(["scroll", "a", "line-down"]),
             ],
         );
-        assert!(p.pending.len() <= 2);
+        // 4,980 `set`s of one node coalesce into one op.
+        assert_eq!(p.pending.len(), 4);
         assert!(p.pending_bytes < PENDING_BYTE_LIMIT);
         assert_eq!(p.drawn_revision, 0);
         p.ack(coverage.sequence).unwrap();
         let (replayed, coverage) = send(&mut p, &d);
-        assert!(coverage.replay);
+        assert!(
+            !coverage.replay,
+            "coalesced ops under the pending limits go live"
+        );
         assert!(!replayed.iter().any(|message| message.verb == b'o'));
         let replayed = frame(&replayed);
         let applied = view
@@ -1922,10 +1921,10 @@ mod tests {
                 json!(["scroll", "a", "line-down"])
             ]
         );
-        assert!(
-            p.map_error(&json!({"ev":"error","sf":"outer","s":coverage.sequence,"op":0}))
-                .unwrap()
-                .is_none()
+        // Op 0 is the coalesced `set`: two sources, so no single op to blame.
+        assert_eq!(
+            p.map_error(&json!({"ev":"error","sf":"outer","s":coverage.sequence,"op":0})),
+            Err(ProjectionError::ErrorMapping)
         );
         assert_eq!(p.ack(coverage.sequence).unwrap(), d.revision);
     }
