@@ -335,6 +335,7 @@ impl FakeTerminal {
             "sgr0=\x1b[0m",
             "colors=8",
             "AX=1",
+            "Ms=\x1b]52;%p1%s;%p2%s\x07",
         ]
         .into_iter()
         .map(ByteString::from)
@@ -1497,6 +1498,25 @@ fn frame_heads(terminal: &FakeTerminal, sent: usize) -> Vec<Value> {
         .filter(|(verb, _)| *verb == b'f')
         .map(|(_, body)| body["ops"][0].clone())
         .collect()
+}
+
+/// A native projection stands in for the pane's grid, not for the client's
+/// clipboard: the program's OSC 52 is the only way its copy reaches a remote
+/// terminal.
+#[test]
+fn program_copy_reaches_the_clipboard_of_a_native_client() {
+    let (mut server, pane, mut terminal) = stock_native();
+    let global = server.options.global;
+    server.options.set_number_value(global, b"set-clipboard", 2);
+    let sent = terminal.bytes.len();
+    pane_runtime::pane_parse_buffer(&mut server, pane, b"\x1b]52;c;aGVsbG8=\x07").unwrap();
+    terminal.pump(&mut server);
+    let written = &terminal.bytes[sent..];
+    assert_eq!(
+        String::from_utf8_lossy(written),
+        "\x1b]52;c;aGVsbG8=\x07",
+        "the copy alone, no grid draw under the projection"
+    );
 }
 
 /// rsttyd gives the whole pane to the grid on `["suspend"]`: the projection

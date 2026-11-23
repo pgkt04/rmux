@@ -323,9 +323,6 @@ fn select_client(
     client: &Client,
     invisible_panes: bool,
 ) -> Target {
-    if crate::tsp::broker::native_pane_client(client, snap.pane) {
-        return Target::Skip;
-    }
     // tty_client_ready
     if !info.ready || client.tty.is_none() {
         return Target::Skip;
@@ -420,6 +417,17 @@ impl PaneSink {
             let Some(client) = self.clients.get_mut(info.id) else {
                 continue;
             };
+            if crate::tsp::broker::native_pane_client(client, snap.pane) {
+                // The projection stands in for the pane's grid on this
+                // client, not for its clipboard: OSC 52 is how a program's
+                // copy reaches the terminal the user sits at.
+                if let (TtyCommandData::Selection { clip, data }, true, Some(tty)) =
+                    (data, info.ready, client.tty.as_mut())
+                {
+                    tty.set_selection(&mut self.tparm, clip, data);
+                }
+                continue;
+            }
             let target = select_client(snap, info, client, invisible_panes);
             let (wox, woy, wsx, wsy, bigger, yoff) = match target {
                 Target::Skip => continue,
