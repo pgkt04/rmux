@@ -156,10 +156,19 @@ fn command_stream_matches_pinned_oracle() {
         std::path::PathBuf::from(binary)
     } else {
         let executable = std::env::current_exe().expect("control test executable");
-        let profile = executable
+        let unit = executable
             .parent()
             .and_then(Path::parent)
-            .expect("Cargo test profile directory");
+            .expect("Cargo unit directory");
+        // `<profile>/deps/<test>` up to Cargo 1.99; under `<profile>/build/<package>/<hash>/` since.
+        let nested = unit.ancestors().nth(2).and_then(Path::file_name) == Some("build".as_ref());
+        let profile = if nested {
+            unit.ancestors()
+                .nth(3)
+                .expect("Cargo test profile directory")
+        } else {
+            unit
+        };
         let target = profile.parent().expect("Cargo target directory");
         let mut build = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()));
         build
