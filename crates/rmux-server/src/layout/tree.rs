@@ -166,8 +166,8 @@ pub fn debug_print(cells: &Cells, lc: Option<LayoutCellId>, hdr: &str, n: u32) {
         c.g.sy,
         width = n as usize
     );
-    for i in 0..c.children.len() {
-        debug_print(cells, Some(c.children[i]), hdr, n + 1);
+    for &child in &c.children {
+        debug_print(cells, Some(child), hdr, n + 1);
     }
 }
 

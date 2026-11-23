@@ -530,8 +530,8 @@ fn parse_fit<H: LayoutHost>(
 /// index receive the window's panes in list order.
 fn assign_from_ctx<H: LayoutHost>(host: &mut H, w: WindowId, pctx: &mut ParseCtx) {
     pctx.cctxs.sort_unstable_by_key(|c| c.index);
-    for i in 0..pctx.cctxs.len() {
-        let lc = pctx.cctxs[i].cell;
+    for (i, cctx) in pctx.cctxs.iter().enumerate() {
+        let lc = cctx.cell;
         let Some(&wp) = host.window_panes(w).get(i) else {
             break;
         };

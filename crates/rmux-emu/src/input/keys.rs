@@ -268,9 +268,7 @@ const fn build_table() -> [(KeyCode, KeyBytes); KEY_TABLE_LEN] {
     while a < table.len() {
         let mut b = a;
         while b > 0 && table[b - 1].0.0 > table[b].0.0 {
-            let tmp = table[b - 1];
-            table[b - 1] = table[b];
-            table[b] = tmp;
+            table.swap(b - 1, b);
             b -= 1;
         }
         a += 1;

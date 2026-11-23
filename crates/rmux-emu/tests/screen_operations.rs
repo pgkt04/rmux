@@ -271,8 +271,8 @@ fn writer_reset_drops_crlf_and_uses_only_requested_extended_mode() {
                 ),
                 (0, 0, 0, height - 1)
             );
-            for x in 0..17 {
-                assert_eq!(ctx.screen.tabs[x], x == 8 || x == 16);
+            for (x, tab) in ctx.screen.tabs[..17].iter().enumerate() {
+                assert_eq!(*tab, x == 8 || x == 16);
             }
             for y in 0..height {
                 assert_eq!(ctx.screen.grid.view_get_cell(0, y).data.data[0], b' ');
