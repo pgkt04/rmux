@@ -562,9 +562,18 @@ fn recompute_stock(
         return;
     };
     let changed = !same_stock_contract(state.contract.as_ref(), &contract);
+    // The hello reply told the program its features; it cannot be asked again.
+    let features = state
+        .contract
+        .as_ref()
+        .is_some_and(|old| old.features != contract.features)
+        .then(|| json!({"ev":"features","features":contract.features}));
     state.contract = Some(contract);
     if changed {
         close_pane_projections(server, pane);
+    }
+    if let Some(features) = features {
+        broker::event(server, pane, &features);
     }
     if returning {
         visible_event(server, pane, true);
@@ -1458,6 +1467,44 @@ mod tests {
             replies(&mut server, pane)
                 .iter()
                 .any(|message| { message["ev"] == "resize" && message["cols"] == 72 })
+        );
+    }
+
+    /// A stock program learns the features once, from its hello reply: a
+    /// viewer whose setting changes them afterwards is passed on.
+    #[test]
+    fn stock_program_hears_a_viewer_change_its_features() {
+        let (mut server, pane, session) = fixture();
+        let viewer = client(&mut server, session, true, false);
+        let offer = |server: &mut Server, features: &[&str]| {
+            let Capability::V1(hello) = &mut server.clients.get_mut(viewer).unwrap().tsp.capability
+            else {
+                panic!("fixture hello")
+            };
+            hello.features = features.iter().map(|f| (*f).to_owned()).collect();
+            recompute(server);
+        };
+        let heard = |server: &mut Server| -> Vec<serde_json::Value> {
+            replies(server, pane)
+                .into_iter()
+                .filter(|message| message["ev"] == "features")
+                .collect()
+        };
+        offer(&mut server, &["styles", "tray"]);
+        stock_hello(&mut server, pane);
+        recompute(&mut server);
+        assert!(heard(&mut server).is_empty(), "the hello reply said it");
+        offer(&mut server, &["styles"]);
+        assert_eq!(
+            heard(&mut server),
+            vec![json!({"ev":"features","features":["styles"]})]
+        );
+        recompute(&mut server);
+        assert!(heard(&mut server).is_empty(), "once for each change");
+        offer(&mut server, &["styles", "tray"]);
+        assert_eq!(
+            heard(&mut server),
+            vec![json!({"ev":"features","features":["styles","tray"]})]
         );
     }
 

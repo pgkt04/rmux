@@ -66,6 +66,7 @@ pub const FEATURES: &[&str] = &[
     "reduce-motion",
     "scroll",
     "styles",
+    "tray",
 ];
 const _: () = assert!(KINDS.len() <= 64 && FEATURES.len() <= 64);
 

@@ -664,6 +664,17 @@ fn cache_global(server: &mut Server, client: ClientId, value: &Value) {
                 hello.reduce_motion = Some(reduce);
             }
         }
+        // A host setting: the list replaces the hello's.
+        Some("features") => {
+            let Some(features) = value.get("features").and_then(Value::as_array) else {
+                return;
+            };
+            hello.features = features
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_owned)
+                .collect();
+        }
         _ => return,
     }
     broker::recompute(server);
@@ -752,7 +763,7 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
     if matches!(name, "rmux-view" | "rmux-ready" | "rmux-probe") {
         return;
     }
-    if matches!(name, "theme" | "motion") && value.get("sf").is_none() {
+    if matches!(name, "theme" | "motion" | "features") && value.get("sf").is_none() {
         cache_global(server, client, &value);
         return;
     }
@@ -1141,6 +1152,37 @@ mod tests {
 
     fn event(server: &mut Server, client: ClientId, value: Value) {
         client_message(server, client, b'e', &serde_json::to_vec(&value).unwrap());
+    }
+
+    /// A host setting changes what the host offers: the pane's contract
+    /// follows, as it does for a viewer with another hello.
+    #[test]
+    fn features_event_replaces_what_the_viewer_offers() {
+        let (mut server, pane, session, _) = fixture();
+        let client = add_client(&mut server, session);
+        let offered = |server: &Server| {
+            crate::tsp::contract::display_contract(server, pane)
+                .0
+                .map(|c| (c.features.contains("tray"), c.features.contains("styles")))
+        };
+        let Capability::V1(hello) = &mut server.clients.get_mut(client).unwrap().tsp.capability
+        else {
+            panic!("fixture hello")
+        };
+        hello.features = ["styles", "tray"].map(String::from).into();
+        assert_eq!(offered(&server), Some((true, true)));
+        event(
+            &mut server,
+            client,
+            json!({"ev":"features","features":["styles"]}),
+        );
+        assert_eq!(offered(&server), Some((false, true)));
+        event(
+            &mut server,
+            client,
+            json!({"ev":"features","features":["styles","tray"]}),
+        );
+        assert_eq!(offered(&server), Some((true, true)));
     }
 
     #[test]
