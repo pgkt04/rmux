@@ -1481,7 +1481,7 @@ mod tests {
             else {
                 panic!("fixture hello")
             };
-            hello.features = features.iter().map(|f| (*f).to_owned()).collect();
+            hello.features = features.iter().collect();
             recompute(server);
         };
         let heard = |server: &mut Server| -> Vec<serde_json::Value> {
@@ -1506,6 +1506,42 @@ mod tests {
             heard(&mut server),
             vec![json!({"ev":"features","features":["styles","tray"]})]
         );
+    }
+
+    /// The hello reply a stock program gets while `viewers` watch its pane.
+    fn program_hello_reply(viewers: &[serde_json::Value]) -> serde_json::Value {
+        let (mut server, pane, session) = fixture();
+        for hello in viewers {
+            let viewer = client(&mut server, session, true, false);
+            server.clients.get_mut(viewer).unwrap().tsp.capability =
+                Capability::V1(serde_json::from_value(hello.clone()).unwrap());
+        }
+        stock_hello(&mut server, pane);
+        replies(&mut server, pane)
+            .into_iter()
+            .find(|message| message["r"] == "hello")
+            .expect("a hello reply")
+    }
+
+    #[test]
+    fn program_is_offered_the_kinds_every_viewer_offers() {
+        let page = json!({"v":1,"kinds":["col","shell","doc"],"credits":2});
+        let hello = program_hello_reply(std::slice::from_ref(&page));
+        assert_eq!(hello["kinds"], json!(["col", "doc", "shell"]));
+        let plain = json!({"v":1,"kinds":["doc","col"],"credits":2});
+        let hello = program_hello_reply(&[page, plain]);
+        assert_eq!(hello["kinds"], json!(["col", "doc"]));
+    }
+
+    #[test]
+    fn program_is_offered_viewer_features_but_no_surface_mode() {
+        let page = json!({"v":1,"kinds":["col"],"credits":2,
+            "features":["aside","blobstore","flow","pace"]});
+        let hello = program_hello_reply(std::slice::from_ref(&page));
+        assert_eq!(hello["features"], json!(["aside", "blobstore", "pace"]));
+        let plain = json!({"v":1,"kinds":["col"],"credits":2,"features":["flow","pace"]});
+        let hello = program_hello_reply(&[page, plain]);
+        assert_eq!(hello["features"], json!(["pace"]));
     }
 
     #[test]

@@ -3317,8 +3317,11 @@ fn a_window_another_client_keeps_showing_parks_and_resumes_for_rsttyd_alone() {
     );
     let link = session::session_attach(&mut server, other, window, 0).unwrap();
     session::session_set_current(&mut server, other, Some(link));
-    let mut tern =
-        FakeTerminal::attach_with_hello(&mut server, Some(other), true, fixture_blobs_hello());
+    // The other host offers nothing rsttyd lacks, so the contract is its own
+    // list whether rsttyd watches or not.
+    let mut hello = fixture_blobs_hello();
+    hello["features"] = json!(["edit", "undo", "settle", "blobs"]);
+    let mut tern = FakeTerminal::attach_with_hello(&mut server, Some(other), true, hello);
     broker::recompute(&mut server);
     settle_replay(&mut server, &mut tern);
     assert_eq!(hidden_cap(&server, &tern), 0);

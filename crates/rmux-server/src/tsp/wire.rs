@@ -1,6 +1,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, HashMap},
+    sync::{LazyLock, Mutex, MutexGuard, PoisonError},
+};
 
 pub const APC_LIMIT: usize = 262_144;
 pub const JOINED_LIMIT: usize = 24 * 1024 * 1024;
@@ -8,110 +11,146 @@ pub const DA1: &[u8] = b"\x1b[c";
 pub const PANE_DA1: &[u8] = b"\x1b[?1;2c";
 pub const BROKER_ENV: &str = "RMUX_TSP";
 pub const BROKER_FEATURE: &str = "rmux-reprobe";
-pub const KINDS: &[&str] = &[
-    "col",
-    "row",
-    "card",
-    "section",
-    "rule",
-    "spacer",
-    "text",
-    "md",
-    "code",
-    "diff",
-    "ansi",
-    "math",
-    "image",
-    "kv",
-    "table",
-    "tree",
-    "badge",
-    "kbd",
-    "icon",
-    "spinner",
-    "shimmer",
-    "elapsed",
-    "progress",
-    "rate",
-    "list",
-    "item",
-    "tabs",
-    "editor",
-    "input",
-    "status",
-    "seg",
-    "overlay",
-    "toast",
-    "rows",
-    "picker",
-    "prefs",
-    "tool",
-    "checklist",
-    "agent",
-    "chart",
-    "meter",
-    "effort",
-    "block",
-    "el",
-];
-pub const TEXT_KINDS: &[&str] = &[
-    "text", "md", "code", "ansi", "math", "editor", "input", "shimmer", "el",
-];
-pub const FEATURES: &[&str] = &[
-    "blobs",
-    "settle",
-    "adopt",
-    "dock",
-    "program-palette",
-    "reduce-motion",
-    "scroll",
-    "styles",
-    "tray",
-];
-const _: () = assert!(KINDS.len() <= 64 && FEATURES.len() <= 64);
+/// Viewer features the program is not told about. A name belongs here only
+/// when it stands for a protocol part the broker would have to implement
+/// itself and does not, never for document content: `flow` is a surface mode
+/// and `SurfaceStore::open` takes `inline` and `screen` only.
+pub const WITHHELD_FEATURES: &[&str] = &["flow"];
+/// Kind and feature names come from a terminal: longer ones are ignored.
+pub const NAME_LIMIT: usize = 64;
+/// The distinct names one server remembers; later new names are ignored.
+const NAME_CAPACITY: usize = 256;
+const _: () = assert!(WITHHELD_FEATURES.len() < 64);
 
-/// A subset of [`KINDS`] or [`FEATURES`], one bit per entry. The broker
-/// recomputes the display contract on every loop turn, so it must compare and
-/// copy without allocating.
-#[derive(Clone, Copy, Debug)]
-pub struct NameSet {
-    table: &'static [&'static str],
-    bits: u64,
-}
-impl NameSet {
-    pub fn all(table: &'static [&'static str]) -> Self {
-        Self::matching(table, |_| true)
+/// Every kind and feature name a viewer has offered, each with its bit in a
+/// [`NameSet`]. Names are never forgotten, so a bit keeps its meaning; the
+/// limits bound what the server keeps for them.
+struct Names(HashMap<Box<str>, u8>);
+impl Names {
+    /// [`WITHHELD_FEATURES`] take the first bits, so their mask is constant.
+    fn new() -> Self {
+        let mut names = Self(HashMap::new());
+        for name in WITHHELD_FEATURES {
+            names.intern(name);
+        }
+        names
     }
-    pub fn matching(table: &'static [&'static str], mut keep: impl FnMut(&str) -> bool) -> Self {
-        let bits = table
+    fn bit(&self, name: &str) -> Option<u8> {
+        self.0.get(name).copied()
+    }
+    fn intern(&mut self, name: &str) -> Option<u8> {
+        if let Some(bit) = self.bit(name) {
+            return Some(bit);
+        }
+        if name.is_empty() || name.len() > NAME_LIMIT || self.0.len() >= NAME_CAPACITY {
+            return None;
+        }
+        let bit = u8::try_from(self.0.len()).ok()?;
+        self.0.insert(name.into(), bit);
+        Some(bit)
+    }
+    /// The names of `set`, sorted, so what a program reads does not depend
+    /// on which viewer's hello named a kind first.
+    fn of(&self, set: &NameSet) -> Vec<&str> {
+        let mut out: Vec<&str> = self
+            .0
             .iter()
-            .enumerate()
-            .filter(|(_, name)| keep(name))
-            .fold(0, |bits, (i, _)| bits | 1 << i);
-        Self { table, bits }
+            .filter(|(_, bit)| set.has(**bit))
+            .map(|(name, _)| &**name)
+            .collect();
+        out.sort_unstable();
+        out
+    }
+}
+static NAMES: LazyLock<Mutex<Names>> = LazyLock::new(|| Mutex::new(Names::new()));
+fn names() -> MutexGuard<'static, Names> {
+    NAMES.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// A set of kind or feature names, one bit per name in the server's name
+/// table. The broker recomputes the display contract on every loop turn, so
+/// it must intersect, compare and copy without allocating.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NameSet([u64; NAME_CAPACITY / 64]);
+impl NameSet {
+    const WITHHELD: Self = Self([(1 << WITHHELD_FEATURES.len()) - 1, 0, 0, 0]);
+
+    fn has(&self, bit: u8) -> bool {
+        self.0[usize::from(bit / 64)] & 1 << (bit % 64) != 0
     }
     pub fn contains(&self, name: &str) -> bool {
-        self.table
-            .iter()
-            .position(|entry| *entry == name)
-            .is_some_and(|i| self.bits & 1 << i != 0)
+        names().bit(name).is_some_and(|bit| self.has(bit))
     }
-    pub fn iter(&self) -> impl Iterator<Item = &'static str> + '_ {
-        self.table
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| self.bits & 1 << i != 0)
-            .map(|(_, name)| *name)
+    /// False for a name that is ignored: empty, over [`NAME_LIMIT`], or new
+    /// when the name table is full.
+    pub fn insert(&mut self, name: &str) -> bool {
+        let Some(bit) = names().intern(name) else {
+            return false;
+        };
+        self.0[usize::from(bit / 64)] |= 1 << (bit % 64);
+        true
+    }
+    pub fn intersection(self, other: Self) -> Self {
+        Self(std::array::from_fn(|i| self.0[i] & other.0[i]))
+    }
+    pub fn without(self, other: Self) -> Self {
+        Self(std::array::from_fn(|i| self.0[i] & !other.0[i]))
+    }
+    #[cfg(test)]
+    pub fn names(&self) -> Vec<String> {
+        names().of(self).into_iter().map(str::to_owned).collect()
     }
 }
-impl PartialEq for NameSet {
-    fn eq(&self, other: &Self) -> bool {
-        self.bits == other.bits && std::ptr::eq(self.table, other.table)
+impl<S: AsRef<str>> FromIterator<S> for NameSet {
+    fn from_iter<I: IntoIterator<Item = S>>(iter: I) -> Self {
+        let mut set = Self::default();
+        for name in iter {
+            set.insert(name.as_ref());
+        }
+        set
     }
 }
 impl Serialize for NameSet {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.collect_seq(self.iter())
+        serializer.collect_seq(names().of(self))
+    }
+}
+impl<'de> Deserialize<'de> for NameSet {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        /// One name of the list, added to the set without a copy of it.
+        struct Name<'a>(&'a mut NameSet);
+        impl<'de> serde::de::DeserializeSeed<'de> for Name<'_> {
+            type Value = ();
+            fn deserialize<D: serde::Deserializer<'de>>(self, d: D) -> Result<(), D::Error> {
+                d.deserialize_str(self)
+            }
+        }
+        impl serde::de::Visitor<'_> for Name<'_> {
+            type Value = ();
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a name")
+            }
+            fn visit_str<E>(self, name: &str) -> Result<(), E> {
+                self.0.insert(name);
+                Ok(())
+            }
+        }
+        struct List;
+        impl<'de> serde::de::Visitor<'de> for List {
+            type Value = NameSet;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a list of names")
+            }
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<NameSet, A::Error> {
+                let mut set = NameSet::default();
+                while seq.next_element_seed(Name(&mut set))?.is_some() {}
+                Ok(set)
+            }
+        }
+        deserializer.deserialize_seq(List)
     }
 }
 
@@ -132,9 +171,9 @@ pub struct Hello {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suspend: Option<u32>,
     #[serde(default)]
-    pub kinds: BTreeSet<String>,
+    pub kinds: NameSet,
     #[serde(default)]
-    pub features: BTreeSet<String>,
+    pub features: NameSet,
     #[serde(default = "default_apc")]
     pub apc: usize,
     #[serde(default = "default_credits")]
@@ -176,11 +215,14 @@ impl DisplayContract {
             return None;
         }
         let first = viewers[leader];
+        let offered = |set: fn(&Hello) -> NameSet| {
+            viewers
+                .iter()
+                .fold(set(first), |all, h| all.intersection(set(h)))
+        };
         Some(Self {
-            kinds: NameSet::matching(KINDS, |k| viewers.iter().all(|h| h.kinds.contains(k))),
-            features: NameSet::matching(FEATURES, |k| {
-                viewers.iter().all(|h| h.features.contains(k))
-            }),
+            kinds: offered(|h| h.kinds),
+            features: offered(|h| h.features).without(NameSet::WITHHELD),
             apc: viewers.iter().map(|h| h.apc).min()?.min(65536),
             credits: viewers.iter().map(|h| h.credits).min()?.min(2),
             cols,
@@ -360,9 +402,33 @@ mod tests {
         assert_eq!(contract.apc, 65536);
         assert!(!contract.features.contains("flow"));
         assert!(contract.features.contains("styles"));
-        assert_eq!(contract.kinds.iter().collect::<Vec<_>>(), ["col", "el"]);
+        assert_eq!(contract.kinds.names(), ["col", "el"]);
         h.credits = 0;
         assert!(DisplayContract::intersect(&[&h], 0, 80).is_none());
+    }
+    #[test]
+    fn viewer_names_are_bounded() {
+        let long = "k".repeat(NAME_LIMIT + 1);
+        let fits = "f".repeat(NAME_LIMIT);
+        let hello: Hello = serde_json::from_value(
+            json!({"v":1,"kinds":["col",long,""],"features":[fits,long,"flow"],"credits":2}),
+        )
+        .unwrap();
+        assert_eq!(hello.kinds.names(), ["col"]);
+        // The viewer's own list keeps what the program is not told.
+        assert_eq!(hello.features.names(), [fits.as_str(), "flow"]);
+        assert!(serde_json::from_value::<Hello>(json!({"v":1,"kinds":[1]})).is_err());
+
+        let mut names = Names::new();
+        for i in WITHHELD_FEATURES.len()..NAME_CAPACITY {
+            assert_eq!(names.intern(&format!("n{i}")), u8::try_from(i).ok());
+        }
+        assert_eq!(names.intern("late"), None);
+        assert_eq!(
+            names.intern(&format!("n{}", WITHHELD_FEATURES.len())),
+            u8::try_from(WITHHELD_FEATURES.len()).ok()
+        );
+        assert_eq!(names.0.len(), NAME_CAPACITY);
     }
     #[test]
     fn golden() {

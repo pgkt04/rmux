@@ -37,7 +37,7 @@ pub fn supported(hello: &Hello) -> bool {
     hello.features.contains("dock")
         && ["col", "status", "seg"]
             .iter()
-            .all(|kind| hello.kinds.contains(*kind))
+            .all(|kind| hello.kinds.contains(kind))
 }
 
 /// Redraw the client's status line and give it to its projection. True when

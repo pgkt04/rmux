@@ -1,4 +1,4 @@
-use super::wire::{Frame, KINDS, NameSet, TEXT_KINDS};
+use super::wire::{Frame, NameSet};
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Serialize, Serializer};
 use serde_json::{Map, Value, json};
@@ -55,7 +55,9 @@ pub struct TspDocument {
     pub revision: u64,
     pub palette: Option<Value>,
     pub sheets: Vec<(String, String)>,
-    kinds: NameSet,
+    /// The kinds the pane's contract offers; `None` before a contract, when
+    /// any kind is taken.
+    kinds: Option<NameSet>,
 }
 impl TspDocument {
     pub fn new(surface: impl Into<String>) -> Self {
@@ -81,11 +83,11 @@ impl TspDocument {
             revision: 0,
             palette: None,
             sheets: vec![],
-            kinds: NameSet::all(KINDS),
+            kinds: None,
         }
     }
     pub fn set_kinds(&mut self, kinds: NameSet) {
-        self.kinds = kinds;
+        self.kinds = Some(kinds);
     }
     pub fn size(&self) -> usize {
         self.nodes.len()
@@ -174,7 +176,7 @@ impl TspDocument {
             .get("k")
             .and_then(Value::as_str)
             .ok_or("node without kind")?;
-        if !self.kinds.contains(k) {
+        if self.kinds.is_some_and(|kinds| !kinds.contains(k)) {
             return Err(format!("unknown kind {k}"));
         }
         if self.has(id) || !seen.insert(id.into()) {
@@ -347,9 +349,6 @@ impl TspDocument {
             }
             "text" | "splice" => {
                 let n = self.node(id)?;
-                if !TEXT_KINDS.contains(&n.kind.as_str()) {
-                    return Err(format!("{id} ({}) has no primary text", n.kind));
-                }
                 let old = n.props.get("text").and_then(Value::as_str).unwrap_or("");
                 let text = a[arity - 1].as_str().ok_or("text must be string")?;
                 let next = if verb == "text" {
@@ -884,6 +883,47 @@ fn utf16_byte(s: &str, offset: u64) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn errors(document: &mut TspDocument, s: u64, op: Value) -> Vec<String> {
+        let frame = Frame {
+            sf: "logical".into(),
+            s,
+            ops: vec![op],
+        };
+        let result = document.apply_frame(&frame, 0).unwrap();
+        result.errors.into_iter().map(|e| e.msg).collect()
+    }
+
+    #[test]
+    fn node_kinds_follow_the_contract_not_a_list() {
+        let shell = json!(["add","sh","logical",null,{"id":"sh","k":"shell"}]);
+        let mut document = TspDocument::new("logical");
+        document.set_kinds(NameSet::from_iter(["col", "shell"]));
+        assert_eq!(errors(&mut document, 1, shell.clone()), [""; 0]);
+        assert!(document.has("sh"));
+        let mut document = TspDocument::new("logical");
+        document.set_kinds(NameSet::from_iter(["col"]));
+        assert_eq!(
+            errors(&mut document, 1, shell.clone()),
+            ["unknown kind shell"]
+        );
+        assert!(!document.has("sh"));
+        // No contract yet: nothing to check the kind against.
+        assert_eq!(errors(&mut TspDocument::new("logical"), 1, shell), [""; 0]);
+    }
+
+    #[test]
+    fn text_ops_edit_the_text_of_any_kind() {
+        let mut document = TspDocument::new("logical");
+        let doc = json!(["add","d","logical",null,{"id":"d","k":"doc","p":{"text":"# a"}}]);
+        assert_eq!(errors(&mut document, 1, doc), [""; 0]);
+        let append = json!(["text", "d", "append", "b"]);
+        assert_eq!(errors(&mut document, 2, append), [""; 0]);
+        assert_eq!(document.node("d").unwrap().props["text"], "# ab");
+        let splice = json!(["splice", "d", 0, 1, "="]);
+        assert_eq!(errors(&mut document, 3, splice), [""; 0]);
+        assert_eq!(document.node("d").unwrap().props["text"], "= ab");
+    }
 
     #[test]
     fn borrowed_replay_preserves_ages_payloads_and_replacement_state() {

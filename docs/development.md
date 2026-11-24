@@ -555,9 +555,21 @@ still pay the program's credits, and a `gone` or `error` on it rebuilds both
 projections. Teardown closes the screen surface, then the inline one with the
 grid restore. Another screen replacing the page keeps the covered inline.
 The broker runs on every loop turn, so its hot checks do not allocate: the
-display contract keeps kinds and features as bitsets over the static tables,
+display contract keeps kinds and features as bitsets (`tsp/wire.rs::NameSet`,
+one bit per name in a server-wide table of the names viewers have offered),
 borrows viewer hellos, and `project_pending` asks whether a contract exists
 without building one. Frames apply without cloning their ops.
+The broker passes through what it does not need to understand. A program is
+offered the kinds and features every viewer of its pane offers, whatever their
+names, less `WITHHELD_FEATURES`: features that stand for a protocol part the
+broker would have to implement itself (`flow`, a surface mode it does not
+take). A node's kind is checked against the pane's contract only, `text` and
+`splice` edit the `text` of any node, and a viewer event of any name on the
+shown surface goes to the program, except from a read-only client, for a node
+the document lacks, `edit`/`undo`/`send` the program's hello does not list,
+and the names the broker itself sends (`theme`, `motion`, `features`,
+`rmux-*`). Names come from a terminal: one that is empty or over 64 bytes is
+ignored, as is a new one once the table holds 256.
 A macOS pty moves at most 1 KiB per read or write, so a pane read drains what is
 there (up to 64 KiB) in one turn, and the tty keeps writing protocol bytes while
 the host drains them (up to 64 KiB per turn). Measured in headless Tern 0.8.4 on

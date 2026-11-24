@@ -760,7 +760,7 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
     let Some(name) = value.get("ev").and_then(Value::as_str) else {
         return;
     };
-    if matches!(name, "rmux-view" | "rmux-ready" | "rmux-probe") {
+    if name.starts_with("rmux-") {
         return;
     }
     if matches!(name, "theme" | "motion" | "features") && value.get("sf").is_none() {
@@ -904,10 +904,9 @@ fn client_event(
         rebuild_projection(server, client);
         return;
     }
-    if !matches!(
-        name,
-        "edit" | "undo" | "send" | "focus" | "action" | "change" | "select" | "activate" | "toggle"
-    ) {
+    // Any other name is the program's to understand, except the ones the
+    // broker itself tells the program: a viewer must not speak for all.
+    if matches!(name, "theme" | "motion" | "features") {
         return;
     }
     if server
@@ -959,16 +958,19 @@ fn client_event(
     else {
         return;
     };
-    let Some(id) = routed.get("id").and_then(Value::as_str) else {
-        return;
+    // An event about a node the program has since deleted is stale.
+    let stale = match routed.get("id") {
+        None => false,
+        Some(id) => !id.as_str().is_some_and(|id| {
+            server
+                .panes
+                .get(pane)
+                .and_then(|p| p.tsp.as_ref())
+                .and_then(|state| state.surfaces.get(surface_id))
+                .is_some_and(|surface| surface.document.has(id))
+        }),
     };
-    if !server
-        .panes
-        .get(pane)
-        .and_then(|p| p.tsp.as_ref())
-        .and_then(|state| state.surfaces.get(surface_id))
-        .is_some_and(|surface| surface.document.has(id))
-    {
+    if stale {
         return;
     }
     broker::event(server, pane, &routed);
@@ -1169,7 +1171,7 @@ mod tests {
         else {
             panic!("fixture hello")
         };
-        hello.features = ["styles", "tray"].map(String::from).into();
+        hello.features = ["styles", "tray"].into_iter().collect();
         assert_eq!(offered(&server), Some((true, true)));
         event(
             &mut server,
@@ -1321,6 +1323,56 @@ mod tests {
             json!({"ev":"edit","sf":sf,"id":"edit","text":"blocked"}),
         );
         assert!(server.panes.get(pane).unwrap().output.is_empty());
+    }
+
+    /// The broker keeps no list of the events a program understands.
+    #[test]
+    fn any_viewer_event_reaches_the_program_unless_readonly() {
+        let (mut server, pane, session, surface) = fixture();
+        let client = add_client(&mut server, session);
+        let sf = projection(&mut server, client, pane, surface);
+        let comment = json!({"ev":"comment","sf":sf,"id":"edit","quote":"dra","at":0,"note":"why"});
+        server
+            .clients
+            .get_mut(client)
+            .unwrap()
+            .flags
+            .insert(ClientFlags::READONLY);
+        event(&mut server, client, comment.clone());
+        assert!(server.panes.get(pane).unwrap().output.is_empty());
+        server
+            .clients
+            .get_mut(client)
+            .unwrap()
+            .flags
+            .remove(ClientFlags::READONLY);
+        // What the broker tells the program itself is not a viewer's to say.
+        for name in ["features", "theme", "rmux-view", "rmux-later"] {
+            event(
+                &mut server,
+                client,
+                json!({"ev":name,"sf":sf,"features":["flow"]}),
+            );
+        }
+        event(
+            &mut server,
+            client,
+            json!({"ev":"comment","sf":sf,"id":"missing"}),
+        );
+        // `undo` is not in the program's hello.
+        event(
+            &mut server,
+            client,
+            json!({"ev":"undo","sf":sf,"id":"edit"}),
+        );
+        assert!(server.panes.get(pane).unwrap().output.is_empty());
+        event(&mut server, client, comment);
+        let heard =
+            json!({"ev":"comment","sf":"logical","id":"edit","quote":"dra","at":0,"note":"why"});
+        assert_eq!(
+            server.panes.get(pane).unwrap().output,
+            WireMessage::json(b'e', &heard).encode()
+        );
     }
 
     #[test]
