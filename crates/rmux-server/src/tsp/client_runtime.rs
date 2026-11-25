@@ -735,7 +735,7 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
     if !matches!(verb, b'r' | b'e') {
         return;
     }
-    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+    let Ok(mut value) = serde_json::from_slice::<Value>(body) else {
         client_protocol_fault(server, client);
         return;
     };
@@ -756,6 +756,15 @@ pub fn client_message(server: &mut Server, client: ClientId, verb: u8, body: &[u
             _ => {}
         }
         return;
+    }
+    if value["ev"] == "checkout"
+        && value.get("sf").is_none()
+        && let Some(shown) = server
+            .clients
+            .get(client)
+            .and_then(|c| c.tsp.projection.as_ref())
+    {
+        value["sf"] = shown.outer.clone().into();
     }
     let Some(name) = value.get("ev").and_then(Value::as_str) else {
         return;
@@ -1373,6 +1382,36 @@ mod tests {
             server.panes.get(pane).unwrap().output,
             WireMessage::json(b'e', &heard).encode()
         );
+    }
+
+    #[test]
+    fn checkout_with_or_without_a_surface_reaches_the_shown_program() {
+        let (mut server, pane, session, surface) = fixture();
+        let client = add_client(&mut server, session);
+        let sf = projection(&mut server, client, pane, surface);
+        for report in [
+            json!({"ev":"checkout","shown":true}),
+            json!({"ev":"checkout","sf":sf,"shown":false}),
+        ] {
+            let expected = json!({"ev":"checkout","sf":"logical","shown":report["shown"]});
+            event(&mut server, client, report);
+            let output = &mut server.panes.get_mut(pane).unwrap().output;
+            assert_eq!(*output, WireMessage::json(b'e', &expected).encode());
+            output.clear();
+        }
+        event(
+            &mut server,
+            client,
+            json!({"ev":"checkout","sf":"stale","shown":true}),
+        );
+        server
+            .clients
+            .get_mut(client)
+            .unwrap()
+            .flags
+            .insert(ClientFlags::READONLY);
+        event(&mut server, client, json!({"ev":"checkout","shown":true}));
+        assert!(server.panes.get(pane).unwrap().output.is_empty());
     }
 
     #[test]

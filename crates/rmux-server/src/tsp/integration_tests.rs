@@ -1101,6 +1101,90 @@ fn stock_native_with_program(hello: Value, features: Value) -> (Server, PaneId, 
     (server, pane, terminal)
 }
 
+fn enable_osc7(server: &mut Server, client: ClientId) {
+    let tty = server
+        .clients
+        .get_mut(client)
+        .unwrap()
+        .tty
+        .as_mut()
+        .unwrap();
+    rmux_tty::features::parse_features("osc7", ",", &mut tty.host_mut().features);
+    tty.update_features(&mut server.tparm, &TtyOptions::default());
+}
+
+fn reported_paths(terminal: &FakeTerminal) -> Vec<&str> {
+    let mut paths = Vec::new();
+    for sequence in terminal.bytes.split(|b| *b == 0x1b) {
+        if let Some(body) = sequence.strip_prefix(b"]7;") {
+            let end = body.iter().position(|b| *b == 7).unwrap();
+            paths.push(std::str::from_utf8(&body[..end]).unwrap());
+        }
+    }
+    paths
+}
+
+#[test]
+fn native_path_follows_the_shown_window_with_titles_off() {
+    let (mut server, pane, mut terminal) = stock_native();
+    enable_osc7(&mut server, terminal.client);
+    let other = new_window(&mut server, &mut terminal, 1);
+    pane_runtime::pane_parse_buffer(&mut server, pane, b"\x1b]7;file://host/first%20pane\x07")
+        .unwrap();
+    pane_runtime::pane_parse_buffer(&mut server, other, b"\x1b]7;file://host/second\x07").unwrap();
+    crate::client::tick::tick(&mut server);
+    terminal.pump(&mut server);
+    assert!(reported_paths(&terminal).is_empty());
+
+    start_omp(&mut server, &mut terminal, other, "second", json!([]));
+    settle_replay(&mut server, &mut terminal);
+    assert_eq!(reported_paths(&terminal), ["file://host/second"]);
+    switch_window(&mut server, &mut terminal, b"\x020");
+    settle_replay(&mut server, &mut terminal);
+    pane_runtime::pane_parse_buffer(&mut server, pane, b"\x1b]7;file://host/changed\x07").unwrap();
+    settle_replay(&mut server, &mut terminal);
+    settle_replay(&mut server, &mut terminal);
+    assert_eq!(
+        reported_paths(&terminal),
+        [
+            "file://host/second",
+            "file://host/first%20pane",
+            "file://host/changed"
+        ]
+    );
+}
+
+#[test]
+fn native_path_reaches_writable_and_readonly_viewers_without_osc7() {
+    let (mut server, pane, mut first) = stock_native();
+    let session = server.clients.get(first.client).unwrap().session;
+    pane_runtime::pane_parse_buffer(&mut server, pane, b"\x1b]7;file://host/project\x07").unwrap();
+    settle_replay(&mut server, &mut first);
+    let mut second = FakeTerminal::attach(&mut server, session, true);
+    server
+        .clients
+        .get_mut(second.client)
+        .unwrap()
+        .flags
+        .insert(ClientFlags::READONLY);
+    settle_replay(&mut server, &mut second);
+    assert_eq!(reported_paths(&second), ["file://host/project"]);
+    server
+        .clients
+        .get_mut(second.client)
+        .unwrap()
+        .flags
+        .insert(ClientFlags::CONTROL);
+    pane_runtime::pane_parse_buffer(&mut server, pane, b"\x1b]7;file://host/new\x07").unwrap();
+    settle_replay(&mut server, &mut first);
+    second.pump(&mut server);
+    assert_eq!(
+        reported_paths(&first),
+        ["file://host/project", "file://host/new"]
+    );
+    assert_eq!(reported_paths(&second), ["file://host/project"]);
+}
+
 fn native_status_terminal() -> (Server, PaneId, FakeTerminal) {
     native_status_terminal_with(None)
 }

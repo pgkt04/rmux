@@ -649,6 +649,8 @@ fn rgb_underline_present_false_rgb_and_missing_store_hyperlinks() {
 #[test]
 fn cursor_styles_mouse_modes_colour_title_path_and_progress() {
     let (mut tty, _master, mut state) = fixture();
+    assert!(!tty.set_path(b"file:///project", false));
+    assert!(bytes(&mut tty).is_empty());
     tty.term_mut().apply(
         b"kmous=k:tsl=T:fsl=F:Swd=W:Spb=<v%p1%d,%p2%d>",
         false,
@@ -703,7 +705,7 @@ fn cursor_styles_mouse_modes_colour_title_path_and_progress() {
     tty.force_cursor_colour(&mut state, -1);
     assert_eq!(bytes(&mut tty), b"c");
     tty.set_title(b"a\0b");
-    tty.set_path(b"/x\0y");
+    assert!(tty.set_path(b"/x\0y", true));
     tty.set_progress_bar(
         &mut state,
         &ProgressBar {

@@ -505,13 +505,22 @@ impl Tty {
         self.puts(title);
         self.putcode(C::Fsl);
     }
-    pub fn set_path(&mut self, path: &[u8]) {
-        if !self.term().has(C::Swd) || !self.term().has(C::Fsl) {
-            return;
+    pub fn set_path(&mut self, path: &[u8], native: bool) -> bool {
+        if self.flags.contains(TtyFlags::BLOCK) {
+            return false;
         }
-        self.putcode(C::Swd);
-        self.puts(path);
-        self.putcode(C::Fsl);
+        if self.term().has(C::Swd) && self.term().has(C::Fsl) {
+            self.putcode(C::Swd);
+            self.puts(path);
+            self.putcode(C::Fsl);
+        } else if native {
+            self.puts(b"\x1b]7;");
+            self.puts(path);
+            self.puts(b"\x07");
+        } else {
+            return false;
+        }
+        true
     }
     pub fn set_progress_bar(&mut self, state: &mut TparmState, bar: &ProgressBar) {
         if self.term().has(C::Spb) {

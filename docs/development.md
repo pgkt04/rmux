@@ -346,7 +346,9 @@ Client command prompts and messages remain native when the viewer supports the
 dock/status kinds (prompts also require `input`); other overlays retain the cell
 fallback. The
 outer surface hides cell status, borders, titles, and scrollbars without
-changing saved options or layout. Its native dock includes the status strip and
+changing saved options or layout. A native viewer gets the shown pane's reported
+directory even with `set-titles` off. If terminfo lacks the path capabilities,
+rmux writes OSC 7 directly. Its native dock includes the status strip and
 active prompt/message; prefix keys remain rmux input. With `styles` and `el`,
 the strip projects color/attribute runs from the same rendered status grid as
 the tty, retaining inline styles and highlighted padding. Tern collapses white
@@ -568,7 +570,8 @@ take). A node's kind is checked against the pane's contract only, `text` and
 shown surface goes to the program, except from a read-only client, for a node
 the document lacks, `edit`/`undo`/`send` the program's hello does not list,
 and the names the broker itself sends (`theme`, `motion`, `features`,
-`rmux-*`). Names come from a terminal: one that is empty or over 64 bytes is
+`rmux-*`). A `checkout` event without `sf` refers to the shown surface.
+Names come from a terminal: one that is empty or over 64 bytes is
 ignored, as is a new one once the table holds 256.
 A macOS pty moves at most 1 KiB per read or write, so a pane read drains what is
 there (up to 64 KiB) in one turn, and the tty keeps writing protocol bytes while
