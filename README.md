@@ -104,6 +104,14 @@ The plugin switches between native and text views without losing your
 conversation or draft. Splits use text; zoom a pane or close the other pane
 to return to native. Rename and command prompts stay native.
 
+omp 19.2 and later choose their view once per start, so there the plugin
+restarts omp in place (omp's own `/restart`: same pane, same session, draft
+text kept) instead of switching live. It does that by itself only when omp is
+native in a pane that needs text, where rmux can show nothing but a note, and
+only once the agent is idle, because a restart ends the turn in flight and may
+end background jobs. Going back to native is left to you: omp says when the
+pane could be native again, and `/terminal-reprobe` restarts into it.
+
 The native bottom bar keeps your configured status text, colors and spacing,
 including window highlights, separators and inline `#[...]` styles.
 `bg=default` leaves it transparent. In light themes, 256-color and RGB colors

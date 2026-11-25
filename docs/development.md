@@ -617,8 +617,8 @@ from `PATH`:
 
 omp failures exit 1 with omp's output and status on stderr.
 
-The extension uses omp's public widget factory to obtain the live TUI and
-stops/starts only that UI to repeat
+Through omp 19.1 the extension uses omp's public widget factory to obtain the
+live TUI and stops/starts only that UI to repeat
 the stock program's `hello`, never restarting the agent or changing sessions.
 A read-only `rmux -C` observer with `no-output,ignore-size` subscribes to
 `pane_tsp_view`. Those subscriptions are reevaluated immediately after broker
@@ -672,6 +672,38 @@ split left omp native under the "zoom this pane" note; with the reattach, the
 same split switched omp to text and closing it returned to native. Five
 back-to-back `-d` attaches, a pane moved to another session, and a reattach
 that kept failing (three attempts, then the warning) were also exercised.
+
+omp 19.2 rebuilt its UI: a widget factory no longer receives the TUI, the
+renderer is chosen once in `startHost`, and neither a terminal message nor
+`suspend` changes it afterwards. When the factory yields no TUI the plugin
+takes the restart path instead. It reads `nativeRendering()` from
+`@oh-my-pi/pi-tui` and obtains the interactive mode by standing in once for
+`InteractiveMode.prototype.refreshTranscriptPresentation` while calling
+`ctx.ui.refreshTranscript([])`; that mode's `restart()` is omp's `/restart`
+(`execvp` in place, `--restore` of the session file, draft text carried over).
+Both host modules are imported inside the function so that an omp without
+those exports still loads the plugin, which then warns once. The observer
+subscribes to `#{pane_tsp_view} #{pane_in_mode} #{window_zoomed_flag}
+#{window_panes}`; the legacy path reads only the first field.
+The restart path acts on one mismatch only: omp native while the view is
+`ansi`, where viewers see the grid note. It never restarts for a pane mode,
+waits 300 ms when another pane shares the unzoomed window and 5 s for causes
+the formats do not name (menus, prompts, a plain viewer), then waits in 1 s
+steps until `ctx.isIdle()`, no message is pending and stdin is not paused.
+`RMUX_OMP_RESTARTED=<view>:<ms>` travels through the exec and is removed from
+the new process's environment at session start; a process restarted for
+`ansi` that is native again within 10 s warns instead of restarting again.
+Text while the view is `native` only notifies, once per process.
+`/terminal-reprobe` restarts into the pane's view when it differs and the
+agent is idle. Without a reachable `restart()` the plugin names `/restart`.
+Real omp 19.2.0 acceptance through the rsttyd native view, plugin 0.2.0, rmux
+0.7.0: native start; copy mode for 7 s without a restart; a split restarting
+idle omp into text within 0.6 s; the closed split leaving text with the
+notice; `/terminal-reprobe` restarting into native; a split during a 20 s
+bash turn restarting only after the turn ended, with the transcript restored;
+a typed draft carried across the restart; and a process started with a fresh
+`ansi` marker warning instead of restarting. omp 19.1.1 with the same file
+switched text and native across a split in one process.
 
 The executable installs panic/fatal reporting for both process roles before
 starting the client/internal server. Reports go to an owned state directory
