@@ -24,12 +24,14 @@ interface RestartingOmp {
 const VIEW_NAMES: Record<View, string> = { native: "native", ansi: "text" };
 /** Carries the view a restart was meant to reach into the process it starts. */
 const RESTARTED = "RMUX_OMP_RESTARTED";
-/** A restart that left omp native anyway is not repeated within this long. */
+/** A restart that did not reach its view is not repeated within this long. */
 const RESTART_LOOP_MS = 10_000;
 /** How long the pane must need text before omp restarts into it: another pane sharing the window stays. */
 const SHARED_SETTLE_MS = 300;
 /** The same, for causes rmux does not name (a menu, a prompt, a plain viewer): most end on their own. */
 const UNNAMED_SETTLE_MS = 5000;
+/** How long the pane must offer the native view before text omp restarts into it: text omp is usable meanwhile. */
+const NATIVE_SETTLE_MS = 1000;
 const BUSY_POLL_MS = 1000;
 
 function isLegacyTui(value: unknown): value is LegacyTui {
@@ -284,37 +286,34 @@ export default function (pi: ExtensionAPI) {
 		function reconcileRestarting(host: RestartingOmp) {
 			if (stopped || current !== generation || restarting !== host) return;
 			if (latestView !== "native" && latestView !== "ansi") return;
-			const native = host.native();
-			if (native === (latestView === "native")) return;
-			if (!native) {
-				// Text in a pane that could be native still shows omp: restarting is the user's call.
-				if (!hinted) {
-					hinted = true;
-					ctx.ui.notify("rmux: this pane can show omp natively; /terminal-reprobe restarts omp into that view", "info");
-				}
-				return;
-			}
-			// Native in a pane that needs text: rmux draws its note over omp until omp paints rows.
-			// A pane mode (copy mode) ends by itself and returns the native view.
-			if (inMode) return;
-			const delay = viewSince + (shared ? SHARED_SETTLE_MS : UNNAMED_SETTLE_MS) - Date.now();
+			const view = latestView;
+			if (host.native() === (view === "native")) return;
+			// Native in a pane that needs text shows only rmux's note until omp paints rows, but a
+			// pane mode (copy mode) ends by itself and returns the native view.
+			if (view === "ansi" && inMode) return;
+			const settle = view === "native" ? NATIVE_SETTLE_MS : shared ? SHARED_SETTLE_MS : UNNAMED_SETTLE_MS;
+			const delay = viewSince + settle - Date.now();
 			if (delay > 0) {
 				scheduleReconciliation(delay);
 				return;
 			}
-			if (restarted?.[1] === "ansi" && Date.now() - Number(restarted[2]) < RESTART_LOOP_MS) {
+			if (restarted?.[1] === view && Date.now() - Number(restarted[2]) < RESTART_LOOP_MS) {
 				if (!warned) {
 					warned = true;
-					ctx.ui.notify("rmux: omp restarted for the text view and is native again; zoom this pane, or use /terminal-reprobe", "warning");
+					ctx.ui.notify(`rmux: omp restarted for the ${VIEW_NAMES[view]} view and did not reach it; use /terminal-reprobe`, "warning");
 				}
 				return;
 			}
-			// A restart ends the turn in flight, so it waits for the agent.
-			if (busy(ctx)) {
+			if (!host.restart) {
+				// restartInto can only name /restart: once is enough.
+				if (hinted) return;
+				hinted = true;
+			} else if (busy(ctx)) {
+				// A restart ends the turn in flight, so it waits for the agent.
 				scheduleReconciliation(BUSY_POLL_MS);
 				return;
 			}
-			restartInto(host, "ansi", ctx);
+			restartInto(host, view, ctx);
 		}
 		const removeStartListener =
 			tui?.addStartListener(() => {

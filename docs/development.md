@@ -685,25 +685,29 @@ Both host modules are imported inside the function so that an omp without
 those exports still loads the plugin, which then warns once. The observer
 subscribes to `#{pane_tsp_view} #{pane_in_mode} #{window_zoomed_flag}
 #{window_panes}`; the legacy path reads only the first field.
-The restart path acts on one mismatch only: omp native while the view is
-`ansi`, where viewers see the grid note. It never restarts for a pane mode,
-waits 300 ms when another pane shares the unzoomed window and 5 s for causes
-the formats do not name (menus, prompts, a plain viewer), then waits in 1 s
-steps until `ctx.isIdle()`, no message is pending and stdin is not paused.
+The restart path restarts omp whenever its renderer differs from a `native`
+or `ansi` view. Native under `ansi`, where viewers see the grid note, never
+restarts for a pane mode and waits 300 ms when another pane shares the
+unzoomed window, 5 s for causes the formats do not name (menus, prompts, a
+plain viewer). Text under `native` waits 1 s. Either then waits in 1 s steps
+until `ctx.isIdle()`, no message is pending and stdin is not paused.
 `RMUX_OMP_RESTARTED=<view>:<ms>` travels through the exec and is removed from
-the new process's environment at session start; a process restarted for
-`ansi` that is native again within 10 s warns instead of restarting again.
-Text while the view is `native` only notifies, once per process.
-`/terminal-reprobe` restarts into the pane's view when it differs and the
-agent is idle. Without a reachable `restart()` the plugin names `/restart`.
+the new process's environment at session start; a process restarted for a
+view that still differs from it within 10 s warns instead of restarting
+again. `/terminal-reprobe` restarts into the pane's view when it differs and
+the agent is idle. Without a reachable `restart()` the plugin names `/restart`
+once.
 Real omp 19.2.0 acceptance through the rsttyd native view, plugin 0.2.0, rmux
 0.7.0: native start; copy mode for 7 s without a restart; a split restarting
-idle omp into text within 0.6 s; the closed split leaving text with the
-notice; `/terminal-reprobe` restarting into native; a split during a 20 s
-bash turn restarting only after the turn ended, with the transcript restored;
-a typed draft carried across the restart; and a process started with a fresh
-`ansi` marker warning instead of restarting. omp 19.1.1 with the same file
-switched text and native across a split in one process.
+idle omp into text within 0.6 s; `/terminal-reprobe` restarting into native;
+a split during a 20 s bash turn restarting only after the turn ended, with
+the transcript restored; a typed draft carried across the restart; and a
+process started with a fresh `ansi` marker warning instead of restarting.
+omp 19.1.1 with the same file switched text and native across a split in one
+process. Plugin 0.2.1, rmux 0.7.1: split, closed split, split, zoom and unzoom
+restarted into text, native, text, native and text in turn (0.4 s into text,
+1.2 s into native), and a text process started with a fresh `native` marker
+warned instead of restarting.
 
 The executable installs panic/fatal reporting for both process roles before
 starting the client/internal server. Reports go to an owned state directory
