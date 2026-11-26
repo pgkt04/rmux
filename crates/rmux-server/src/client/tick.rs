@@ -18,7 +18,7 @@
 //! Per-tick client work: `server_client_loop` and the helpers it calls
 //! (`server-client.c:1753-1990, 1993-2178, 2308-2540`).
 
-use crate::client::ClientFlags;
+use crate::client::{Client, ClientFlags};
 use crate::format::{FormatContext, FormatFlags, FormatTree};
 use crate::ids::*;
 use crate::model::pane::{
@@ -663,10 +663,6 @@ fn any_pane_redraw(server: &Server, c: ClientId, w: WindowId) -> bool {
 
 /// `server_client_check_redraw` (`server-client.c:2357-2478`).
 pub fn check_redraw(server: &mut Server, c: ClientId) {
-    if crate::tsp::broker::native_client(server, c) {
-        crate::tsp::status_bar::redraw(server, c);
-        return;
-    }
     let Some(client) = server.clients.get(c) else {
         return;
     };
@@ -674,6 +670,19 @@ pub fn check_redraw(server: &mut Server, c: ClientId) {
         .flags
         .intersects(ClientFlags::CONTROL | ClientFlags::SUSPENDED)
     {
+        return;
+    }
+    if crate::tsp::broker::native_client(server, c) {
+        if let Some(projection) = &client.tsp.projection
+            && projection.is_open_or_opening()
+            && let Some(path) = server
+                .panes
+                .get(projection.pane)
+                .and_then(|p| p.base.path.as_deref())
+        {
+            write_path(server.clients.get_mut(c).unwrap(), path, true);
+        }
+        crate::tsp::status_bar::redraw(server, c);
         return;
     }
     let Some(tty) = client.tty.as_ref() else {
@@ -916,15 +925,17 @@ pub fn set_path(server: &mut Server, c: ClientId) {
     let Some(p) = server.panes.get(active) else {
         return;
     };
-    let path = p.base.path.clone().unwrap_or_default();
-    let Some(client) = server.clients.get_mut(c) else {
-        return;
-    };
-    if client.path.as_deref() != Some(path.as_slice()) {
-        if let Some(tty) = client.tty.as_mut() {
-            tty.set_path(&path);
-        }
-        client.path = Some(path);
+    if let Some(client) = server.clients.get_mut(c) {
+        write_path(client, p.base.path.as_deref().unwrap_or_default(), false);
+    }
+}
+
+fn write_path(client: &mut Client, path: &[u8], native: bool) {
+    if client.path.as_deref() != Some(path)
+        && let Some(tty) = client.tty.as_mut()
+        && tty.set_path(path, native)
+    {
+        client.path = Some(path.to_vec());
     }
 }
 
